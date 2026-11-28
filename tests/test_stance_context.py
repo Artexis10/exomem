@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
@@ -403,6 +406,61 @@ def test_replacement_lookup_refuses_a_graph_newer_than_the_admitted_page(stance_
     assert published
     assert mixed["state"] == "unavailable" and mixed["items"] == []
     assert _stance(stance_vault)["state"] == "empty"
+
+
+def test_supporting_links_do_not_spend_replacement_coverage(stance_vault):
+    _write(stance_vault, "Knowledge Base/_Schema/relation-registry.yaml", (
+        "schema_version: 1\nextensions:\n"
+        "  x.retires: {parent: supersedes, description: Retires an earlier view}\n"
+    ))
+    _page(stance_vault, "global", "stance: true\n", body=(
+        "## Claim\n- id: old\n\nOld operating rule.\n\n"
+        "## Claim\n- id: relay\n\nUnrelated operating rule.\n"
+    ))
+    for report in range(3):
+        _page(stance_vault, f"inspection-{report}", "", body="\n".join(
+            f"## Claim\n- id: check-{index}\n- relations: supports: [[Notes/Insights/global#old]]\n\n"
+            f"Inspection {report} confirms reading {index}.\n"
+            for index in range(22)
+        ))
+    before = _stance(stance_vault)
+    assert before["state"] == "ready"
+    assert [item["text"] for item in before["items"]] == ["Old operating rule.", "Unrelated operating rule."]
+
+    _page(stance_vault, "reinspection", "", body=(
+        "## Claim\n- id: new\n- relations: x.retires: [[Notes/Insights/global#old]]\n\n"
+        "New operating rule.\n"
+    ))
+    after = _stance(stance_vault)
+    assert after["state"] == "ready"
+    assert [item["text"] for item in after["items"]] == ["Unrelated operating rule."]
+
+
+def test_fresh_cli_uses_existing_graph_for_current_stance(stance_vault):
+    _page(stance_vault, "global", "stance: true\n", body=(
+        "## Claim\n- id: old\n\nOld operating rule.\n\n"
+        "## Claim\n- id: relay\n\nUnrelated operating rule.\n"
+    ))
+    assert _stance(stance_vault)["state"] == "ready"
+    env = {
+        **os.environ, "EXOMEM_VAULT_PATH": str(stance_vault),
+        "EXOMEM_ACTIVATION_PACKET": "maps", "EXOMEM_LOG_DIR": str(stance_vault / "logs"),
+    }
+
+    def recall():
+        result = subprocess.run(
+            [sys.executable, "-m", "exomem", "recall_context", "--json", "--", "Which operating rule is current?"],
+            env=env, capture_output=True, text=True, check=True, timeout=30,
+        )
+        return json.loads(result.stdout)["data"]["stance"]
+
+    assert [item["text"] for item in recall()["items"]] == ["Old operating rule.", "Unrelated operating rule."]
+    _page(stance_vault, "inspection", "", body=(
+        "## Claim\n- id: new\n- relations: supersedes: [[Notes/Insights/global#old]]\n\n"
+        "New operating rule.\n"
+    ))
+    assert [item["text"] for item in _stance(stance_vault)["items"]] == ["Unrelated operating rule."]
+    assert [item["text"] for item in recall()["items"]] == ["Unrelated operating rule."]
 
 
 def test_hook_uses_supplied_or_generated_moves_and_stance_generation():

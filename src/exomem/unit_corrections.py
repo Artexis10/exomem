@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from . import (
     find,
     freshness,
     memory_refs,
+    readiness,
     relation_registry,
     request_budget,
 )
@@ -94,6 +96,7 @@ def discover(
         publication = None
         authority = None
         stored = None
+        standalone_token = None
         current_reader = keep.fresh(withheld=frozenset()) if isinstance(keep, egress.ReaderView) else None
         if current_reader is not None and (admission := admission_of(current_reader)) is not None:
             authority = admission.identity()
@@ -114,9 +117,9 @@ def discover(
             checkpoint = (
                 stored if stored is not None else freshness.live_recall_checkpoint(root, "vault")
             )
-            if checkpoint is None:
-                return result("unavailable")
             if replacement_nodes is None:
+                if checkpoint is None:
+                    return result("unavailable")
                 resolver = find.recall_resolver_snapshot_at_checkpoint(root, checkpoint)
                 if resolver is None:
                     return result("unavailable")
@@ -124,7 +127,16 @@ def discover(
             else:
                 # The unrestricted lookup starts with exact graph keys and never resolves a page name.
                 resolver = None
-                conn = index._open_read_snapshot(live_only=True, check=check_deadline)
+                if checkpoint is not None:
+                    conn = index._open_read_snapshot(live_only=True, check=check_deadline)
+                if conn is None and stored is None and budget is None and not readiness.runtime_managed():
+                    # A one-shot reader uses the ordinary proof of an inherited graph generation.
+                    conn = index._open_read_snapshot(prove=epistemic_graph.SINGLE_FLIGHT)
+                    if conn is not None:
+                        standalone_token = epistemic_graph.snapshot_cache_token(conn)
+                        if standalone_token is None:
+                            return result("unavailable")
+                        deadline = time.monotonic() + REPLACEMENT_SECONDS
             if conn is None:
                 return result("unavailable")
             instance = conn.execute("SELECT value FROM main.graph_meta WHERE key = 'instance'").fetchone()
@@ -139,6 +151,12 @@ def discover(
 
         def still_current() -> bool:
             check_deadline()
+            if standalone_token is not None:
+                latest = index._open_read_snapshot(prove=False)
+                if latest is None:
+                    return False
+                with closing(latest):
+                    return epistemic_graph.snapshot_cache_token(latest) == standalone_token
             if publication is not None:
                 final_reader = keep.fresh(withheld=frozenset())
                 final_admission = admission_of(final_reader)

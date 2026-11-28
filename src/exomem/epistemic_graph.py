@@ -16950,14 +16950,19 @@ class GraphView:
         ).fetchone()
         if different is not None:
             return None
+        replacing, relation_parameters = _family_relation_predicate(
+            relation_registry.core_registry(), (), self.interpretations, ("replaces",),
+        )
+        self._check()
         # The neutral row can land elsewhere. The selected parser owns the exact end.
         rows = self.conn.execute(
             f"SELECT predecessor.key, {EDGE_COLUMNS} FROM json_each(?) AS predecessor "
             "CROSS JOIN graph_edges AS e ON e.dst_page_key = 'file:' || predecessor.key "
             "WHERE e.origin = 'semantic_relation' AND e.source_path <> predecessor.key "
+            f"AND {replacing} "
             "AND json_extract(e.metadata, '$.target_fragment') IS NOT NULL "
             "LIMIT ?",
-            (pages, edge_limit + 1),
+            (pages, *relation_parameters, edge_limit + 1),
         ).fetchall()
         sources = {str(row[11]) for row in rows}
         if len(rows) > edge_limit or len(sources) > source_limit:
