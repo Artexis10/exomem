@@ -12,7 +12,7 @@
 
 ## 3. Delivery checks
 
-- [ ] 3.1 Add a `user-notes/` entry. Run the scoped suites, the guard modules in `tests/pr_guard_modules.txt` and the read-surface test.
+- [x] 3.1 Add a `user-notes/` entry. Run the scoped suites, the guard modules in `tests/pr_guard_modules.txt` and the read-surface test.
 - [ ] 3.2 Measure where Google's `photoTakenTime` comes from, on the owner's own Google Photos Takeout zip, which sits on the laptop.
   1. Read the zip locally, not from a stage: the archive door cannot take a Takeout part, and a stage keeps no member times.
   2. For each sidecar, compare `photoTakenTime` and `creationTime` with the modification time of its photo's zip member and with the image's EXIF capture time. Count the shares that agree, apart for the screenshots, scans and chat images that state no capture time.

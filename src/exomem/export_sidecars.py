@@ -31,7 +31,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Protocol
 
-from . import export_pairing, export_parsers, export_photos, import_stage, preserve, source_formats
+from . import export_pairing, export_parsers, export_photos, import_stage, source_formats
 from .capture_metadata import KINDS
 from .media_types import media_type_for
 
@@ -393,6 +393,8 @@ def _examine(path: Path, known: tuple[source_formats.SourceFormat, ...]) -> tupl
 
 def _row(path: str, key: export_pairing.Key, document: dict) -> dict:
     """One sidecar's row. The caption is redacted as an upload's description is (`preserve`), before it reaches disk."""
+    from . import preserve
+
     _text, redacted, _extracted, _warnings = preserve.redact_capture_text(description=export_photos.caption_of(document))
     return {
         "sidecar": path, "base": key.base, "copy": key.copy, "limit": key.at_limit, "title": key.title,
