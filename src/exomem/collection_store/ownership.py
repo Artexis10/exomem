@@ -386,11 +386,12 @@ _READ: ContextVar[ReadScope | None] = ContextVar("collection_ownership_read", de
 
 
 class ReadScope:
-    def __init__(self, root, *, initial=None):
+    def __init__(self, root, *, initial=None, verify=None):
         # A decision set's resolution scope resolves the root once; `finish` proves it again.
         self.root = state_paths.resolved_vault_path(root, expanduser=False)
         # A proof the caller made earlier skips this scope's own; `finish` still proves again and compares.
         self.initial = initial
+        self.verify = verify
         self.store_enrolled = False
         self.finished = False
 
@@ -428,7 +429,7 @@ class ReadScope:
                 writer = bound_writer(self.root)
                 private = writer is not None and not production_bound(self.root)
                 current = resolve(self.root, private=private, path=writer.handle.path if private else None)
-            if current.binding == self.initial.binding:
+            if current.binding == self.initial.binding and (self.verify is None or self.verify()):
                 return
         except Exception:  # noqa: BLE001 - an unresolved final binding cannot release the earlier payload
             pass
@@ -450,12 +451,12 @@ class ReadScope:
 
 
 @contextmanager
-def read_scope(root, *, finalize=False, initial=None):
+def read_scope(root, *, finalize=False, initial=None, verify=None):
     previous = _READ.get()
     if previous is not None and previous.root == state_paths.resolved_vault_path(root, expanduser=False):
         yield previous
         return
-    scope = ReadScope(root, initial=initial)
+    scope = ReadScope(root, initial=initial, verify=verify)
     token = _READ.set(scope)
     try:
         yield scope

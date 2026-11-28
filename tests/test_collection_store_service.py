@@ -1608,6 +1608,137 @@ def test_import_status_answers_from_a_snapshot_while_a_batch_keeps_the_store_thr
     assert set(done["activity"].values()) == {None} and (done["resumable"], done["cancellable"]) == (False, False)
 
 
+def test_a_records_query_reads_the_last_commit_while_the_store_thread_is_busy(service, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    root = service.root
+    query = dict(action="query", collection=CID, limit=10, columns=["title"])
+    expected = call(root, "record_memory", **query)
+    entered, release = threading.Event(), threading.Event()
+
+    def occupy():
+        entered.set()
+        assert release.wait(10)
+
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        busy = worker.submit(runtime._server(root).call, occupy, wake_maintenance=False)
+        try:
+            assert entered.wait(5)
+            with monkeypatch.context() as short:
+                short.setattr(service.manager, "_mutation_timeout_seconds", 0.5)
+                result = call(root, "record_memory", **query)
+            assert result["rows"] == expected["rows"]
+            assert result["snapshot"] == expected["snapshot"]
+            assert not busy.done()
+        finally:
+            release.set()
+            busy.result(timeout=5)
+
+
+def test_a_records_query_returns_during_an_active_derivation_slice(service, monkeypatch):
+    from exomem.vault_store import derivation, mode
+
+    root, server = service.root, runtime._server(service.root)
+    query = dict(action="query", collection=CID, limit=10, columns=["title"])
+    expected = call(root, "record_memory", **query)
+    entered, release = threading.Event(), threading.Event()
+    started = derivation.started
+
+    def defer_derivation(*args, **kwargs):
+        if threading.current_thread() is server.thread and not entered.is_set():
+            entered.set()
+            assert release.wait(10)
+        return started(*args, **kwargs)
+
+    # Exercise the store thread's derivation turn in this Records-only fixture.
+    monkeypatch.setattr(mode, "store_mode_for_reads", lambda _root: threading.current_thread() is server.thread)
+    monkeypatch.setattr(derivation, "started", defer_derivation)
+    derivation.owe(root)
+    with server._condition:
+        server._condition.notify_all()
+    try:
+        assert entered.wait(5)
+        with monkeypatch.context() as short:
+            short.setattr(service.manager, "_mutation_timeout_seconds", 0.5)
+            result = call(root, "record_memory", **query)
+        assert result["rows"] == expected["rows"]
+        assert result["snapshot"] == expected["snapshot"]
+    finally:
+        release.set()
+
+
+def test_records_reader_capacity_keeps_withheld_and_missing_collections_indistinguishable(service):
+    from test_collection_field_admission import GUEST
+    from test_governance_egress import write_rule, write_scope
+
+    from exomem.query_engine.runtime import QueryLimits, query_snapshot
+
+    root = service.root
+    write_scope(root, paths="Records/**", default_deny=True)
+    write_rule(root, ceiling=0, audience=GUEST.audience_id)
+    path = connection.store_path(root)
+    limits = QueryLimits(profile="records")
+    command = next(command for command in commands.product_commands_for("mcp") if command.name == "record_memory")
+    replies = []
+    with query_snapshot(path, limits=limits), query_snapshot(path, limits=limits), request_scope(GUEST):
+        for selector in (CID, "99999999-9999-4999-8999-999999999999"):
+            with pytest.raises(OpError) as error:
+                writer_lease.invoke_command(command, root, action="query", collection=selector, columns=["title"])
+            replies.append(error.value.as_public_dict())
+    assert replies[0] == replies[1] and replies[0]["code"] == "COLLECTION_NOT_FOUND"
+
+
+def test_a_sourced_append_commits_while_a_records_query_keeps_its_snapshot(original_service, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from exomem import provenance
+    from exomem.query_engine.runtime import ReadSession
+
+    service, reference, _, payload, _ = original_service
+    root = service.root
+    body = provenance.encode_origin({"inputs": {"original": {"representation": "original",
+        "reference": reference, "version": hashlib.sha256(payload).hexdigest(), "size": len(payload)}},
+        "assessments": [], "bindings": []}) + "\nRetain the observation.\n"
+    query = dict(action="query", collection=CID, limit=10, columns=["title"])
+    expected = call(root, "record_memory", **query)
+    selected, release = threading.Event(), threading.Event()
+    occupied, free_store = threading.Event(), threading.Event()
+    admit = ReadSession.admit
+
+    def occupy():
+        occupied.set()
+        assert free_store.wait(10)
+
+    def pause_selection(session, collection_id, *args, **kwargs):
+        if not selected.is_set():
+            selected.set()
+            assert release.wait(10)
+        return admit(session, collection_id, *args, **kwargs)
+
+    monkeypatch.setattr(ReadSession, "admit", pause_selection)
+    with ThreadPoolExecutor(max_workers=2) as worker:
+        active = worker.submit(runtime._server(root).call, occupy, wake_maintenance=False)
+        assert occupied.wait(5)
+        reading = worker.submit(call, root, "record_memory", **query)
+        try:
+            assert selected.wait(5)
+            free_store.set()
+            active.result(timeout=5)
+            append = call(root, "record_memory", action="append", collection=CID, item={"title": "Later row"},
+                          item_key=LATER, body=body, why="record the later row")
+            assert append["outcome"] == "committed"
+            assert not reading.done()
+        finally:
+            free_store.set()
+            release.set()
+        before = reading.result(timeout=8)
+    after = call(root, "record_memory", **query)
+    assert before["rows"] == expected["rows"]
+    assert before["snapshot"] == expected["snapshot"]
+    assert [row["title"] for row in after["rows"]] == ["Later row"]
+    assert after["snapshot"] != expected["snapshot"]
+
+
 def test_a_file_collection_title_answers_while_the_store_thread_is_held(service, monkeypatch):
     """Defect: a title queued on the store thread to learn which collection it names, so a file
     collection's title waited out whatever held that thread, which the same collection's path never does."""

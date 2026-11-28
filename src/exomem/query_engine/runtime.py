@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -505,16 +505,26 @@ def _summary_released(operation, collection_id: str, *, visit_rows: bool = True)
     return release is not None and release.complete
 
 
-@contextmanager
-def read_session(root: Path, store_path: Path, *, limits: QueryLimits | None = None,
-                 cancelled: Callable[[], bool] | None = None,
-                 deadline: Deadline | None = None) -> Iterator[ReadSession]:
-    """Own a fresh connection, snapshot, evaluator and admission until return.
+@dataclass(frozen=True, slots=True)
+class QuerySnapshot:
+    target: Path
+    profile: str
+    connection: sqlite3.Connection
+    attached: bool
 
-    ``deadline`` shares a request's deadline; by default the session starts its own from ``limits``.
-    """
-    limits = limits or QueryLimits()
-    deadline = deadline or Deadline(limits.timeout_ms)
+
+def _sqlite_refusal(error: sqlite3.Error) -> QueryError:
+    code = getattr(error, "sqlite_errorcode", 0) & 255
+    if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+        return QueryError("QUERY_BUSY")
+    if code in (sqlite3.SQLITE_FULL, sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM):
+        return QueryError("QUERY_COST_LIMIT")
+    return QueryError("QUERY_UNAVAILABLE")
+
+
+@contextmanager
+def query_snapshot(store_path: Path, *, limits: QueryLimits) -> Iterator[QuerySnapshot]:
+    """Own one reader slot and a transaction on a read-only main database."""
     target = Path(store_path).resolve()
     analytics = limits.profile == "analytics"
     with _READERS_GUARD:
@@ -523,61 +533,69 @@ def read_session(root: Path, store_path: Path, *, limits: QueryLimits | None = N
         _READERS[target] = _READERS.get(target, 0) + 1
         if analytics:
             _ANALYTICS[target] = _ANALYTICS.get(target, 0) + 1
-    conn = session = token = None
     try:
-        conn = connection.open_query_reader(target, busy_timeout_ms=limits.timeout_ms)
-        conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 1024 * 1024)
-        attached = derived_rows.attach(conn, target)
+        with ExitStack() as opened:
+            try:
+                conn = opened.enter_context(closing(connection.open_query_reader(target, busy_timeout_ms=limits.timeout_ms)))
+                conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 1024 * 1024)
+                attached = derived_rows.attach(conn, target)
+                page_size = conn.execute("PRAGMA temp.page_size").fetchone()[0]
+                conn.execute(f"PRAGMA temp.max_page_count={max(1, limits.max_temp_bytes // page_size)}")
+                conn.execute("BEGIN")
+            except sqlite3.Error as error:
+                raise _sqlite_refusal(error) from error
+            except (connection.CollectionStoreError, connection.CollectionStoreUnavailable) as error:
+                raise QueryError("QUERY_UNAVAILABLE") from error
+            yield QuerySnapshot(target, limits.profile, conn, attached)
+    finally:
+        with _READERS_GUARD:
+            _READERS[target] -= 1
+            if not _READERS[target]:
+                del _READERS[target]
+            if analytics:
+                _ANALYTICS[target] -= 1
+                if not _ANALYTICS[target]:
+                    del _ANALYTICS[target]
+
+
+@contextmanager
+def read_session(root: Path, store_path: Path, *, limits: QueryLimits | None = None,
+                 cancelled: Callable[[], bool] | None = None, deadline: Deadline | None = None,
+                 snapshot: QuerySnapshot | None = None) -> Iterator[ReadSession]:
+    """Own a query evaluator and admission on a fresh or already open snapshot."""
+    limits = limits or QueryLimits()
+    deadline = deadline or Deadline(limits.timeout_ms)
+    if snapshot is not None and (snapshot.target != Path(store_path).resolve() or snapshot.profile != limits.profile):
+        raise QueryError("QUERY_UNAVAILABLE", "the read snapshot belongs to a different query")
+    reader = query_snapshot(store_path, limits=limits) if snapshot is None else nullcontext(snapshot)
+    with reader as active:
+        conn = active.connection
         session = ReadSession(Path(root), conn, limits, cancelled, deadline)
-        session._attached = attached
+        session._attached = active.attached
         token = _CURRENT_SESSION.set(session)
         conn.set_progress_handler(session._progress, _PROGRESS_PERIOD)
-        page_size = conn.execute("PRAGMA temp.page_size").fetchone()[0]
-        conn.execute(f"PRAGMA temp.max_page_count={max(1, limits.max_temp_bytes // page_size)}")
-        conn.execute("BEGIN")
-        session.check()
-        session._authorization = governance.OperationAuthorization(
-            Path(root), conn, mutation=False, cache=_UncachedRelease(conn),
-        )
-        session.check()
-        yield session
-        session.check_temp()
-    except sqlite3.Error as error:
-        if session is not None:
-            session.check()
-        code = getattr(error, "sqlite_errorcode", 0) & 255
-        if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
-            raise QueryError("QUERY_BUSY") from error
-        if code in (sqlite3.SQLITE_FULL, sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM):
-            raise QueryError("QUERY_COST_LIMIT") from error
-        raise QueryError("QUERY_UNAVAILABLE") from error
-    except (connection.CollectionStoreError, connection.CollectionStoreUnavailable) as error:
-        raise QueryError("QUERY_UNAVAILABLE") from error
-    finally:
         try:
-            if conn is not None:
-                conn.set_progress_handler(None, 0)
-            if session is not None:
-                session._active = False
-                session._admitted.clear()
-                session._queries.clear()
-                for cursor in session._cursors:
-                    cursor.close()
-                try:
-                    if session._authorization is not None:
-                        session._authorization.close()
-                finally:
-                    conn.close()
-            elif conn is not None:
-                conn.close()
+            session.check()
+            session._authorization = governance.OperationAuthorization(
+                Path(root), conn, mutation=False, cache=_UncachedRelease(conn),
+            )
+            session.check()
+            yield session
+            session.check_temp()
+        except sqlite3.Error as error:
+            session.check()
+            raise _sqlite_refusal(error) from error
+        except (connection.CollectionStoreError, connection.CollectionStoreUnavailable) as error:
+            raise QueryError("QUERY_UNAVAILABLE") from error
         finally:
-            if token is not None:
+            conn.set_progress_handler(None, 0)
+            session._active = False
+            session._admitted.clear()
+            session._queries.clear()
+            for cursor in session._cursors:
+                cursor.close()
+            try:
+                if session._authorization is not None:
+                    session._authorization.close()
+            finally:
                 _CURRENT_SESSION.reset(token)
-            with _READERS_GUARD:
-                _READERS[target] -= 1
-                if not _READERS[target]:
-                    del _READERS[target]
-                if analytics:
-                    _ANALYTICS[target] -= 1
-                    if not _ANALYTICS[target]:
-                        del _ANALYTICS[target]

@@ -9377,11 +9377,20 @@ def _collection_store_thread(func):
                     command.name, injected[0], kwargs, write=not (read_only or import_status)
                 )
                 server = routing.server
-                if server is not None and import_status and read_only:
-                    # Status answers while a batch keeps the store thread busy: it reads the store's
-                    # last commit on this thread, under the proof that routed it.
+                records_query = (command.name == "record_memory" and kwargs.get("action") == "query"
+                                 and kwargs.get("view") is None and kwargs.get("query") is None)
+                if server is not None and records_query and server.has_competing_work():
+                    from .governance.egress import unrestricted_source_access
+                    from .governance.principal import effective_principal
+
+                    principal = effective_principal()
+                    records_query = unrestricted_source_access(server.root, purpose=principal.purpose, principal=principal)
+                else:
+                    records_query = False
+                if server is not None and read_only and (import_status or records_query):
+                    # These reads can answer from the last commit while a batch occupies the store thread.
                     return server.read_beside(lambda: func(command, *injected, **kwargs), initial=routing.proof,
-                                              collection=kwargs.get("collection"))
+                                              collection=kwargs.get("collection"), records_query=records_query)
                 if server is not None:
                     if needs_acquisition_request(command.name, kwargs):
                         return server.call_record_request(

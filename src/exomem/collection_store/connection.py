@@ -475,13 +475,14 @@ class SnapshotHandle:
     """
 
     def __init__(self, path: Path, conn: sqlite3.Connection, live: WriterConnection, *,
-                 derived: bool = True) -> None:
+                 derived: bool = True, query_snapshot=None) -> None:
         from types import MappingProxyType
 
         from . import derived_rows
 
         self.path = path
         self.connection = conn
+        self.query_snapshot = query_snapshot
         self._owner_thread = threading.get_ident()
         self._closed = False
         self._release_cache = None

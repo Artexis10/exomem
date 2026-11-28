@@ -104,9 +104,10 @@ class StoreAdapter:
                 yield None
                 return
             snapshot = operation.row_release(manifest.collection_id)[1]
-            with runtime.read_session(self.writer.root, self.writer.handle.path,
-                                      limits=runtime.QueryLimits(profile="records"),
-                                      deadline=runtime.current_deadline()) as session:
+            with runtime.read_session(
+                self.writer.root, self.writer.handle.path, limits=runtime.QueryLimits(profile="records"),
+                deadline=runtime.current_deadline(), snapshot=getattr(self.writer.handle, "query_snapshot", None),
+            ) as session:
                 admitted = session.admit(manifest.collection_id)
                 if admitted.layout is not None and admitted.layout.encoding != typed_storage.TYPED_V2:
                     yield None
