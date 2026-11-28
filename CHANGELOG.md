@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.210.2](https://github.com/substrate-systems/evermatter/compare/v0.210.1...v0.210.2) (2026-11-28)
+
+
+### Bug Fixes
+
+* **skill:** tell assistants when to read before retrying ([#3399](https://github.com/substrate-systems/evermatter/issues/3399)) ([6df06ab](https://github.com/substrate-systems/evermatter/commit/6df06abca46590c96104e5d94b19216d270a16a0))
+* **writes:** preserve refusal order, receipts, and queued saves ([#3392](https://github.com/substrate-systems/evermatter/issues/3392)) ([4cf4f7b](https://github.com/substrate-systems/evermatter/commit/4cf4f7b73bb7b1d71cfda4ade5e287e555d5eb2f))
+
+
+### Performance
+
+* **preview:** finish governed Source reclassification previews at scale ([#3218](https://github.com/substrate-systems/evermatter/issues/3218)) ([b0e2816](https://github.com/substrate-systems/evermatter/commit/b0e2816685fae55369db7f8758a8d6435d1e21a7))
+
 ## [0.210.1](https://github.com/substrate-systems/evermatter/compare/v0.210.0...v0.210.1) (2026-11-28)
 
 
