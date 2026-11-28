@@ -6026,6 +6026,7 @@ def test_a_dependent_held_row_releases_unread_until_a_dependency_changes(
             }
 
 
+@pytest.mark.skipif(os.name == "nt", reason="held version reuse requires POSIX change time")
 def test_held_parts_share_one_parent_read_per_report_request(
     vault: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
