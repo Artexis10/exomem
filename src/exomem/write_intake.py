@@ -90,6 +90,7 @@ MAX_BACKOFF_SECONDS = 30.0
 #: personal service), short enough that a busy caller gets its receipt at once.
 _DEFAULT_INTAKE_WAIT_SECONDS = 2.0
 _MAX_INTAKE_WAIT_SECONDS = 600.0
+_STORE_TIMEOUT_SECONDS = 5.0
 #: How often a drainer looks again at a row that another live process is applying.
 _OTHER_OWNER_POLL_SECONDS = 5.0
 #: An idle drainer waits for an acceptance; this read-only re-check only covers a missed one.
@@ -175,14 +176,24 @@ def _store(
         conn.close()
 
 
+def _limit_sqlite_work(conn: sqlite3.Connection, deadline: float | None) -> None:
+    if deadline is not None:
+        conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 100)
+
+
 @contextmanager
-def _write(vault_root: Path, *, create: bool = False) -> Iterator[sqlite3.Connection]:
-    with _store(vault_root, mode="create" if create else "write") as conn:
+def _write(
+    vault_root: Path, *, create: bool = False, deadline: float | None = None,
+) -> Iterator[sqlite3.Connection]:
+    with _store(vault_root, mode="create" if create else "write", deadline=deadline) as conn:
+        _limit_sqlite_work(conn, deadline)
         conn.execute("BEGIN IMMEDIATE")
         try:
             yield conn
             conn.commit()
         except BaseException:
+            if deadline is not None:
+                conn.set_progress_handler(None, 0)
             conn.rollback()
             raise
 
@@ -190,7 +201,7 @@ def _write(vault_root: Path, *, create: bool = False) -> Iterator[sqlite3.Connec
 def _open(
     root: Path, path: Path, retained: Path, mode: StoreMode, *, deadline: float | None = None
 ) -> sqlite3.Connection:
-    wait = 5.0 if deadline is None else min(5.0, max(0.0, deadline - time.monotonic()))
+    wait = _STORE_TIMEOUT_SECONDS if deadline is None else min(_STORE_TIMEOUT_SECONDS, max(0.0, deadline - time.monotonic()))
     if mode == "create":
         retained.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(retained, timeout=wait, check_same_thread=False)
@@ -631,8 +642,8 @@ class Drainer:
         self._accepting: dict[str, int] = {}
         #: Acceptances between their durable insert and `note_accepted`.
         self._inserting = 0
-        #: Acceptances so far; a store read that an acceptance overlapped is read again.
-        self._accepts = 0
+        #: A store read repeats if a local origin changed while the read was in progress.
+        self._origin_revision = 0
         #: A save may have failed since an owner reply last looked for unnamed failures. True at
         #: start, so the first eligible save after a restart looks once (`failure_notice`).
         self._failure_unannounced = True
@@ -695,15 +706,20 @@ class Drainer:
         """Qualify a legacy store on its first save, before choosing a new execution."""
         if not self._retry_indexes_needed:
             return
+        from . import request_budget
+
+        budget = request_budget.current()
+        if budget is not None:
+            deadline = min(deadline, budget.deadline - request_budget.DELIVERY_RESERVE_SECONDS)
         try:
             if not self._retry_index_upgrade.acquire(timeout=max(0.0, deadline - time.monotonic())):
                 raise TimeoutError("another save is preparing legacy receipts")
             try:
                 if not self._retry_indexes_needed:
                     return
-                with _write(self.vault_root) as conn:
+                with _write(self.vault_root, deadline=deadline) as conn:
                     _add_retry_indexes(conn)
-                self._load(expect_store=True)
+                self._load(expect_store=True, deadline=deadline)
             finally:
                 self._retry_index_upgrade.release()
         except Exception as error:  # noqa: BLE001 - an unreadable legacy receipt may already own this save
@@ -750,6 +766,10 @@ class Drainer:
             return None
         return finished.intake_id, finished.state
 
+    def retained_origin(self, origin: str) -> tuple[str, str] | None:
+        with self._condition:
+            return self._known(origin)
+
     def begin_insert(self) -> None:
         with self._condition:
             self._inserting += 1
@@ -774,7 +794,7 @@ class Drainer:
 
     def note_accepted(self, origin: str | None, intake_id: str) -> None:
         with self._condition:
-            self._accepts += 1
+            self._origin_revision += 1
             if self._open is not None:
                 self._open += 1
             if origin is not None:
@@ -784,6 +804,7 @@ class Drainer:
     def note_finished(self, origin: str | None, intake_id: str, expires_at: float | None, *, state: str) -> None:
         now = time.time()
         with self._condition:
+            self._origin_revision += 1
             if origin is not None and self._open_origins.get(origin) == intake_id:
                 del self._open_origins[origin]
             self._finished_origins = {
@@ -792,15 +813,16 @@ class Drainer:
             if origin is not None and expires_at is not None and expires_at > now:
                 self._finished_origins[origin] = _FinishedOrigin(intake_id, state, expires_at)
 
-    def _load(self, *, expect_store: bool = False) -> None:
+    def _load(self, *, expect_store: bool = False, deadline: float | None = None) -> None:
         """Read the open count and the origin index in one query."""
         for _attempt in range(_STABLE_READ_ATTEMPTS):
             with self._condition:
-                seen = self._accepts
+                seen = self._origin_revision
             now = time.time()
             retry_indexes_needed = False
             try:
-                with _store(self.vault_root, mode="read") as conn:
+                with _store(self.vault_root, mode="read", deadline=deadline) as conn:
+                    _limit_sqlite_work(conn, deadline)
                     retry_indexes_needed = not _has_retry_index(conn)
                     rows = _load_origins(conn, now, include_failures=not retry_indexes_needed)
             except FileNotFoundError:
@@ -821,7 +843,7 @@ class Drainer:
                 if row["origin"] is not None:
                     open_origins[row["origin"]] = row["id"]
             with self._condition:
-                if self._accepts != seen:
+                if self._origin_revision != seen:
                     continue
                 self._open, self._indexed = open_count, True
                 self._open_origins, self._finished_origins = open_origins, finished_origins
@@ -837,7 +859,7 @@ class Drainer:
             return
         for attempt in range(_STABLE_READ_ATTEMPTS):
             with self._condition:
-                seen = self._accepts
+                seen = self._origin_revision
             try:
                 with _store(self.vault_root, mode="read") as conn:
                     count = conn.execute(
@@ -847,8 +869,8 @@ class Drainer:
                 count = 0
             with self._condition:
                 # An acceptance during the read may be missing from it; its own count stands.
-                if self._accepts == seen or attempt == _STABLE_READ_ATTEMPTS - 1:
-                    self._open = int(count) if self._accepts == seen else max(int(count), self._open or 0)
+                if self._origin_revision == seen or attempt == _STABLE_READ_ATTEMPTS - 1:
+                    self._open = int(count) if self._origin_revision == seen else max(int(count), self._open or 0)
                     self._condition.notify_all()
                     return
 
@@ -1216,8 +1238,8 @@ class Admission:
         intake were off, and a fault while accepting keeps the original busy refusal.
         """
         started = time.monotonic()
-        deadline = started + intake_wait_seconds()
-        self.drainer.prepare_retained_origins(deadline)
+        wait = intake_wait_seconds()
+        deadline = started + wait
         in_flight = False
         try:
             known = self.drainer.enter(self.origin)
@@ -1241,6 +1263,13 @@ class Admission:
             self.drainer.hold(self.origin)
             in_flight = True
         try:
+            # A known receipt must still answer if the legacy database is temporarily unavailable.
+            self.drainer.prepare_retained_origins(started + (wait or _STORE_TIMEOUT_SECONDS))
+            retained = self.drainer.retained_origin(self.origin)
+            if retained is not None and retained != known:
+                answer = self._known_answer(*retained)
+                if answer is not None:
+                    return answer
             return self._run_in_flight(call, started, deadline)
         finally:
             if in_flight:
@@ -1333,7 +1362,7 @@ class Admission:
             return _index_answer(intake_id, state)
 
     def _stored_answer(self, intake_id: str) -> dict[str, Any] | None:
-        # A missing database is unreadable, not evidence that the indexed receipt was dismissed.
+        # A missing database leaves the indexed receipt as the only available evidence.
         with _store(self.drainer.vault_root, mode="read") as conn:
             now = time.time()
             row = conn.execute("SELECT * FROM intake WHERE id = ? AND origin = ?", (intake_id, self.origin)).fetchone()
@@ -1744,7 +1773,7 @@ def _declaration_query(
             if remaining <= 0:
                 return None
             conn.execute(f"PRAGMA busy_timeout={math.ceil(remaining * 1000)}")
-            conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 100)
+            _limit_sqlite_work(conn, deadline)
             row = tuple(conn.execute(sql, parameters).fetchone())
     except FileNotFoundError:
         row = empty

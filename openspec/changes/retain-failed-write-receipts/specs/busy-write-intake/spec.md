@@ -32,7 +32,9 @@ While a save is queued or being applied, a resend with the same identity and pay
 
 ### Requirement: The intake stays off the uncontended path
 
-An uncontended save SHALL skip intake storage except for a known retry or the first eligible save on a legacy store without retry indexes. That first save SHALL check retained failures before execution or return a retryable refusal with the earlier effect unknown. An idle drainer SHALL remain read-only and SHALL NOT change vault identities.
+An uncontended save SHALL skip intake storage except for a known retry or the first eligible save on a legacy store without retry indexes. That first save SHALL check retained failures before execution or return a retryable refusal with the earlier effect unknown.
+
+An idle drainer SHALL read intake storage at most once every few minutes, without writing or changing vault identities.
 
 #### Scenario: An unreadable intake store does not block an ordinary save
 
