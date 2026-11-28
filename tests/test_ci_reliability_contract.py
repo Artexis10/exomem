@@ -915,8 +915,10 @@ def test_every_declared_guard_module_is_a_test_module_that_exists() -> None:
 @pytest.mark.parametrize(
     "paths,full,core,harness",
     [
-        # A pull request that changes no test module still runs the guard modules, all core ones.
-        (["src/exomem/__init__.py"], False, {("3.11", "changed"), ("3.13", "changed")}, set()),
+        # A pull request that changes no test module still runs the guard modules: core on every runtime, and the
+        # one harness guard (the tool-selection scorer's canonical form, which a change to adoption planning can
+        # break) on the floor only.
+        (["src/exomem/__init__.py"], False, {("3.11", "changed"), ("3.13", "changed")}, {("3.11", "changed")}),
         # Its own modules run too: core on every runtime, harness on the floor only.
         (
             ["src/exomem/__init__.py", _CORE_MODULE, _HARNESS_MODULE],
@@ -1324,6 +1326,70 @@ def test_python_qualification_does_not_wait_for_image_publication() -> None:
     producer = next(step for step in build["steps"] if step.get("id") == "producer")
     assert producer["run"] == 'echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"'
     assert job["steps"][-1]["with"]["name"] == "python-qualification-${{ github.run_id }}-${{ github.run_attempt }}"
+
+
+@pytest.mark.parametrize(
+    ("ref", "dry_run", "writes"),
+    [
+        ("refs/heads/main", "false", True),  # the push that follows a merge
+        ("refs/tags/v1.2.3", "false", True),  # the publish run that a dispatch hands to the release tag
+        ("refs/heads/feature/notes", "false", False),  # a dispatch from a branch that no review has passed
+        ("refs/tags/v9.9.9", "false", False),  # another tag's run
+        ("refs/heads/main", "true", False),  # a dry run writes nothing
+    ],
+)
+def test_only_a_real_run_on_main_or_the_release_tag_writes_release_notes_to_github(ref: str, dry_run: str, writes: bool) -> None:
+    """Catches a dispatch from an unreviewed branch uploading `release-notes.json` to every recent release, where the upload path then refuses to replace it."""
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release-please.yml").read_text())
+    plan_step = next(step for step in workflow["jobs"]["plan"]["steps"] if step.get("id") == "plan")["run"]
+    start = plan_step.index("notes_publish=false")
+    decision = plan_step[start : plan_step.index("\nfi\n", start) + 4]  # the plan's own lines, run as they are
+
+    answer = subprocess.run(
+        ["bash", "-c", f'{decision}\necho "$notes_publish"'],
+        env={"GITHUB_REF": ref, "DRY_RUN": dry_run, "tag": "v1.2.3", "PATH": os.environ["PATH"]},
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    assert answer == ("true" if writes else "false")
+    # The notes job reads only that decision: it runs dry unless the plan says "true", and its group never shares a real run's.
+    notes = workflow["jobs"]["release-notes"]
+    assert workflow["jobs"]["plan"]["outputs"]["notes_publish"] == "${{ steps.plan.outputs.notes_publish }}"
+    assert notes["env"]["DRY_RUN"] == "${{ needs.plan.outputs.notes_publish != 'true' }}"
+    assert notes["concurrency"]["group"] == "release-notes-${{ needs.plan.outputs.notes_publish == 'true' && 'publish' || 'dry-run' }}"
+
+
+@pytest.mark.parametrize(
+    ("ref", "event", "dry_run", "missing_arguments"),
+    [
+        ("refs/heads/main", "push", "false", "missing"),  # the sweep of the window
+        ("refs/heads/main", "workflow_dispatch", "false", "missing --also v1.2.3"),  # main's code heals one older tag as well
+        ("refs/tags/v1.2.3", "workflow_dispatch", "false", "missing --only v1.2.3"),  # a recovery run: its own tag, no sweep
+        ("refs/heads/main", "workflow_dispatch", "true", None),  # a dry run builds its own tag and lists nothing
+    ],
+)
+def test_a_real_run_on_a_release_tag_publishes_the_notes_of_its_own_tag_and_never_sweeps(
+    ref: str, event: str, dry_run: str, missing_arguments: str | None, tmp_path: Path
+) -> None:
+    """Catches a recovery run on an older tag sweeping the window with that tag's older generator and escaping, which the permanent file and page section then keep on newer releases."""
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release-please.yml").read_text())
+    scan = next(step for step in workflow["jobs"]["release-notes"]["steps"] if step.get("id") == "scan")["run"]
+    stub = tmp_path / "bin" / "python3"
+    stub.parent.mkdir()
+    stub.write_text('#!/bin/bash\necho "${@:2}"\n')  # the scan step's own `python3 scripts/release_notes_asset.py ...` call, answered with its arguments
+    stub.chmod(0o755)
+    github_output = tmp_path / "output"
+
+    subprocess.run(
+        ["bash", "-c", scan],
+        env={
+            "GITHUB_REF": ref, "EVENT": event, "DRY_RUN": dry_run, "TAG": "v1.2.3",
+            "GITHUB_OUTPUT": str(github_output), "PATH": f"{stub.parent}:{os.environ['PATH']}",
+        },
+        capture_output=True, text=True, check=True,
+    )
+
+    assert github_output.read_text().strip() == f"tags={'v1.2.3' if missing_arguments is None else missing_arguments}"
 
 
 #: The worst cross-platform session observed, in seconds. No longer censored:

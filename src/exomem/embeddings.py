@@ -1009,7 +1009,9 @@ def embed_video_scenes(
     return vectors, pairs
 
 
-def embed_video_frames(path: Path) -> list[tuple[float, np.ndarray]]:
+def embed_video_frames(
+    path: Path, *, keyframes_out: list[tuple[float, object]] | None = None
+) -> list[tuple[float, np.ndarray]]:
     """Encode a video → `[(timestamp_seconds, CLIP vector)]`, one per keyframe.
 
     Multi-vector replacement for `embed_video`'s single mean-pooled vector: scene-aware
@@ -1021,9 +1023,14 @@ def embed_video_frames(path: Path) -> list[tuple[float, np.ndarray]]:
     With `EXOMEM_VIDEO_SCENE_FRAMES` set, keyframes are chosen by visual-change scene
     detection (`embed_video_scenes`) instead of the uniform sampler; unset keeps this
     path byte-identical to the pre-feature behavior.
+
+    `keyframes_out`, when given, receives each embedded keyframe as `(timestamp, PIL image)`, so a caller
+    that also reads the frames (the face step) needs no second decode.
     """
     if scene_frames_enabled():
-        vectors, _ = embed_video_scenes(path)
+        vectors, pairs = embed_video_scenes(path)
+        if keyframes_out is not None:
+            keyframes_out.extend((float(scene.rep_ts), image) for scene, image in pairs)
         return vectors
     try:
         from PIL import Image  # noqa: F401 — frame.to_image() returns a PIL image
@@ -1041,6 +1048,8 @@ def embed_video_frames(path: Path) -> list[tuple[float, np.ndarray]]:
     images = [img for _, img in kept]
     with CLIP_GUARD.active(), runtime_resources.model_execution():
         vecs = model.encode(images, convert_to_numpy=True, normalize_embeddings=True)
+    if keyframes_out is not None:
+        keyframes_out.extend((float(ts), image) for ts, image in kept)
     return [(float(ts), vecs[i].astype(np.float32, copy=False)) for i, (ts, _) in enumerate(kept)]
 
 
@@ -3000,7 +3009,25 @@ def delete_clip_after_remove(
     Gated by `clip_enabled()` (EXOMEM_DISABLE_CLIP), not EXOMEM_DISABLE_EMBEDDINGS
     -- CLIP deletion never touches the heavy torch/sentence-transformers import,
     only sqlite, so a lean (no `embeddings` extra) install still purges cleanly.
+
+    The removed pictures' faces go in the same step, whether CLIP or faces are on or off: a face row of a
+    removed picture would still match its person. A face store failure keeps the CLIP rows and reports this
+    step degraded: reconcile's CLIP orphan pass, which finds pictures by their CLIP rows, then retries both,
+    and source erasure counts the face store among the owners that must acknowledge.
     """
+    from . import face_groups
+
+    try:
+        face_groups.forget_pages(vault_root, removed_rel_paths)
+    except Exception:  # noqa: BLE001 - reported below; the CLIP rows stay so a later pass retries
+        # When this fires on a face store that cannot be read, it holds back every picture's CLIP cleanup and
+        # erasure until the owner runs faces.delete; `faces.status` answers `unreadable` and names that fix.
+        log.warning("face rows of removed pictures could not be dropped", exc_info=True)
+        return EmbeddingSyncStatus("degraded", "face_delete_failed", len(removed_rel_paths))
+    return _delete_clip_rows(vault_root, removed_rel_paths)
+
+
+def _delete_clip_rows(vault_root: Path, removed_rel_paths: list[str]) -> EmbeddingSyncStatus:
     eligible_count = len(removed_rel_paths)
     if not clip_enabled():
         return EmbeddingSyncStatus("disabled", "clip_disabled", eligible_count)

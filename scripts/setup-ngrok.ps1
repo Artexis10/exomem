@@ -1,4 +1,4 @@
-# Set up ngrok as the public ingress for exomem on this machine, using the free
+# Set up ngrok as the public ingress for Evermatter on this machine, using the free
 # static dev domain every ngrok account gets. Run ONCE per machine, AFTER:
 #   1. `ngrok config add-authtoken <token>` (claim a token at
 #      https://dashboard.ngrok.com/get-started/your-authtoken)
@@ -25,8 +25,9 @@
 #   pwsh -File scripts/setup-ngrok.ps1 -Domain you.ngrok-free.dev
 #   pwsh -File scripts/setup-ngrok.ps1 -Domain you.ngrok-free.dev -Port 8765
 #
-# After this: set EXOMEM_BASE_URL=https://<Domain> in .env, update the GitHub OAuth
-# App callback to https://<Domain>/auth/callback, restart exomem, re-add the connector.
+# After this: run `uv run --no-sync python scripts/set-env.py EVERMATTER_BASE_URL https://<Domain>`
+# (it removes any other name for the setting from .env), update the GitHub OAuth
+# App callback to https://<Domain>/auth/callback, restart Evermatter, re-add the connector.
 
 param(
     [Parameter(Mandatory = $true)][string]$Domain,
@@ -133,12 +134,12 @@ Write-Host ""
 Write-Host "Endpoint https://$Domain -> http://127.0.0.1:$Port"
 Write-Host ""
 Write-Host "NEXT (not automated):"
-Write-Host "  1. .env:  EXOMEM_BASE_URL=https://$Domain"
+Write-Host "  1. .env:  uv run --no-sync python scripts/set-env.py EVERMATTER_BASE_URL https://$Domain"
 Write-Host "  2. GitHub OAuth App: Homepage https://$Domain ; callback https://$Domain/auth/callback"
-Write-Host "  3. Restart exomem:  pwsh -File scripts/restart.ps1"
+Write-Host "  3. Restart Evermatter:  pwsh -File scripts/restart.ps1"
 Write-Host "  4. claude.ai: re-add the connector at https://$Domain/mcp (redo GitHub OAuth)"
 Write-Host "  5. Verify the triple:"
 Write-Host "       curl.exe -i http://127.0.0.1:$Port/mcp                                (expect 401)"
 Write-Host "       curl.exe -i https://$Domain/.well-known/oauth-authorization-server    (expect 200 JSON)"
 Write-Host "       curl.exe -i https://$Domain/.well-known/oauth-protected-resource      (expect 200 JSON)"
-Write-Host "       exomem doctor --profile remote --probe"
+Write-Host "       evermatter doctor --profile remote --probe"

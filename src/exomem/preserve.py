@@ -35,7 +35,7 @@ import re
 import stat
 import tempfile
 import unicodedata
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
@@ -50,6 +50,7 @@ from . import (
     originals,
     privacy_log,
     semantic_contract,
+    sensitivity_classes,
     source_taxonomy,
     temporal,
 )
@@ -80,11 +81,13 @@ from .vault import (
     relative_posix,
     respell_new_path,
     with_newline,
+    yaml_flow_list,
     yaml_scalar,
 )
 
 if TYPE_CHECKING:
     from .extraction_parts import Layout, Plan
+    from .speech_tracks import Track
 
 log = logging.getLogger(__name__)
 
@@ -240,6 +243,8 @@ class PreserveResult:
     content_type: str | None = None
     adoption: dict[str, object] | None = None
     document_container: dict | None = None
+    #: The classes the page records, their basis and the disclosure in force (`sensitivity_classes.report`).
+    sensitivity: dict[str, Any] | None = None
 
     def as_dict(self) -> dict:
         out = {
@@ -266,6 +271,8 @@ class PreserveResult:
             out["document_container"] = self.document_container
         if self.adoption is not None:
             out["adoption"] = self.adoption
+        if self.sensitivity is not None:
+            out["sensitivity"] = self.sensitivity
         return out
 
 
@@ -365,11 +372,16 @@ def _artifact_name(
     return safe, protected
 
 
+def _sidecar_name(name: str, *, protected: bool) -> str:
+    """The file name of the page beside an artifact: `<name>.md`, or `<stem>-notes.md` for an unprotected `.md`."""
+    if name.lower().endswith(".md") and not protected:
+        return f"{name[:-3]}-notes.md"
+    return f"{name}.md"
+
+
 def _sidecar_path(artifact: Path, *, protected: bool) -> Path:
-    """The page beside an artifact: `<name>.md`, or `<stem>-notes.md` for an unprotected `.md`."""
-    if artifact.name.lower().endswith(".md") and not protected:
-        return artifact.with_name(f"{artifact.name[:-3]}-notes.md")
-    return artifact.with_name(f"{artifact.name}.md")
+    """The page beside an artifact."""
+    return artifact.with_name(_sidecar_name(artifact.name, protected=protected))
 
 
 def _refuse_reserved_capture(vault_root: Path, paths: tuple[Path, ...]) -> None:
@@ -498,9 +510,14 @@ def family_tags(scope: str, category: str) -> list[str]:
 
 
 def _evidence_segments(vault_root: Path, scope: str, category: str) -> tuple[str, str, str]:
-    """The `Evidence`, scope and category folder names as they are spelled on disk, each taking an existing sibling's."""
+    """The `Evidence`, scope and category folder names as they are spelled on disk, each taking an existing sibling's.
+
+    A scope or category that differs from an existing sibling only by separators takes that sibling's spelling too.
+    """
     relative = respell_new_path(
-        vault_root, (kb_root(vault_root) / "Evidence" / scope / category).relative_to(vault_root).as_posix()
+        vault_root,
+        (kb_root(vault_root) / "Evidence" / scope / category).relative_to(vault_root).as_posix(),
+        leaf_is_folder=True,
     )
     evidence, scope_spelled, category_spelled = relative.split("/")[-3:]
     return evidence, scope_spelled, category_spelled
@@ -510,7 +527,8 @@ def evidence_folder(vault_root: Path, scope: str, category: str) -> Path:
     """The Evidence family folder for already-valid destination segments.
 
     Each folder on the way takes an existing sibling's spelling when it matches
-    by `vault_name_key`, so scope `food` lands in an existing `Food`.
+    by `vault_name_key`, so scope `food` lands in an existing `Food`, or by
+    `folder_lookalike_key`, so scope `gardentools` lands in an existing `garden-tools`.
     """
     evidence, scope_spelled, category_spelled = _evidence_segments(vault_root, scope, category)
     return kb_root(vault_root) / evidence / scope_spelled / category_spelled
@@ -593,7 +611,9 @@ def preserve(
     raw_protection: bool = False,
     media_pending: bool = False,
     diarize: bool | None = None,
+    tracks: Sequence[Track] | None = None,
     defer_fanout_to_terminal: bool = False,
+    sensitivity: Sequence[str] | None = None,
     _allocation: Mapping[str, str | None] | None = None,
     _prepare: Callable[[dict], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
@@ -608,7 +628,11 @@ def preserve(
     would give it. A caller that reconciles the original straight after sets it, so that
     reconcile only queues the job instead of committing the page a second time.
 
-    `diarize` records an explicit speaker-label choice on an audio or video sidecar.
+    `diarize` records an explicit speaker-label choice on an audio or video sidecar, and
+    `tracks` a declaration of its separate microphones that `speech_tracks.declaration` has read.
+
+    `sensitivity` is the caller's list of sensitivity classes for the page (`sensitivity_classes`). A caller that
+    gives none gets the default of the sidecar's source kind. The bytes are kept in full either way.
 
     `staged` is a binary that an upload door already copied, hashed and fsynced into a private stage
     (`upload_stage.StagedUpload`) before it took the mutation boundary. It stands in for
@@ -620,6 +644,8 @@ def preserve(
     """
     if text_origin not in ("upload", "client"):
         raise ValueError("text_origin must be 'upload' or 'client'")
+    # Before anything hashes or writes: an unknown class refuses the whole capture.
+    declared_sensitivity = None if sensitivity is None else sensitivity_classes.validated(vault_root, sensitivity)
     # Before anything hashes or writes them: a kept text never holds a card number or a labelled credential.
     content, description, text, redaction_warnings = redact_capture_text(
         content=content, description=description, text=text,
@@ -667,6 +693,11 @@ def preserve(
         if media_engines.engine_for(media_type) != media_engines.SPEECH:
             return _raise("DIARIZE_NOT_APPLICABLE", ["diarize"], "speaker labels apply to audio and video only")
         validate_diarize_text(diarize, text)
+    if tracks is not None:
+        from . import media_engines
+
+        if media_engines.engine_for(media_type) != media_engines.SPEECH:
+            return _raise("TRACKS_NOT_APPLICABLE", ["tracks"], "a declaration of tracks applies to audio and video only")
 
     now = today or temporal.now()
     date_iso = temporal.render_date(now)
@@ -882,10 +913,15 @@ def preserve(
             )
             parts = _parts_module()
             pieces = parts.split(text_clean) if text_clean else []
+            kind = source_taxonomy.load_taxonomy(vault_root).kinds.get(_sidecar_kind(inspection))
+            classification = sensitivity_classes.classify_capture(
+                vault_root, declared_sensitivity, kind_default=kind.sensitivity if kind else (),
+            )
             sidecar_md = _render_sidecar(
                 artifact_name=filename_safe,
-                scope=scope_safe,
-                category=category_safe,
+                # The folders the capture landed in, so the page's tags name them as its folders do.
+                scope=folder.parent.name,
+                category=folder.name,
                 date_iso=stamp_iso,
                 description=desc_clean,
                 text=pieces[0] if pieces else None,
@@ -910,6 +946,7 @@ def preserve(
                     if text_clean and text_origin == "client"
                     else None
                 ),
+                sensitivity=classification.classes,
             )
             if raw_protection:
                 sidecar_md = raw_guard.protect(
@@ -924,6 +961,7 @@ def preserve(
                     size=artifact_size,
                 )
             sidecar_md = set_diarize_pin(sidecar_md, diarize)
+            sidecar_md = set_speech_tracks_pin(sidecar_md, tracks)
             sidecar_md = media_previews.stamp_intent(sidecar_md, rel_artifact, artifact_hash)
             if document_containers.is_container(filename_safe):
                 container_plan = container_stack.enter_context(document_containers.plan(
@@ -968,12 +1006,12 @@ def preserve(
         # Index + log updates.
         rel_artifact_for_summary = managed_relative(rel_artifact)
         activity_summary = (
-            f"`{rel_artifact_for_summary}` (evidence, {scope_safe}/{category_safe}, "
+            f"`{rel_artifact_for_summary}` (evidence, {folder.parent.name}/{folder.name}, "
             f"mobile via exomem)"
         )
         log_body = (
-            f"Mobile preserve via exomem. scope={scope_safe}, "
-            f"category={category_safe}, filename={filename_safe}."
+            f"Mobile preserve via exomem. scope={folder.parent.name}, "
+            f"category={folder.name}, filename={filename_safe}."
         )
         if description and description.strip():
             desc_one_line = description.strip().replace("\n", " ")
@@ -1144,6 +1182,7 @@ def preserve(
         content_type=content_type_effective,
         adoption=adoption_receipt,
         document_container=container_metadata,
+        sensitivity=sensitivity_classes.report(vault_root, classification, rel_path=sidecar_rel),
     )
 
 
@@ -1165,7 +1204,9 @@ def preserve_stream(
     raw_protection: bool = False,
     media_pending: bool = False,
     diarize: bool | None = None,
+    tracks: Sequence[Track] | None = None,
     defer_fanout_to_terminal: bool = False,
+    sensitivity: Sequence[str] | None = None,
 ) -> PreserveResult:
     """Capture a binary STREAM to Evidence/ — the entrypoint for HTTP /upload.
 
@@ -1198,7 +1239,9 @@ def preserve_stream(
         raw_protection=raw_protection,
         media_pending=media_pending,
         diarize=diarize,
+        tracks=tracks,
         defer_fanout_to_terminal=defer_fanout_to_terminal,
+        sensitivity=sensitivity,
     )
 
 
@@ -1396,6 +1439,11 @@ def artifact_location(relative_path: str) -> tuple[str, str, str]:
     return tree, scope, category
 
 
+def _sidecar_kind(inspection: Inspection | None) -> str:
+    """The source kind a sidecar carries: a dataset card names its format, every other sidecar is unclassified."""
+    return "dataset-export" if inspection is not None and inspection.dataset_format else source_taxonomy.UNCLASSIFIED_KIND
+
+
 def _render_sidecar(
     *,
     artifact_name: str,
@@ -1422,6 +1470,7 @@ def _render_sidecar(
     inspection: Inspection | None = None,
     transcription_of: Mapping[str, object] | None = None,
     parts: Layout | None = None,
+    sensitivity: Sequence[str] = (),
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
@@ -1458,12 +1507,10 @@ def _render_sidecar(
     label = _ARTIFACT_TREE_LABELS.get(tree, "Evidence")
     display_title = f"{label}: {artifact_name}"
     lines.append(f"title: {yaml_scalar(display_title)}")
-    lines.append(
-        "source_type: dataset-export"
-        if dataset_format
-        else f"source_type: {source_taxonomy.UNCLASSIFIED_KIND}"
-    )
+    lines.append(f"source_type: {_sidecar_kind(inspection)}")
     lines.append(f"captured: {date_iso}")
+    if sensitivity:
+        lines.append(f"{sensitivity_classes.FIELD}: " + yaml_flow_list(sensitivity))
     if inspection is not None:
         lines.append(f"inspection_status: {inspection.status}")
     if dataset_format:
@@ -1804,6 +1851,46 @@ def extracted_text(content: str) -> str:
     return content[start : end if section is None else section].strip()
 
 
+def map_extracted_text(content: str, rewrite: Callable[[str], str]) -> str:
+    """`content` with `rewrite` applied to the raw extraction text, and every other byte unchanged.
+
+    `extracted_text` strips its result; this keeps the exact span between the heading and the
+    section that follows it, so a caller that edits within lines changes nothing else.
+    """
+    newline = document_newline(content)
+    text = with_newline(content, "\n")
+    heading = text.find(_EXTRACTED_HEADING)
+    if heading == -1:
+        return content
+    start = heading + len(_EXTRACTED_HEADING)
+    end = _extraction_end(text, start)[0]
+    section = _low_confidence_start(text, start, end)
+    stop = end if section is None else section
+    updated = text[:start] + rewrite(text[start:stop]) + text[stop:]
+    return content if updated == text else with_newline(updated, newline)
+
+
+def render_sidecar_renamed(
+    before: str,
+    *,
+    rewrite: Callable[[str], str],
+    speakers: list[str],
+    speaker_names: list[dict[str, str]],
+    speaker_verification: str | None,
+) -> str:
+    """A sidecar after a person named speakers: `rewrite` applied to the raw extraction text, three fields set.
+
+    The labelled lines are the only stored turns, so `rewrite` changes their label spans and nothing
+    else. Every other byte of the page stays as it was.
+    """
+    content = map_extracted_text(before, rewrite)
+    content = _set_frontmatter_field(content, "speakers", yaml_flow_list(speakers))
+    content = _set_frontmatter_field(content, "speaker_names", json.dumps(speaker_names, ensure_ascii=False))
+    if speaker_verification is not None:
+        content = _set_frontmatter_field(content, "speaker_verification", speaker_verification)
+    return content
+
+
 def low_confidence_text(content: str) -> str:
     """The words under `## Low-confidence OCR`, or an empty string when the sidecar has none."""
     content = with_newline(content, "\n")
@@ -1976,13 +2063,15 @@ def _part_field_lines(parts: Layout | None) -> list[str]:
 
 #: Frontmatter that describes one extraction rather than the recording. A reprocess moves these
 #: with the old text. They are the sidecar schema's own field names, a closed set.
-_SPEAKER_FIELDS = ("speakers", "speaker_verification")
+_SPEAKER_FIELDS = ("speakers", "speaker_verification", "speaker_names", "speaker_names_not_carried")
+#: Where an extraction came from when the cell did not run its engine, and the digest that identifies it.
+_ORIGIN_FIELDS = ("extraction_origin", "attached_digest")
 _ASR_FIELD_PREFIX = "asr_"
 _DIARIZE_REQUESTED_FIELD = "diarize_requested"
 _EXTRACTION_FIELDS = frozenset({
     "extracted_by", "processing_state", "processing_attempts", "processing_error",
     "processing_retryable", "processing_next_action", OCR_CONFIDENCE_FIELD,
-    _DIARIZE_REQUESTED_FIELD, *_SPEAKER_FIELDS,
+    _DIARIZE_REQUESTED_FIELD, *_SPEAKER_FIELDS, *_ORIGIN_FIELDS,
 })
 
 
@@ -1997,6 +2086,42 @@ def diarize_pin(content: str) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
+#: The tracks an owner or an agent declared for this recording. It is a declaration, not an extraction
+#: fact, so a new extraction keeps it (`is_extraction_field` does not list it).
+_SPEECH_TRACKS_FIELD = "speech_tracks"
+
+
+def speech_tracks_pin(content: str) -> object | None:
+    """The tracks declared on this sidecar, as written: a list of `{name, stream, channel, single_voice}`."""
+    return parse_frontmatter(content)[0].get(_SPEECH_TRACKS_FIELD)
+
+
+def declared_speech_tracks(content: str) -> tuple[Track, ...] | None:
+    """The declaration of tracks this sidecar records, read (`speech_tracks.declaration`); None when it holds none it can read."""
+    from .speech_tracks import TrackDeclarationError, declaration
+
+    pinned = speech_tracks_pin(content)
+    try:
+        return None if pinned is None else declaration(pinned)
+    except TrackDeclarationError:  # a hand-edited pin: the next extraction says what is wrong with it
+        return None
+
+
+def set_speech_tracks_pin(content: str, tracks: Sequence[Track] | None) -> str:
+    """Record a declaration of tracks that `speech_tracks.declaration` has read; None keeps the one the sidecar holds.
+
+    An empty declaration removes the field, so the Source records no declaration. Every path that writes the
+    declaration writes it here. JSON is a YAML flow sequence, and quotes every name.
+    """
+    if tracks is None:
+        return content
+    if not tracks:
+        return _remove_frontmatter_fields(content, lambda key: key == _SPEECH_TRACKS_FIELD)
+    from .speech_tracks import as_data
+
+    return _set_frontmatter_field(content, _SPEECH_TRACKS_FIELD, json.dumps(as_data(tracks), ensure_ascii=False))
+
+
 def set_diarize_pin(content: str, diarize: bool | None) -> str:
     """Save an explicit preference and keep an existing preference when omitted."""
     if diarize is None:
@@ -2004,11 +2129,15 @@ def set_diarize_pin(content: str, diarize: bool | None) -> str:
     return _set_frontmatter_field(content, _DIARIZE_REQUESTED_FIELD, "true" if diarize else "false")
 
 
-def disclose_retained_speaker_choice(receipt: dict, requested: bool | None) -> None:
-    """Tell a caller that reuse of stored bytes kept the existing choice."""
+def disclose_retained_speaker_choice(receipt: dict, requested: bool | None, tracks: object = None) -> None:
+    """Tell a caller that reuse of stored bytes kept the existing choice and declaration of tracks."""
     if requested is not None:
         receipt.setdefault("warnings", []).append(
             "The stored recording keeps its speaker-label choice. To change it, use process_media with reprocess."
+        )
+    if tracks is not None:
+        receipt.setdefault("warnings", []).append(
+            "The stored recording keeps its declaration of tracks. To change it, use process_media with reprocess and tracks."
         )
 
 
@@ -2029,6 +2158,10 @@ def render_sidecar_extraction(
     parts: Layout | None = None,
     binary_hints: tuple[int, int] | None = None,
     identity_check: dict | None = None,
+    speaker_names: list[dict[str, str]] | None = None,
+    names_not_carried: list[str] | None = None,
+    attached_digest: str | None = None,
+    speech_tracks: Sequence[Track] | None = None,
 ) -> str:
     """Render an extraction sidecar without touching canonical or derived state.
 
@@ -2045,6 +2178,11 @@ def render_sidecar_extraction(
     do not describe the new one. `binary_hints` are the mtime and ctime of the original, as the
     caller verified them; a page stored with its original still holds them as null
     (`media_processing.render_pending_page`) and records them here.
+    `speaker_names` records each name with the label it replaced and its basis, and
+    `names_not_carried` the names of the replaced extraction that no new label took.
+    `attached_digest` marks an extraction attached from the owner's machine: the cell did not run
+    its engine, so the page says where it came from and never claims the engine was checked.
+    `speech_tracks` is the declaration of tracks that this extraction read; None keeps the page's own.
     """
     newline = document_newline(before)
     before = with_newline(before, "\n")
@@ -2057,7 +2195,10 @@ def render_sidecar_extraction(
     content = before
     if reset_speakers:
         content = _remove_frontmatter_fields(content, lambda key: key in _SPEAKER_FIELDS)
+    # An extraction states its own origin; a replaced one's origin never carries over.
+    content = _remove_frontmatter_fields(content, lambda key: key in _ORIGIN_FIELDS)
     content = set_diarize_pin(content, diarize)
+    content = set_speech_tracks_pin(content, speech_tracks)
     if diarize is False or (diarize is None and diarize_pin(before) is False):
         speaker_verification = "not-requested"
     content = _set_frontmatter_field(content, "extracted_by", engine_with_ocr_text(engine, ocr))
@@ -2081,7 +2222,16 @@ def render_sidecar_extraction(
             if label and label not in labels:
                 labels.append(label)
         if labels:
-            content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
+            content = _set_frontmatter_field(content, "speakers", yaml_flow_list(labels))
+    if speaker_names:
+        content = _set_frontmatter_field(
+            content, "speaker_names", json.dumps(speaker_names, ensure_ascii=False)
+        )
+    if names_not_carried:
+        content = _set_frontmatter_field(content, "speaker_names_not_carried", yaml_flow_list(names_not_carried))
+    if attached_digest is not None:
+        content = _set_frontmatter_field(content, "extraction_origin", "attached")
+        content = _set_frontmatter_field(content, "attached_digest", attached_digest)
     content = _set_asr_facts(content, asr)
     content = _set_ocr_confidence(content, ocr)
     if capture is not None:
@@ -2093,9 +2243,7 @@ def render_sidecar_extraction(
         content = _media_processing_module().record_read_hints(
             content, mtime_ns=binary_hints[0], ctime_ns=binary_hints[1]
         )
-    if prior_extractions:
-        links = ", ".join(json.dumps(f"[[{link}]]", ensure_ascii=False) for link in prior_extractions)
-        content = _set_frontmatter_field(content, "prior_extractions", f"[{links}]")
+    content = set_prior_extractions(content, prior_extractions)
     content = _remove_frontmatter_fields(content, lambda key: key in _parts_module().SOURCE_FIELDS)
     for field, value in _part_fields(parts):
         content = _set_frontmatter_field(content, field, value)
@@ -2103,6 +2251,66 @@ def render_sidecar_extraction(
         content, text, _cap_low_confidence_text(ocr.low_confidence_text) if ocr is not None else ""
     )
     return with_newline(content, newline)
+
+
+def set_prior_extractions(content: str, links: Sequence[str]) -> str:
+    """`content` listing `links`, in order, as the pages that hold the extractions it replaced or declined.
+
+    Each link is a vault-relative path with no extension. An empty list leaves the field as it is.
+    """
+    if not links:
+        return content
+    listed = ", ".join(json.dumps(f"[[{link}]]", ensure_ascii=False) for link in links)
+    return _set_frontmatter_field(content, "prior_extractions", f"[{listed}]")
+
+
+def extraction_field_lines(content: str) -> list[str]:
+    """The one-line `key: value` forms of the extraction fields (`is_extraction_field`) in `content`'s frontmatter.
+
+    The frontmatter is parsed, and each field is written as the extraction writers above write it (a list of strings
+    in flow style, other structure as JSON). A list that an editor's property panel wrote as a block is not lost to its style.
+    """
+    fields = parse_frontmatter(with_newline(content, "\n"))[0]
+    return [f"{key}: {_one_line(value)}".rstrip() for key, value in fields.items() if is_extraction_field(str(key))]
+
+
+def _one_line(value: object) -> str:
+    """A parsed frontmatter value as one line, as the extraction writers above write it."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return yaml_flow_list(value)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    return yaml_scalar(value)
+
+
+def render_kept_extraction(
+    before: str, *, field_lines: Sequence[str], text: str, parts: Layout | None,
+    prior_extractions: Sequence[str] = (),
+) -> str:
+    """`before` with another page's finished extraction in place of its own: the fields, the first part and the part layout.
+
+    `field_lines` are the lines that `extraction_field_lines` gives for the page that holds the extraction. Every
+    extraction field of `before` goes first, so none of a pending or earlier extraction survives next to the new one.
+    The recording's own fields (its identity and provenance) stay as `before` has them. `text` is the part that stays
+    on the page and `parts` the layout of the part pages that hold the rest, as `extraction_parts.layout` gives it.
+    """
+    newline = document_newline(before)
+    content = with_newline(before, "\n")
+    content = _remove_frontmatter_fields(content, is_extraction_field)
+    for line in field_lines:
+        key, _colon, value = line.partition(":")
+        content = _set_frontmatter_field(content, key, value.strip())
+    content = set_prior_extractions(content, prior_extractions)
+    content = _remove_frontmatter_fields(content, lambda key: key in _parts_module().SOURCE_FIELDS)
+    for field, value in _part_fields(parts):
+        content = _set_frontmatter_field(content, field, value)
+    return with_newline(_set_extracted_text(content, text), newline)
 
 
 def set_capture_fields(content: str, capture: CaptureFacts) -> str:
@@ -2239,6 +2447,10 @@ def _set_asr_facts(content: str, asr: AsrFacts | None) -> str:
         ("asr_duration_seconds", number(asr.duration_seconds, 2)),
         ("asr_policy", text(asr.policy)),
     ]
+    if asr.tracks_policy is not None:
+        fields.append(("asr_tracks_policy", text(asr.tracks_policy)))
+    if asr.tracks_skipped is not None:
+        fields.append(("asr_tracks_skipped", text(asr.tracks_skipped)))
     if asr.language_requested is not None:
         fields.append((_ASR_PIN_FIELD, yaml_scalar(asr.language_requested)))
     for field, value in fields:

@@ -718,10 +718,20 @@ class ReferenceIndex:
         A page whose derivation trails its stored bytes takes its ref from those bytes, by the rule
         of ``_store_identity_owners``, so a read of a page saved a moment ago carries the page's own
         ref and id, not one that names nothing once its rows arrive.
-        """
-        from .vault_store import derivation
 
-        underived = derivation.underived(conn)
+        The check reads the pending state of ``wanted`` alone (``derivation.underived_parsed`` with
+        its paths), whatever the backlog, and a write that asks for the ref of its own page after
+        it commits is never refused for it: a refusal there would answer an error for a write that
+        stands. A batch of more than ``derivation.UNDERIVED_CAP`` paths takes the capped form
+        instead (``derivation.underived_parsed`` says why), so beside a backlog past the cap it
+        refuses with ``VAULT_STORE_DERIVED_BEHIND``, and so does the read of the owners of its ids
+        when more than that many pages hold them.
+
+        The ref of a derived page already comes from the rows as they stand, and a lagging page's
+        ref differs only in taking the bytes of ``wanted`` (a pending page outside ``wanted`` that
+        claims the same id shows once its rows arrive, as for a derived page).
+        """
+        underived = _underived_identities(conn, self.vault_root, wanted)
         lagging = [path for path in wanted if path in underived]
         derived = [path for path in wanted if path not in underived]
         refs = self._refs_from_connection(conn, derived)[0] if derived else {}
@@ -729,8 +739,7 @@ class ReferenceIndex:
             return refs
         ids: dict[str, str] = {}
         for path in lagging:
-            raw = underived[path]
-            row = None if raw is None else identity_row(self.vault_root, path, raw)
+            row = underived[path]
             identifier = None if row is None or row[4] != "valid" else row[1]
             if identifier is not None:
                 ids[path] = identifier
@@ -1192,9 +1201,6 @@ def _reference_owners_read_only(
     if stored is not None:
         return _ReferenceOwners(root.resolve(), stored, None)
 
-    # Lazy: `semantic_contract` imports this module.
-    from . import semantic_contract
-
     # The source is chosen before any lookup, from vault-wide state alone.
     #
     # A sidecar fast path was tried and removed. Consulting it and scanning
@@ -1228,20 +1234,9 @@ def _reference_owners_read_only(
         resolved: dict[str, tuple[str, ...]] | None = None if wanted else {}
         snapshot = None
         if wanted:
-            snapshot = semantic_contract.current_reference_identity_snapshot(
-                root, declined=measured, tolerate_external_pending=serve_stale
+            resolved, snapshot = _owners_from_projection(
+                root, wanted, declined=measured, serve_stale=serve_stale
             )
-        if snapshot is not None:
-            owners = snapshot.reference_owners
-            answered = {identifier: owners.get(identifier, ()) for identifier in wanted}
-            if semantic_contract.reference_identity_snapshot_is_current(
-                root, snapshot, tolerate_external_pending=serve_stale
-            ):
-                resolved = answered
-            else:
-                snapshot = None
-                if measured is not None:
-                    measured["declined_snapshot_changed"] = 1
         if measured is not None:
             measured["snapshot"] = int(bool(wanted) and resolved is not None)
         if resolved is None:
@@ -1259,6 +1254,79 @@ def _reference_owners_read_only(
         if measured is not None:
             measured["cpu_ms"] = (time.thread_time_ns() - started) // 1_000_000
     return _ReferenceOwners(root.resolve(), resolved, snapshot)
+
+
+def _owners_from_projection(
+    root: Path,
+    wanted: tuple[str, ...],
+    *,
+    declined: dict[str, int] | None = None,
+    serve_stale: bool = False,
+) -> tuple[dict[str, tuple[str, ...]] | None, ReferenceIdentitySnapshot | None]:
+    """Every wanted id's owners from the server's identity projection, or None if it is not current.
+
+    The projection answers only if it is current both before and after the lookup. The read
+    borrows a projection the server already holds: it never builds, fills, or refreshes one.
+    """
+    # Lazy: `semantic_contract` imports this module.
+    from . import semantic_contract
+
+    snapshot = semantic_contract.current_reference_identity_snapshot(
+        root, declined=declined, tolerate_external_pending=serve_stale
+    )
+    if snapshot is None:
+        return None, None
+    owners = snapshot.reference_owners
+    answered = {identifier: owners.get(identifier, ()) for identifier in wanted}
+    if not semantic_contract.reference_identity_snapshot_is_current(
+        root, snapshot, tolerate_external_pending=serve_stale
+    ):
+        if declined is not None:
+            declined["declined_snapshot_changed"] = 1
+        return None, None
+    return answered, snapshot
+
+
+def owner_without_walk(vault_root: Path, value: str) -> str | None:
+    """The one page that a memory ref names, when that is known without walking the vault.
+
+    The store's identity rows or the server's current identity projection answer, as they answer
+    `resolve_identifier_read_only`. None means only that this lookup did not answer: no projection
+    is current, pending custody is unsettled, too many pages wait to derive, or the ref names no
+    page or several. A caller uses it to word a reply cheaply, never to decide one;
+    `resolve_identifier_read_only` decides.
+    """
+    memory_id = parse_memory_ref(str(value or "").strip())
+    if memory_id is None:
+        return None
+    from .cli_ops import OpError
+    from .vault_store import read
+
+    root = Path(vault_root)
+    try:
+        stored = _store_identity_owners(root, [memory_id])
+    except OpError as error:
+        if error.code != read.DERIVED_BEHIND:
+            raise
+        return None  # the pending pages outnumber what a check reads: the lookup did not answer
+    if stored is not None:
+        rows = list(stored[memory_id])
+    else:
+        answered, _snapshot = _owners_from_projection(root, (memory_id,))
+        if answered is None:
+            return None
+        from .find import RetrievalIndexWarming
+
+        try:
+            projection = _settled_projection(root, _pending_reference_projection(root))
+        except RetrievalIndexWarming:
+            return None  # pending custody is not readable yet: the lookup did not answer
+        if projection is not None and projection.blocked_paths:
+            return None
+        rows = list(answered[memory_id])
+        if projection is not None:
+            rows = _apply_pending_identity(root, memory_id, rows, projection=projection)
+    return rows[0] if len(rows) == 1 else None
 
 
 def _reference_owner_view_read_only(
@@ -1311,12 +1379,10 @@ def resolve_identifier_read_only(vault_root: Path, value: str) -> str:
         stored = _store_identity_owners(Path(vault_root), [memory_id])
         if stored is not None:
             return _one_owner(memory_id, list(stored[memory_id]))
-        rows = _apply_pending_identity(
-            Path(vault_root),
-            memory_id,
-            ReferenceIndex(vault_root)._scan_paths_for_id(memory_id),
-        )
-        return _one_owner(memory_id, rows)
+        # The identity projection answers when it is current, and the scan only when it is not. Both
+        # apply one membership rule, and pending custody applies to either answer.
+        rows = paths_for_ids_read_only(Path(vault_root), [memory_id]).get(memory_id, ())
+        return _one_owner(memory_id, list(rows))
     for prefix in ("exomem://vault/", "exomem://source/"):
         if raw.lower().startswith(prefix):
             decoded = unquote(raw[len(prefix) :])
@@ -1738,36 +1804,65 @@ def _store_identity_owners(
 ) -> dict[str, tuple[str, ...]] | None:
     """Every page that holds each normalized id, from the store; None outside store mode.
 
-    A page whose derivation trails its stored bytes (``derivation.underived``) answers from those
-    bytes, by the rule that its drain applies (``identity_row``): a page that a failed delete left
-    with its row is not an owner, and one that a failed write gave an id is.
+    A page whose derivation trails its stored bytes (``derivation.underived_parsed``) answers
+    from those bytes, by the rule that its drain applies (``identity_row``): a page that a failed
+    delete left with its row is not an owner, and one that a failed write gave an id is. Any
+    pending page could claim a wanted id, so the check reads them all, and a backlog past
+    ``UNDERIVED_CAP`` refuses it (``read.backlog_too_large()``).
     """
-    from .vault_store import derivation
-
     wanted = list(dict.fromkeys(ids))
     root = Path(vault_root)
     return _from_store_identities(
-        vault_root, lambda conn: _owners_at(conn, root, wanted, derivation.underived(conn))
+        vault_root, lambda conn: _owners_at(conn, root, wanted, _underived_identities(conn, root))
+    )
+
+
+def _underived_identities(
+    conn: sqlite3.Connection, root: Path, paths: Iterable[str] | None = None
+) -> dict[str, IdentityRow | None]:
+    """The identity row of each page whose derivation trails its stored bytes (``identity_row`` of
+    them), or None for a page that gives none; ``derivation.underived_parsed`` says which pages
+    count.
+
+    A page whose derivation failed stays here for as long as it fails, so each page is parsed once
+    while its bytes stay the same, not on every check (``derivation.underived_parsed``).
+    """
+    from .vault_store import derivation
+
+    return derivation.underived_parsed(
+        conn, paths, "identity", lambda rel, raw: identity_row(root, rel, raw)
     )
 
 
 def _owners_at(
-    conn: sqlite3.Connection, root: Path, wanted: list[str], underived: dict[str, bytes | None]
+    conn: sqlite3.Connection,
+    root: Path,
+    wanted: list[str],
+    claimants: dict[str, IdentityRow | None],
 ) -> dict[str, tuple[str, ...]]:
     """Every page at ``conn``'s snapshot that holds each id in ``wanted``, with the rows of the
-    ``underived`` pages taken from their stored bytes (``_store_identity_owners``)."""
+    pending ``claimants`` taken from their stored bytes (``_store_identity_owners``).
+
+    A row of a page that is pending, in ``claimants`` or not, is stale and never counts: the
+    page's bytes decide. The bytes of a pending page that holds a row for a wanted id count as a
+    claim too, so two pages that share an id stay ambiguous while both of them wait, as they are
+    once their rows arrive. A moved or deleted page has no bytes and claims nothing.
+    """
     found: dict[str, list[str]] = {identifier: [] for identifier in wanted}
+    rows: list[tuple[str, str]] = []
     for start in range(0, len(wanted), REFS_QUERY_CHUNK):
         chunk = wanted[start : start + REFS_QUERY_CHUNK]
-        for exomem_id, path in conn.execute(
+        rows.extend((str(exomem_id), str(path)) for exomem_id, path in conn.execute(
             "SELECT exomem_id, path FROM identities "  # noqa: S608 - placeholders only
             f"WHERE status = 'valid' AND exomem_id IN ({','.join('?' for _ in chunk)})",
             chunk,
-        ):
-            if path not in underived:
-                found[str(exomem_id)].append(str(path))
-    for path, raw in underived.items():
-        row = None if raw is None else identity_row(root, path, raw)
+        ))
+    # The rows name few pages (one per owner of a wanted id): a keyed read finds the pending ones.
+    pending = _underived_identities(conn, root, {path for _id, path in rows})
+    for exomem_id, path in rows:
+        if path not in pending:
+            found[exomem_id].append(path)
+    for path, row in {**pending, **claimants}.items():
         if row is not None and row[4] == "valid" and row[1] in found:
             found[row[1]].append(path)
     return {identifier: tuple(sorted(paths)) for identifier, paths in found.items()}
@@ -1778,15 +1873,15 @@ def store_owners_by_prefix(vault_root: Path, prefix: str) -> tuple[str, ...] | N
 
     One read through the id index, with the rule of ``_store_identity_owners`` for a page whose
     derivation trails its stored bytes, so a page saved a moment ago is found by its id at once.
+    Any pending page could hold an id under ``prefix``, so a backlog past ``UNDERIVED_CAP`` refuses
+    the read (``read.backlog_too_large()``).
     """
-    from .vault_store import derivation
-
     root = Path(vault_root)
     # The first string after every one that starts with ``prefix``, for an index range.
     end = prefix[:-1] + chr(ord(prefix[-1]) + 1)
 
     def owners(conn: sqlite3.Connection) -> tuple[str, ...]:
-        underived = derivation.underived(conn)
+        underived = _underived_identities(conn, root)
         found = {
             str(exomem_id)
             for exomem_id, path in conn.execute(
@@ -1796,8 +1891,7 @@ def store_owners_by_prefix(vault_root: Path, prefix: str) -> tuple[str, ...] | N
             )
             if path not in underived
         }
-        for path, raw in underived.items():
-            row = None if raw is None else identity_row(root, path, raw)
+        for row in underived.values():
             identifier = None if row is None or row[4] != "valid" else row[1]
             if identifier is not None and identifier.startswith(prefix):
                 found.add(identifier)
@@ -1952,6 +2046,8 @@ def replace_prior_rows(conn: sqlite3.Connection, rel: str, rows: Iterable[PriorR
 
 #: Row status for a page the scan would read whose bytes could not be observed.
 _UNREADABLE = "unreadable"
+#: One identity row: path, normalized id, raw id, source hash, status.
+IdentityRow = tuple[str, str | None, str, str, str]
 
 
 def _read_identity(vault_root: Path, path: Path) -> tuple[str, str | None, str, str, str] | None:
@@ -2004,9 +2100,7 @@ def _identity_from_bytes(rel: str, raw: bytes) -> tuple[str, str | None, str, st
     return rel, normalized, raw_id, vault_module.content_hash(text), status
 
 
-def identity_row(
-    vault_root: Path, rel: str, raw: bytes
-) -> tuple[str, str | None, str, str, str] | None:
+def identity_row(vault_root: Path, rel: str, raw: bytes) -> IdentityRow | None:
     """The row that the reference sidecar holds for one page, read from bytes instead of a file.
 
     It returns what ``_read_identity`` returns for the same file: None when the scan does not

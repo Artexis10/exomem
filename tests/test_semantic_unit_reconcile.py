@@ -20,6 +20,8 @@ from exomem import (
     reconcile,
     recover_from_trash,
     semantic_index,
+    semantic_units,
+    semantic_writes,
 )
 from exomem import (
     find as find_module,
@@ -54,6 +56,27 @@ def _write(
     )
     find_module.clear_cache()
     return path
+
+
+def test_a_warm_reconcile_preview_without_unit_indexes_does_not_rescan_pages(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from exomem import lifecycle_statuses
+
+    _write(tmp_path, "## Capture\n\nThe imported body stays in the cached source snapshot.\n")
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_INDEX", "1")
+    semantic_writes.build_posthoc_corpus(tmp_path, status_basis=lifecycle_statuses.Basis(tmp_path))
+
+    def unexpected_scan(*args, **kwargs):
+        raise AssertionError("reconcile reparsed a warm page without a unit index to audit")
+
+    monkeypatch.setattr(semantic_units, "scan_semantic_units", unexpected_scan)
+
+    report = reconcile.reconcile(tmp_path, dry_run=True)
+
+    assert report.semantic_unit_index_drift == []
 
 
 def _seed_sidecars(

@@ -3,7 +3,7 @@
 # Prominence — how much Evermatter speaks up
 
 Evermatter has one knob for how much it participates in a conversation. It is separate
-from `exomem mode`, which governs how much of your *machine* Evermatter may use. A laptop
+from `evermatter mode`, which governs how much of your *machine* Evermatter may use. A laptop
 on battery can still want maximal recall; a workstation can still want Evermatter to stay
 out of the way.
 
@@ -38,7 +38,7 @@ This preference belongs to the addressed vault and authenticated identity.
 Clients presenting the same identity share it. Local CLI/stdio and the shared REST
 key use the local owner identity; OAuth identities remain distinct. The generated
 `configure_memory` CLI command uses the same operation. A stale revision requires
-a fresh inspect; an operator's conflicting `EXOMEM_PROMINENCE` override is reported
+a fresh inspect; an operator's conflicting `EVERMATTER_PROMINENCE` override is reported
 instead of claiming that the requested change took effect.
 
 ## One level while coding, another in chat
@@ -59,13 +59,13 @@ it again; clearing a context that holds nothing changes nothing and says so.
 A set without a `context` keeps its original meaning and writes the identity-wide
 value.
 
-A clear still goes through when an operator has pinned `EXOMEM_PROMINENCE`, and the
+A clear still goes through when an operator has pinned `EVERMATTER_PROMINENCE`, and the
 response reports that the pin is active and still decides the effective level —
 removing a saved value cannot contradict the pin, and refusing would leave saved
 context values stuck. A *set* that conflicts with the pin is still refused.
 
 The context that applies to a request is **detected from the calling client**, or
-from an operator's explicit `EXOMEM_SURFACE`. On Evermatter Cloud, the control plane's
+from an operator's explicit `EVERMATTER_SURFACE`. On Evermatter Cloud, the control plane's
 client registry assigns each connected app its context, and the cell applies that
 before detection. No argument selects it, and it is an
 eagerness knob only: it never picks an identity, a vault, a storage path, or an
@@ -77,7 +77,7 @@ this request resolved under, and the effective level. All of it lives in one rec
 under one revision, so a set and a clear cannot interleave behind each other's back:
 whichever lands second is asked to inspect again.
 
-The older `exomem prominence <level>` command remains a machine-wide control.
+The older `evermatter prominence <level>` command remains a machine-wide control.
 Standalone hooks read that legacy configuration and environment; they do not
 inherit another authenticated identity's vault preference.
 
@@ -109,12 +109,12 @@ it is too chatty, not that you have to tune up to get it working.
 On a local install, where the setting reaches both the server and the CLI:
 
 ```
-exomem prominence              # show the active level and its full contract
-exomem prominence maximal      # set it
-exomem prominence --hook-env   # print the nudge tunables this level implies
+evermatter prominence              # show the active level and its full contract
+evermatter prominence maximal      # set it
+evermatter prominence --hook-env   # print shell lines that set this level's nudge tunables
 ```
 
-Precedence is `EXOMEM_PROMINENCE` (env) → the saved value for this request's
+Precedence is `EVERMATTER_PROMINENCE` (env) → the saved value for this request's
 engagement context → the saved identity-wide value → the legacy machine config →
 the known client default. The legacy command stores its level beside `mode`, so
 setting one never clears the other. `bootstrap()` reports the effective level, the
@@ -131,7 +131,7 @@ do not persist a server preference.
 A level saved through `settings.set` is stored on the **server**, per
 identity. The capture and retrieve nudge hooks are standalone copies installed
 into a hook directory on your **client** machine, and they resolve from
-`EXOMEM_PROMINENCE` and that machine's exomem configuration file only. They
+`EVERMATTER_PROMINENCE` and that machine's exomem configuration file only. They
 cannot ask the service: they do not import the package, and a client talking to
 a service on another box has no credential to ask with.
 
@@ -144,7 +144,7 @@ Evermatter does not recognise, since an unrecognised client is far more likely t
 a hooked CLI than a web connector. Conversational clients get nothing, because
 there is genuinely no cadence there to be out of step with.
 
-Run `exomem prominence <level>` **on the machine running the hooks** to change
+Run `evermatter prominence <level>` **on the machine running the hooks** to change
 the nudge cadence. That command moves the hooks and nothing else: your saved
 preference still decides what the server serves, which is why the block says so
 in as many words. Where the server and the client are the same machine, the one
@@ -188,18 +188,18 @@ the casual-looking conversations where a real result tends to arrive.
 The level blocks state policy. This instruction is your own request to recall
 before a task and to save what the task establishes. Paste it ahead of the
 Balanced or Maximal block. With either block it is longer than one 1,500-character
-field, so on ChatGPT give it a field of its own. `exomem setup` offers the same
+field, so on ChatGPT give it a field of its own. `evermatter setup` offers the same
 text for Claude Code and Codex. Leave it out at Light and Off: those levels save
 only when you ask.
 
 ```text
-Use Evermatter as the memory for my work. Before you start a task, recall what Evermatter holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again. Keep each file I hand you to read, such as an attachment, a screenshot or a document I point to, as a Source by its exact bytes, even when it settles nothing; tell me in one line, and treat what it claims as unverified. A file that proves something, such as a label, receipt or warranty, goes in Evidence in the same turn, cited in what you write about it. Files you work on in my own repositories are not handed files. Files that hold secrets, such as keys, tokens, a .env file, a card number or a code, are not kept; ask me for a copy with the secret covered.
+Use Evermatter as the memory for my work. Before you start a task, recall what Evermatter holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again. Keep each file I hand you to read, such as an attachment, a screenshot or a document I point to, as a Source by its exact bytes, even when it settles nothing; tell me in one line, and treat what it claims as unverified. A file that proves something, such as a label, receipt or warranty, goes in Evidence in the same turn, cited in what you write about it. Files you work on in my own repositories are not handed files. Files that hold secrets, such as keys, tokens, a .env file, a payment card number or a security code, are not kept; ask me for a copy with the secret covered.
 ```
 
 ### Maximal — recommended for web and hosted
 
 ```
-I use Evermatter as my durable Knowledge Base. If no skill is loaded, call bootstrap(profile="compact") once per chat and follow it.
+I use Evermatter as my durable Knowledge Base. If no skill is loaded, call read_instructions() once per chat and follow it.
 
 Evermatter prominence: MAXIMAL.
 - Recall: search before every substantive turn; skip only chit-chat/control. Cite useful hits. An empty result is a scoped miss and reason to capture.
@@ -212,7 +212,7 @@ Evermatter prominence: MAXIMAL.
 ### Balanced — the default where hooks exist
 
 ```
-I use Evermatter as my durable Knowledge Base. If no skill is loaded, call bootstrap(profile="compact") once per chat and follow it.
+I use Evermatter as my durable Knowledge Base. If no skill is loaded, call read_instructions() once per chat and follow it.
 
 Evermatter prominence: BALANCED.
 - Recall: search when a turn concerns my projects, domains, named entities, or prior conclusions, attempts, or decisions. Skip chit-chat, control, and answered follow-ups; cite useful hits.

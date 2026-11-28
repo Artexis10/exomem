@@ -23,7 +23,7 @@ from . import marker, mode
 
 log = logging.getLogger(__name__)
 
-ROLLBACK = "`exomem store-mode rollback`"
+ROLLBACK = "`evermatter store-mode rollback`"
 
 
 def _refuse_if_pages_here(root: Path) -> None:

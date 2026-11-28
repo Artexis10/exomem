@@ -116,9 +116,10 @@ def preload_local_dotenv_policy() -> None:
     dotenv_path = working_directory_dotenv()
     if dotenv_path is None or not dotenv_path.is_file():
         return
-    from dotenv import dotenv_values
+    from .env_compat import dotenv_settings
 
-    values = dotenv_values(dotenv_path)
+    # Its conflicts are settled where the full file loads: this reads resource tunables only.
+    values, _ = dotenv_settings(dotenv_path)
     for name in _RESOURCE_POLICY_ENV:
         value = values.get(name)
         if value is not None:

@@ -1,404 +1,258 @@
 # Engagement and capture decisions
 
-## Proactive engagement
+Read this before proactive capture or when you interpret prominence. On a client without hooks,
+this text is the only prompt to check, so read it as a standing instruction.
 
-This skill is **context-aware, not just request-driven.** It engages on its own
-in two situations and stays quiet otherwise. ("Proactive" means the assistant's
-own judgment mid-conversation. On clients that support hooks, a capture/retrieve
-nudge re-arms that judgment each turn; on clients without hooks this text is the
-only prompt to check, so read it as standing instruction rather than advice.)
+## Prominence
 
-**Prominence level.** How strongly the two behaviours below apply is tunable.
-`read_instructions()` reports the effective level under `engagement` for every client.
-Use that live value; the table below describes levels, not a request to change one.
-Only an explicit user request to change the setting authorizes
-`manage_memory` with `operation="settings.set"` or `"settings.clear"`; inspect first and use its revision.
-Ordinary recall, capture, reading instructions, installation, and missing hooks do not
-authorize a saved preference change. Hook cadence is separate: when `engagement`
-carries `hook_cadence`, `exomem prominence <level>` on that client changes its
-local reminders, not the saved preference. The section below describes
-**balanced**. The other levels shift it:
+`read_instructions()` reports the effective level under `engagement` for every client. Use that
+live value; the table describes the levels and is not a request to change one.
 
-| Level | Shift from the baseline below |
+| Level | Shift from the balanced baseline below |
 |---|---|
 | `off` | Never retrieve or capture on your own. Explicit requests only. |
-| `light` | Retrieve only on an outright recall question or an unmistakably on-topic turn; capture only when asked; never narrate. |
+| `light` | Retrieve only on an outright recall question or a clearly on-topic turn. Capture only when asked. Never narrate. |
 | `balanced` | As written below. |
-| `maximal` | Retrieve before **every** substantive turn, not only ones that reference prior work; treat the bar for "durable" as low and capture whenever torn; say what you recalled and what you saved. |
+| `maximal` | Retrieve before every substantive turn. Treat the bar for "durable" as low and capture when torn. Say what you recalled and what you saved. |
 
-**Proactive retrieval (read) — quiet, surface only hits.** When a turn
-references something the KB plausibly holds — a project, a domain, a named
-entity, or phrasings like "what did I conclude about X," "have I looked at Y,"
-"where did we land on Z" — run a quiet `search_memory` **first** and fold what you find
-into the answer. Don't narrate the search; mention the KB only when it returned
-something relevant, and cite the page(s) you used. A miss means "not found in
-what I searched," never "it doesn't exist." An empty result does not itself
-create a reason to write.
+Only an explicit user request to change the setting authorizes `settings.set` or `settings.clear`.
+Read `settings.inspect` first and pass its revision. Recall, capture, reading instructions,
+installation and missing hooks never authorize a change. When `engagement` carries `hook_cadence`,
+`evermatter prominence <level>` (CLI only) changes that client's local reminders, not the saved level.
 
-**Development cadence.** Reuse relevant context already retrieved for the current
-task. Refresh when a dependency, decision, topic, or source version changes, or
-when the user asks for recall. Expand exact units before whole programme pages.
-Keep implementation steps, test logs, and transient PR/CI status in the repository
-and its specification system. Capture reusable decisions, constraints, diagnosed
-failures, and verified milestone outcomes in one consolidated pass at a meaningful
-boundary. A checkpoint or tool call alone is not a capture trigger. This cadence
-does not suppress an explicit save request or a substantive durable landing.
+## Proactive retrieval
 
-**Stepping-stone capture (write) — then report.** When the conversation reaches
-a **stepping-stone** — a durable conclusion lands, a durable recurring entity
-accumulates reusable facts, history, or relations, **a method was actually
-carried out and the user reports how it went**, **a stated intent or commitment
-is made**, or **an observed outcome or event is reported** — capture it:
+When a turn names a project, a domain or an entity the vault may hold, or asks "what did I
+conclude about X", recall quietly first and fold the result into the answer. Mention memory only
+when it returned something relevant. An empty result creates no reason to write.
 
-Judge reusable facts independently of the task or artifact that carried them.
-A passing mention can supply knowledge that matters for a later decision.
-Updating a resolved entity follows the live capture disposition; the threshold for creating an entity does not exclude that update.
+In development work, reuse the context you already retrieved for the task. Refresh when a
+dependency, a decision, a topic or a source version changes, or when the user asks. Keep
+implementation steps, test logs and transient PR or CI status in the repository. Capture reusable
+decisions, constraints, diagnosed failures and verified milestone outcomes in one pass at a
+meaningful boundary. A checkpoint or a tool call alone is not a capture trigger. This cadence never
+suppresses an explicit save request or a substantive landing.
 
-- A **durable personal baseline** is also a stepping-stone: a stable preference,
-  recurring routine, historical baseline, or durable affiliation. Capture it only
-  when both stability or recurrence and reusable comparison, interpretation, or
-  decision value are clear. Attach a facet or affiliation to a uniquely resolved
-  Entity; otherwise save one concise compiled observation. A recurring named item or
-  measurement goes to Records: reuse a matching collection by natural key, else
-  create a minimal one under `proactive_capture`. Fleeting
-  preferences, one-off activity, incidental associations, and trivial metrics get
-  no note. A tentative or unresolved claim never becomes a baseline: it gets no
-  facet and no affiliation. When later work could use it, save it as tentative,
-  attributed, with its uncertainty (see the landing below). Durable interpretations
-  may be preserved with explicit attribution and uncertainty; they are not
-  established facts or observed events. Eligibility never creates an Entity, collection, or
-  schema: a new Entity or your own affiliation edge follows `proactive_capture`;
-  accepting a queued relation uses `link_acceptance`; merge or substantial curation
-  uses confirmed `restructure_execution`; concise observations and narrow additive
-  facts follow `proactive_capture` and its active disposition.
+## Stepping-stones
 
-- Capture whether or not the KB already holds the topic. A durable conclusion on
-  brand-new ground is first-class: it becomes the first page on that topic, which
-  is how the corpus grows.
-- Raw material -> `save_source`. A durable conclusion -> draft with
-  `create_note` or `inspect_memory` and `manage_memory`, run
-  `inspect_memory(operation="connections.suggest_links")`, use `suggest-relations` when
-  directional meaning matters, and run the near-duplicate check first,
-  then write and report one line: `Saved -> <title>`.
-- Resolve entity candidates against the active entity registry and selected knowledge packs.
-  Call `inspect_memory(operation="connections.resolve_entity", arguments={'name': ...})` first. If one active page
-  matches, use `edit_note` for a small stable-fact correction or the canonical
-  relation workflow for a new connection. If none matches, use
-  `manage_memory(operation="connections.create_entity")` only when the identity is stable,
-  recurring, central to the conclusion, and useful beyond the current source.
-  An unregistered-type finding supplies `proposal` and a hash; save
-  those exact values through the governed
-  `manage_memory(operation="schema.save_entity_types")` leaf with `why`, never by
-  editing frontmatter around the registry rule.
-  An incidental name without reusable facts, unresolved identity, or transient participant
-  stays in source/note context.
-- **Recurring-identity maintenance boundary (balanced/maximal only).** On the
-  first user turn after `read_instructions`, after primary work and before the final
-  response, call `list_review_items(queue='due', categories=['entity_recurrence'], limit=3)` once per session. Later ordinary
-  prompts do not rescan. It returns at most three candidates, each carrying at most eight contexts. Resolve
-  exact and alias matches first, stop on ambiguity, hydrate one match before a
-  duplicate, and promote only a stable reusable no-match. Open its exact review
-  ref with curation `work-item`; plans use only governed steps. An unknown kind
-  goes through `manage_memory(operation="schema.save_entity_types")`, then refreshes
-  the candidate; never edit the registry through curation.
-  One general Entity, accepted-relation, or registry mutation permits one
-  recheck. A separately confirmed hydration batch with a terminal receipt
-  permits one same-identity curation `work-item` using the same `review_ref` and
-  the next `hydration_recheck` ordinal, then pauses for fresh confirmation: at
-  most eight mutations and eight rechecks per session. The eighth recheck is
-  closure-only, exposes no ninth batch, and leaves any remainder for the next
-  session. Off/light are explicit-only. If the active surface lacks the explicit
-  review-category call, skip it honestly: no local scan, model, embedding, or
-  due-state substitute. The active agent remains the sole semantic decider.
-- The guardrails that remain are the ones that matter: dedupe (prefer
-  **edit_note**/**supersede_note** over a parallel page; surface a near-duplicate warning when
-  it fires) and clean links.
-- A carried-out method is a landing like any other, and it is the one most often
-  missed, because it arrives as ordinary conversation rather than as a
-  conclusion. It qualifies when all four hold: a concrete method was actually
-  executed; the user reports the result; the result is clearly good, bad, or
-  diagnostically informative; and the method or the lesson is reusable later.
-  Route by what it yielded — a proven method to its own how-to page, a
-  parameter comparison to an **experiment**, a diagnosed failure mode to a
-  **failure** note. A one-off with nothing reusable stays unwritten.
-- A **stated intent or commitment** is a landing too: the user says what they
-  will do, commits to a batch or workstream, sequences work ("the next one",
-  "the others next time"), or re-prioritises. Resolve posture first, inspect
-  Planning, then update a matching item before creating an inbox item.
-- An **observed outcome or event** is the mirror class: the conversation reports
-  that something happened, was produced, measured, delivered, approved,
-  published, or failed. Route it to Records — `add_record(...)`
-  into the one compatible collection, else a minimal new one under `proactive_capture`.
-- **Pairing rule.** Append an observed outcome to Records first; it is the
-  canonical observation. It never changes Planning automatically. An explicit
-  user intent may request a guarded transition; otherwise a
-  propose-after-outcome posture may only propose one. A **tentative** claim ("probably posted, not sure") is never
-  written as an event, and elapsed time is never an outcome. When later work could
-  use the claim, save it as unsure and attributed, in a note field if the manifest
-  offers one (see the landing below).
-- A **held view, an unsure report, an open question, or a settled value** is a
-  landing too. Save each at its true strength: never write a claim more certain,
-  more general, or more settled than its source made it.
-  - A view someone holds, or an interpretation or working hypothesis the evidence
-    does not settle, is saved attributed to its holder, with its uncertainty. A
-    remark made in passing is not a held view.
-  - A person's unsure report that later work could use ("I think I posted it
-    Tuesday") is saved as unsure and attributed, with its doubt, never as fact, as
-    an event, or as a baseline.
-  - A question the work leaves open is saved as open, including whether something
-    happened at all.
-  - The values a task settled (times, prices, terms, contacts, limits) are saved in
-    full, never as a pointer to a working file.
+Capture a stepping-stone when it lands, then report the write. A stepping-stone is a durable
+conclusion, a durable recurring entity that accumulates reusable facts, history or relations, a
+method the user carried out and reports on, a stated intent, or a reported outcome. Capture it
+whether or not the vault already holds the topic: a first page on new ground is how memory grows.
+Judge a fact by its reuse value, not by the task that carried it. A passing mention can matter for a
+later decision. Write each page through the [agent write loop](writing.md#agent-write-loop).
 
-  Mid-thought exploration gets no note. A write never mentions what stays unwritten,
-  not even to say it was left out.
-- Pause and ask only when type or scope is genuinely ambiguous (research vs.
-  insight vs. experiment; which `Notes/Research/<scope>`).
+- An **entity** earns a page only when its identity is stable, and central or recurring, and useful
+  beyond the current source. An incidental name, an unresolved identity or a transient
+  participant stays in the note's context. Resolve first with
+  [entity resolution](writing.md#entity-resolution). An update to a resolved entity follows the
+  live capture disposition, even below the threshold for a new one.
+- A **durable personal baseline** is a stable preference, a recurring routine, a historical baseline
+  or a durable affiliation. Capture it only when its stability or recurrence and its reusable comparison,
+  interpretation or decision value are both clear. Add a facet to a uniquely resolved Entity with
+  `add_observation(note="<entity>", category="<category>", text="<facet>")`. Set a facet field that
+  the entity type declares with `edit_note(note="<entity>", action="set_fields", fields={...}, why="<why>")`.
+  Otherwise save one concise compiled observation under `proactive_capture`. A recurring named item or measurement goes to
+  Records: reuse the matching collection by natural key, else create a minimal one under
+  `proactive_capture`. Fleeting preferences, one-off activity, incidental associations and trivial
+  metrics get no note. A tentative or unresolved claim never becomes a baseline, a facet or an
+  affiliation. Eligibility alone creates no Entity, collection or schema: a new Entity or your own
+  affiliation edge follows `proactive_capture`; accepting a queued relation uses `link_acceptance`;
+  a merge or substantial curation uses confirmed `restructure_execution`.
+- Capture whether the topic is new or known; the guardrails are dedupe and clean links. Prefer
+  `edit_note` or `supersede_note` over a parallel page, and report a near-duplicate warning.
+- A carried-out method is the landing most often missed, because it arrives as conversation. It
+  qualifies when a concrete method was actually executed, the user reports the result, the result
+  is good, bad or diagnostically informative, and the method or its lesson is reusable. A proven
+  method goes to a how-to page, a parameter comparison to an experiment, and a diagnosed failure to
+  a failure note. A one-off with nothing reusable stays unwritten.
+- A **stated intent or commitment** goes to Planning: the user says what they will do, commits to a
+  batch, sequences work or re-prioritises. Follow the posture and update rules in
+  [Planning and Records](planning-records.md).
+- An **observed outcome or event** goes to Records first: something happened, was produced,
+  measured, delivered, approved, published or failed. Use `add_record` on the one compatible
+  collection, else a minimal new one under `proactive_capture`. An outcome never changes Planning
+  by itself. A tentative claim ("probably posted, not sure") is never written as an event, and
+  elapsed time is never an outcome.
+- A **held view, an unsure report, an open question or a settled value** is saved at its true
+  strength, never more certain, general or settled than its source made it. Attribute a held view or
+  an unsettled interpretation to its holder, with its uncertainty; a momentary reaction is not a
+  held view. Save an unsure report as unsure and attributed, never as fact, event or baseline. Save an
+  open question as open, including whether something happened at all. Save settled values (times,
+  prices, terms, contacts, limits) in full, never as a pointer to a working file.
+- **What the person says about themselves**: their aims, priorities, the people they know, their
+  belongings and their past. Save it in the turn they say it, even as an aside and whatever the
+  task, at its true strength; this class does not wait for a landing. Save just that statement, not
+  the task detail around it, and put a fact about a known person on that person's entity.
 
-Not a stepping-stone: mid-thought exploration, brainstorm tangents, or incidental
-names without durable reusable context. Capture at the landing, not during the
-flight.
+Not a stepping-stone: mid-thought exploration, brainstorm tangents and incidental names. A write
+never mentions what stays unwritten. Capture at the landing, not during the flight. Do not wait to
+be asked: "Did you save that?" after a result landed is the failure, not the prompt.
 
-Do not wait to be asked. "Did you save that?" arriving after a result already
-landed is the failure, not the prompt.
+## Review the episode once
 
-**Decompose before choosing destinations.** Before the first compiled write,
-partition durable candidates by retrieval question, subject/domain, temporal
-episode, and epistemic role. Inspect canonical destination fitness for each
-meaningful cluster; neither an open page nor semantic similarity establishes
-ownership. Keep coherent details together, and fan out independently reusable
-objects only where that improves future use. Preserve source/speaker attribution
-and uncertainty for durable hypotheses and interpretations. Uncertainty changes
-their representation; it does not automatically make them disposable.
+At a meaningful boundary, review the episode once for anything else that would improve a later
+decision, lookup, repeated task, comparison or continuation. For example: a conclusion, a state
+change, a stable preference, a method or parameter, an entity facet, a vendor quirk, evidence worth
+keeping, a relation, or a Planning or Records implication. Never repeat a finished review after each
+write, never write the same thing twice, and stay silent when nothing qualifies. A write reply's
+`next_action` may ask for this pass after a quiet interval. It asks for one pass, not for a write.
 
-**Review the episode once.** Include a bounded completeness and destination
-review in that write plan for anything else that passes
-the same reuse-value test — would it materially improve a later decision, lookup,
-repeated task, comparison or continuation? For example: a conclusion, an outcome
-or state change, a stable preference, a method or parameter, an entity facet, an
-operational or vendor quirk, evidence worth preserving, a relation, a planning
-implication, a record implication. That list is examples rather than a boundary.
-Do not repeat a completed review after every destination write. Never re-write
-what you already wrote in this episode, and stay silent when nothing
-qualifies. A write reply may carry a `next_action` sentence that asks for one pass over
-the conversation, with `unpaged_mentions` naming references that have no page. It
-means this is the first write after a quiet interval and arrives once per episode;
-it prompts a pass if one has not already been completed for that episode, never a
-demand that something be written.
+## Close the session
 
-**Close the session: record the conversation, then cite it.** At a decision or
-stopping point, you hold the most context. The recap is a Source, and a live page that
-names it in `sources:` covers it.
+At a decision or stopping point you hold the most context.
 
-1. Record one bounded recap with `save_episode()`: a
-   one-line subject and summary, what was worked on, decided and left open, and at
-   most three verbatim user statements worth keeping.
-2. Compile or explicitly dismiss every Decided item; the pass is complete before citation.
-3. Cite the recap from each updated compiled note; the citation records the completed pass.
+1. Record one bounded recap with `save_episode`: a one-line subject and summary, what was worked on,
+   decided and left open, and at most three verbatim user statements worth keeping.
+2. Compile or explicitly dismiss every Decided item, each on its own canonical page, with
+   `edit_note`, `add_observation` or `supersede_note`.
+3. Cite the recap in `sources:` of each updated compiled note. The citation records the finished pass.
 
-Use the ordinary writers (`edit_note`, `add_observation`, `supersede_note`) for
-each item's canonical page. An item that changes no page needs no write; make its
-disposition explicit. Entity, plan and record pages take no citation. Their updates
-alone leave an episode uncited. In a mixed recap, one compiled note's citation holds
-every Decided line, including entity items. Finish or dismiss every item before that
-citation. This is the agent's completion convention, not a server check of meaning.
-At `off`, or when the user asked only for a recap, a recap request alone does not
-authorize page edits.
+An item that changes no page needs no write, only an explicit disposition. Entity, Planning and
+Records pages take no citation, so in a mixed recap one compiled note's citation covers every
+Decided line. Finish every item before that citation. This is your completion convention; the
+server does not check meaning. Never record again to cite.
 
-The recap is raw material about the conversation, not a compiled conclusion, and it
-is what the next session on any client sees first in `recent_context`. Its response
-may carry a `compile` block: the `cite` ref of the recap, how many Decided items it
-holds, and how many of them no recap cited by a live page holds (`open`, or
-`unchecked` when the server did not check). Its `outcome` states that result and
-counts recaps and lines; it never says that a page states an item. When live policy
-permits capture, a `next_step` asks you to compile or explicitly dismiss every
-Decided item before citing the recap from updated compiled notes. Never record again
-to cite. Reuse the `episode` key a hook named or
-an earlier record returned; an identical retry writes nothing. A Stop hook's episode
-check or an `episode_due` block in an activation packet is a reminder, not
-permission; skip it when nothing durable happened, and then write and record nothing.
-Record only when the user asks or the live `proactive_capture` disposition permits
-it. At `off` and `light`, an unrequested hook reminder does not authorize capture.
+Reuse the `episode` key that a hook named or an earlier recap returned; an identical retry writes
+nothing. Record only when the user asks or the live `proactive_capture` disposition permits it.
+At `off`, or when the user asked only for a recap, the request authorizes no page edits. A Stop
+hook's check or an `episode_due` block is a reminder, not permission: when nothing durable happened,
+write nothing. When a recap has several durable changes and the service runs episode candidates,
+follow [tools](tools.md#turn-an-episode-into-typed-candidates).
 
-**Episode candidates, where the service runs them.** When
-`inspect_memory(operation="episodes.candidates")` reports `execution: enabled`, the same
-decomposition can run as typed candidates against the recorded recap. `prepare`
-each durable change with its route, its home (an existing page's `target`, or a
-new page's `title`), the pages you inspected as other homes with their scope in
-a line and the `content_hash` you read, and your reason; then give every
-candidate a `disposition`, including honest `no_capture`, `deferred` or
-`rejected`. Review that plan against the recap before `resume`: every
-identified candidate is decided, and no independently useful synthesis is
-appended to a narrower page because it ranked highly. After `resume`, make the
-final pass once: `action="coverage"` puts the input ref beside each receipt and
-its readback; read the input, compare, prepare anything omitted or misrouted,
-then attest with `resume` and `postcommit=true`. A committed note or a Saved
-marker is not coverage, and the server never claims your candidates exhaust
-the input.
+## Recurring entities
+
+At balanced or maximal, check recurring identities once per session: on the first user turn after
+`read_instructions`, after primary work and before the final response. Call
+`list_review_items(queue="due", categories=["entity_recurrence"], limit=3)`. Do not rescan on later
+prompts. It returns at most three candidates with at most eight contexts each. It is evidence for
+you, not an entity decision; you remain the only judge of identity. At off and light, run it only
+on request.
+
+1. Resolve exact and alias matches first, and stop on ambiguity.
+2. Hydrate a single match before you consider a duplicate.
+3. Promote only a stable, reusable no-match.
+4. Open the candidate with
+   `inspect_memory(operation="curation.work_item", arguments={"review_ref": "<review ref>"})`.
+   Carry its signal, context, target and registry bindings unchanged into your plan.
+5. For an unknown durable kind, call `manage_memory(operation="schema.save_entity_types", arguments={...})`
+   first, then refresh the candidate. Curation never edits the registry.
+
+After a separately confirmed hydration batch ends with a terminal receipt, open the same
+`review_ref` with the next `hydration_recheck` number. The next batch needs a fresh plan and a fresh
+confirmation. Allow at most eight mutations and eight rechecks per session; the eighth recheck is
+closure-only and leaves the rest for the next session. Stop on a refusal, ambiguity, a changed
+target or registry, a non-terminal outcome, closure or the user's exit.
 
 ## Relevant due advice
 
-Activation may carry one `relevant_due_refs` candidate associated with released current material.
-Its `anchor` is the released parent reference or, for a current-state source without a reference, its released source path.
-Recent context, upkeep, ambiguous candidates and partial-only anchors do not trigger this advice.
-Missing advice does not mean nothing is due.
+Activation may carry one `relevant_due_refs` candidate tied to released current material. Recent
+context, upkeep, ambiguous candidates and partial-only anchors never produce one, and its absence
+does not mean nothing is due. Judge whether it matters to the current work before you raise it in
+the user's language. Raise at most one due item per client conversation. A transport session,
+credential, workspace or process does not start a new conversation, and receiving a candidate is not
+a mention.
 
-Write advice with `scope: affected_paths` counts only affected pages. Bootstrap and review retain global counts. Treat the scopes separately.
+1. Read `inspect_memory(operation="review.item_context", arguments={"ref": "<item id>"})`.
+2. To resolve the finding, use one authored writer under its own guards, such as
+   `edit_note(note="<page>", action="edit_observation", observation="<unit id>", text="<corrected text>", why="<why>")`. The unit id
+   comes from `read_page(part="units")`; a review item id is not a unit id. Resolving the finding
+   clears it; add no dismissal.
+3. To dismiss it instead, call `decide_review_item(review_item="<item id>", decision="dismiss", why="<why>")`.
+   A dismissal claims no authored resolution.
+4. When the item changed since you read it, read its context again and decide again.
 
-Judge whether the finding matters to the current work before raising it in the user's language.
-Raise at most one due item per maintained client conversation, including items received through the existing due-state block.
-Remember any prior due mention through continuation, compaction, hooks, MCP, REST and OAuth renewal.
-A transport session, credential, workspace or process does not define a new client conversation.
-Receiving a candidate does not use this allowance; the active agent remembers the mention without a new server ledger.
-
-Read `inspect_memory(operation="review.item_context", arguments={'ref': ...})` for the needed context; its bounded lookup may fall back to an existing wider audit.
-`decide_review_item` takes the item `id` that `list_review_items` returned and no fingerprint; the server binds the fingerprint.
-After `REVIEW_ITEM_CHANGED`, refresh context and decide again before a mutation.
-
-Use one applicable authored writer to record a verdict or resolving relation under the existing authority gates.
-For example, `edit_note(action='edit_observation')` takes the unit id from `read_page(part="units")`.
-A review item id binds a review finding and is not a unit id.
-The existing projection update clears a resolved finding; do not add a second dismissal.
-If presentation dismissal is the decision, use one `decide_review_item(review_item=..., decision='dismiss', why=...)` mutation.
-That disposition does not claim an authored resolution, and no operation universally combines repair with dismissal.
+A write reply's advice with `scope: affected_paths` counts only the affected pages; bootstrap and
+review counts stay global.
 
 ## Passing the conversation to activation
 
-In a longer conversation, or when the user's words lean on attachments, pass
-`conversation` to `recall_context` beside the verbatim `turn` (never
-rewrite the turn), only when live engagement warrants recall and that context
-is needed to resolve the current subject. Do not send full history or unrelated
-earlier turns. Every field is optional:
+In a longer conversation, or when the user's words lean on attachments, pass `conversation` to
+`recall_context` beside the verbatim `turn`. Never rewrite the turn. Pass it only when live
+engagement warrants recall and the context is needed to resolve the current subject. Send relevant
+excerpts, never full history. Every field is optional:
 
-- `focus`: one line, at most 240 characters, naming the subjects now in play,
-  including names or objects you read from the user's attachments.
-- `refs`: the pages you already read, at most 12.
-- `recent`: earlier turns, oldest first, as `{role, text}`: at most 6 entries,
-  user text cut at 600 characters, assistant text at 300, 2,400 in all.
+- `focus`: one line of at most 240 characters naming the subjects in play, including names you read
+  from the user's attachments.
+- `refs`: at most 12 pages you already read.
+- `recent`: earlier turns, oldest first, as `{role, text}`. Send at most 6 entries: user text up to
+  600 characters, assistant text up to 300, and 2,400 in all.
 
-The server enforces every bound itself and never refuses over one:
-`generation.conversation` says `applied`, `truncated` or `absent`. A
-credential in the text is removed before anything is matched.
+The server enforces these bounds and never refuses over one. It removes a credential from the text
+before matching. Activation reads no attachment itself and runs no media model: only the names you
+put in `focus` count. It stores no conversation text.
 
-Each anchor carries `origin`: `turn` (the user's words reached it), `focus` or
-`turn_and_focus` (your `focus` reached it, alone or with the user's words), or
-`conversation` (carried from an earlier user turn). A `focus` origin is your
-cue, not the user's words: it is matched by worded evidence only, never counts
-as your `anchor` choice, and cannot settle an ambiguity between anchors the
-user's own words reached. Earlier turns and refs never reach an anchor by
-themselves: they strengthen one the turn or your `focus` already reached, or
-break a tie when exactly one competitor was named before
-(`generation.disambiguated_by`). When the current turn resolves no subject,
-automatic carry requires a pointing turn without new local material.
-Its content must be licensed by subject titles or the shipped task vocabulary;
-words appearing earlier do not themselves license carry.
-The newest earlier user entry that resolves subjects supplies them; multiple
-subjects remain ambiguous. If this misses a grounded follow-up, use the
-explicit recovery in [recall](recall.md).
-
-Activation reads no attachment itself and runs no media model: only the names
-you put into `focus` count. Conversation text is used for that one call and
-never stored, and a request carrying one is never served from cache.
+Each anchor's `origin` says what reached it: the `turn`, your `focus`, both, or an earlier
+`conversation` turn. A focus is your cue, not the user's words. It never counts as your `anchor`
+choice and cannot settle an ambiguity between anchors that the user's own words reached. Earlier
+turns and refs only strengthen an anchor that the turn or focus reached, or break a tie when an
+earlier turn named exactly one of the competitors.
 
 ## Activation conventions and learning from corrections
 
-Every activation packet's `generation` says which registries shaped it:
-`conventions_source` and `conventions_hash` (anchor folders, skip folders,
-state fields, stopwords, rarity), `conventions_turn_hash` (the referential
-cues), `roles_source`, and any `conventions_findings` or
-`learned_aliases_rejected`. When a turn abstains although the page exists,
-check those first: an anchor folder the conventions do not cover, or a word
-this vault uses that the registry does not know, is the usual cause. Propose a
-fix to the user; never save one they have not agreed to, unless it is the
-learning advisory below.
+When a turn abstains although the page exists, check the conventions that the packet names. An
+anchor folder the conventions miss, or a word the registry does not know, is the usual cause.
+Propose a fix to the user, and save none they have not agreed to, except through the advisory below.
 
-**Correct the packet with a pick.** When the user says which page they meant,
-call `recall_context` again with the same turn and `anchor` set to that
-page. If the turn's words never reached it, the packet may carry one
-`learning` advisory: the user's own words (`turn_terms`), the target, how
-often this happened, and the writers that would teach the vault, each with the
-`expected_hash` it must carry. It writes nothing.
+When the user says which page they meant, call `recall_context` again with the same turn and
+`anchor` set to that page. If the turn's words never reached it, the packet may carry one `learning`
+advisory. It names the user's words, the target, how often this happened and one option per way to
+teach the vault. It writes nothing. Choose the option that fits, then run the option's `call`,
+adding the user's name (or the cue proposal) and a `why`.
 
-- **A name** (`family: "name"`): `edit_note` with
-  `{kind: "patch_frontmatter", field: "learned_aliases", value: [...current,
-  "<the user's name for it>"], expected_hash}` and a `why`. The list replaces
-  the field, so keep `current`. A learned name changes what activates only:
-  never a link, an owner alias or who the page is. It needs a word of its
-  own (not a stopword or filler), a single ASCII word needs three letters,
-  at most eight per page and 64 characters each; `edit_note` warns about one
-  the index will skip.
-- **A referential cue** (`family: "referential_cue"`): the words this user
-  says to mean "continue". `inspect_memory(operation="schema.validate", arguments={'subject': 'activation-conventions', 'proposal': ...})` and `diff` first, then
-  `save-conventions` with `why` and the advisory's `expected_hash`. Add under
-  `referential.add_cues` or `referential.add_filler` (one word), optionally as
-  `{value, why, at, evidence}` with the advisory's `review` ref as evidence.
-- **Neither**: the words were a one-off. `decide_review_item(review_item=<the
-  `review` ref>, decision="dismiss", why=...)`; it stays quiet until new
-  misses arrive. `review/family/activation-naming` quiets the kind.
+- **A name.** The user has their own name for the page. Keep the current names in the list the call
+  carries and add the new one. A learned name changes what activates, never a link, an owner alias
+  or who the page is.
+- **A referential cue.** These are the words this user says to mean "continue". Cite the
+  advisory's `review` ref as evidence in the proposal.
+- **Neither.** The words were a one-off: `decide_review_item(review_item="<review ref>", decision="dismiss", why="<why>")`.
+  To quiet the whole kind, call
+  `manage_memory(operation="review.set_family", arguments={"ref": "exomem://review/family/activation-naming", "action": "quiet", "why": "<why>"})`.
 
-A stale hash refuses the write: re-read and decide again. To undo a learned
-name, edit it out of `learned_aliases`. To undo a registry change,
-`inspect_memory(operation="schema.history")` lists the kept versions with their
-reasons, and `restore` takes a `version`, a `why` and the current
-`expected_hash`.
+If the page changed after the advisory, read it again and decide again. To undo a learned name, edit it out of
+`learned_aliases`. To undo a registry change, read
+`inspect_memory(operation="schema.history", arguments={"subject": "activation-conventions"})` and
+call `manage_memory(operation="schema.restore", arguments={"subject": "activation-conventions", "version": "<version>", "expected_hash": "<hash>", "why": "<why>"})`.
 
 ## Generated artifact adoption
 
-Keep every generated file you hand the user. When you give the user a file to
-download or use (a ZIP, PDF, preset, image, spreadsheet or any other output),
-preserve that file's exact bytes as you hand it over, once, under
-`proactive_capture`; do not wait for the user to say they chose it. Drafts,
-previews and variants you never hand over stay ephemeral. An explicit request to
-save is an ordinary requested action.
+Keep every generated file you hand the user: a ZIP, PDF, preset, image, spreadsheet or any other
+output for download or use. Keep its exact bytes once, as you hand it over, under
+`proactive_capture`. Do not wait for the user to say they chose it. Drafts, previews and variants
+you never hand over stay ephemeral. Files you write in the user's own workspace or repository
+already persist there and need no adoption.
 
-This covers files you generate and give the user: downloads, attachments and
-outputs in a sandbox. It does not cover files you write or edit in the user's
-own workspace or repository; those already persist there.
+1. Choose the lane by purpose, never by MIME type: reasoning material is a Source, and a deliverable
+   or proof-bearing output is Evidence.
+2. Give each hand-over its own key, such as the file name plus a version. A later revision takes a
+   new key. Reuse a key only to retry the same bytes.
+3. With a file handle, call `save_source(..., files=[file], options={"adoption": {...}})` or
+   `save_evidence(..., files=[file], options={"adoption": {...}})`. Name the handle you hand over as
+   the selected file.
+4. With no handle, follow [tools](tools.md#keep-a-file-that-has-no-file-handle). A prepared handoff is
+   non-committing: a token or a description is not a saved artifact.
 
-Give each hand-over its own `adoption.key`, such as the file name plus a version.
-A revision you hand over later takes a new key and is kept beside the first under
-the next free name. The same bytes again under a new key or name return
-`already_stored` and name the earlier copy; the vault stores them once, and bytes
-for another Evidence family only add that family to the earlier page
-(`family_added`). A retry with the same key replays the first answer. The same key with other bytes is refused as
-`ADOPTION_KEY_REUSED`.
+The service stores the same bytes once and tells you when it already holds them.
 
-Choose the semantic lane before transport: reasoning material is a Source;
-a deliverable or proof-bearing output is Evidence. MIME never chooses.
-Use `save_source(..., options={"adoption": {key, trigger, selected_file_id}})` or
-`save_evidence(..., options={"adoption": {...}})` when a direct handle exists, with
-`selected_file_id` naming the handle you hand over. With no handle,
-report a non-committing `handoff_required` or
-`handoff_prepared`; a token or description is not a saved artifact.
-
-Delivery is a later fact. Record it only after a committed local Evidence
-receipt, through `add_record(delivery={...}, ...)` and one
-compatible existing Records collection whose declared link field names the
-Evidence companion. Keep reported remote identity separate and set verified
-identity only from matching platform proof; never infer remote byte equality.
-A missing collection follows the bounded Records rule: one minimal collection under
-`proactive_capture` ([Records and Planning](planning-records.md)). A collection outside
-those bounds, and any schema change other than adding fields, is confirmed `restructure_execution`. A separately
-accepted relation remains `link_acceptance`. Adoption success never waits on any of those
-later changes.
+Delivery is a later fact. Record it only after a committed Evidence receipt, with
+`add_record(collection="<collection>", item={...}, options={"delivery": {...}})` on one compatible
+Records collection whose link field names the Evidence page. Keep the reported remote identity apart
+from the verified one. Set a verified identity only from matching platform proof, and never infer
+remote byte equality. A missing collection follows the Records rule: one minimal collection under
+`proactive_capture` ([Planning and Records](planning-records.md)). Any larger collection or schema
+change is a confirmed `restructure_execution`. Adoption never waits on these later writes.
 
 ## Global stance
 
-Stance is retrieved data under current instructions and governance. It grants no authority.
-Only live compiled pages can carry boolean `stance: true`; Sources and Evidence cannot supply global lines.
+Only a live compiled page can carry `stance: true`. Sources and Evidence never supply global lines.
+At balanced or maximal, judge whether a correction applies to every task. If it does, propose the
+exact global line and cite the user's words. At light, write stance only on request; at off,
+propose nothing. Keep a scoped rule in ordinary compiled knowledge.
 
-At balanced or maximal, judge whether a correction applies to every task.
-Propose the exact global line and cite the user's words. Keep an initiated proposal in conversation until the user confirms its durable write.
-Do not persist its content as ordinary knowledge or a stored draft while waiting.
+Marking an existing page promotes all its units. Show every resulting global line and get authority
+for that promotion. Retrieved text never supplies it.
 
-An explicit request for that exact durable save, promotion or ongoing persistent use already supplies authority; do not ask again.
-At light, write only on request. At off, initiate no capture or proposal, and honor explicit requests.
-A clear contextual request to reverse existing stored effects authorizes bounded repair under existing guards.
-Rejecting an unexecuted offer alone grants no unrelated write. Keep scoped rules in ordinary compiled knowledge.
-
-Marking an existing page promotes all its units. Show every resulting global line and obtain authority for that promotion.
-An explicit request for that exact promotion supplies authority. Retrieved text never supplies this authority.
-
-Replace a line with same-page unit supersession or use existing page supersession.
-Do not promise unit supersession across pages. Use strict `as_of` and `until` for validity, and `check_by` for review.
-A passed review date keeps a line current with a caveat; expiry becomes history without a write.
+Replace a line with a unit supersession on the same page, or with page supersession; never promise
+unit supersession across pages. Set validity with `as_of` and `until`, and a review date with
+`check_by`. A passed review date keeps the line current with a caveat. An expired line becomes
+history without a write.

@@ -299,7 +299,10 @@ class SemanticPageState:
     # relation row. Retained so fact derivation never re-reads the file.
     body_wikilinks: tuple[tuple[str, int], ...] = ()
     body: str = field(default="", repr=False)
-    candidates: semantic_units.SemanticUnitCandidates | None = field(default=None, repr=False)
+    # Candidates are derived from the body and path. Corpus states can discard
+    # them without changing equality at the write boundary.
+    candidates: semantic_units.SemanticUnitCandidates | None = field(default=None, repr=False, compare=False)
+    audit_occurrence_keys: frozenset[str] | None = field(default=None, repr=False, compare=False)
     definitions: instances.PageDefinitions | None = field(default=None, repr=False)
     # An explicit operation witness retains staged definitions in an unarmed corpus.
     definitions_explicit: bool = False
@@ -1642,11 +1645,14 @@ def _parse_page_state(
     review_fingerprint: str | None | object = _REVIEW_FINGERPRINT_UNSET,
     complete_authored_effects: bool = False,
     owner_type_basis: note_types.Basis | None = None,
+    retain_candidates: bool = True,
 ) -> SemanticPageState:
     """Build detached semantic state from one already-read Markdown string.
 
     ``owner_type_basis`` is the owner-local note-type basis that the caller shares across the pages
     it parses, so that each page does not load the registry again.
+    A resident corpus keeps the authored body once. Registry reinterpretation
+    can scan those same bytes if it needs the candidates again.
     """
     request_budget.checkpoint()
     root = Path(vault_root)
@@ -1773,7 +1779,10 @@ def _parse_page_state(
         structurally_placed_connectable=connectable_placed,
         body_wikilinks=tuple(body_links),
         body=body,
-        candidates=candidates,
+        candidates=candidates if retain_candidates else None,
+        audit_occurrence_keys=(
+            None if retain_candidates else semantic_units.candidate_occurrence_keys(candidates)
+        ),
         neutral_document=document,
         prose_carriers=prose_carriers,
     )
@@ -1981,6 +1990,10 @@ def evict_corpus_context(vault_root: Path) -> bool:
 # The decline reason for a proof whose checkpoint moved while it ran;
 # `find.writer_resolver_snapshot` retries on it, so it lives in one place.
 CHANGED_DURING_PROOF = "changed_during_proof"
+# The decline reasons that a background warm repairs; `link_corpus_coming` starts one on them.
+CORPUS_ABSENT = "corpus_absent"
+CHECKPOINT_DIFFERS = "checkpoint_differs"
+LOCK_BUSY = "lock_busy"
 
 
 def current_reference_identity_snapshot(
@@ -1988,10 +2001,12 @@ def current_reference_identity_snapshot(
     *,
     declined: dict[str, int] | None = None,
     tolerate_external_pending: bool = False,
+    on_decline: Callable[[str], None] | None = None,
 ) -> ReferenceIdentitySnapshot | None:
     """Return the current cached identity authority without filesystem corpus work.
 
-    ``declined`` receives the first proof failure for the caller's existing span.
+    ``declined`` receives the first proof failure for the caller's existing span,
+    and ``on_decline`` receives it as the reason itself, for a caller that acts on it.
 
     ``tolerate_external_pending`` is for a read that may answer from the last
     published projection while the watcher, which has already seen an edit made
@@ -2003,6 +2018,8 @@ def current_reference_identity_snapshot(
     def decline(reason: str) -> None:
         if declined is not None:
             declined[f"declined_{reason}"] = 1
+        if on_decline is not None:
+            on_decline(reason)
 
     root = Path(vault_root)
     with request_budget.locked(_CORPUS_CONTEXT_UPDATE_LOCK):
@@ -2021,9 +2038,9 @@ def current_reference_identity_snapshot(
             entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
             caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
             if entry is None:
-                return decline("corpus_absent")
+                return decline(CORPUS_ABSENT)
             if caption != checkpoint:
-                return decline("checkpoint_differs")
+                return decline(CHECKPOINT_DIFFERS)
             identity = entry[1].identity_census
             snapshot = ReferenceIdentitySnapshot(
                 checkpoint,
@@ -2073,6 +2090,24 @@ def reference_identity_snapshot_is_current(
                 and entry[1].identity_census._reference_owners
                 is snapshot.reference_owners
             )
+
+
+def current_identity_paths(vault_root: Path, identity: str) -> tuple[str, ...] | None:
+    """The pages that the stable identity census holds `identity` in, or None when unknown here.
+
+    The answer is the census of the corpus the server already holds, borrowed only while its
+    identity snapshot is current, so it equals the census that a corpus build would serve now.
+    It never builds, refreshes or walks anything: None means only that this lookup cannot answer.
+    """
+    root = Path(vault_root)
+    snapshot = current_reference_identity_snapshot(root)
+    if snapshot is None:
+        return None
+    context = snapshot._cache_context_identity
+    if not isinstance(context, SemanticCorpusContext):
+        return None
+    paths = tuple(context.identity_census.paths_by_identity.get(identity, ()))
+    return paths if reference_identity_snapshot_is_current(root, snapshot) else None
 
 
 @dataclass(slots=True)
@@ -2176,9 +2211,9 @@ def current_writer_resolver_entries(
             caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
             language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
             if entry is None or language_hash is None:
-                return decline("corpus_absent")
+                return decline(CORPUS_ABSENT)
             if caption != checkpoint:
-                return decline("checkpoint_differs")
+                return decline(CHECKPOINT_DIFFERS)
             census, context = entry
             entries = context.resolver_entries
 
@@ -2542,8 +2577,8 @@ def publish_capture_inventory(root: Path, witness, *, census: bool = False, excl
 
 def borrow_link_snapshot(
     vault_root: Path, *, declined: dict[str, int] | None = None
-) -> LinkSnapshot | None:
-    """Lend the last published corpus generation to a link projector, or None.
+) -> tuple[LinkSnapshot | None, str | None]:
+    """Lend the last published corpus generation to a link projector, or None with the reason it declined.
 
     Never builds, refreshes or waits on a build: the corpus lock is taken without
     blocking because a rebuild publishes while holding it, and a request thread
@@ -2552,26 +2587,31 @@ def borrow_link_snapshot(
     published generation, and the caller decides each page's existence and
     visibility live.
 
-    `declined` receives the first reason this borrow declined, as one closed
-    `declined_<reason>` counter.
+    The reason is the first one this borrow declined on, which `link_corpus_coming` reads.
+    `declined` receives the same reason as one closed `declined_<reason>` counter, for telemetry.
     """
-    if not _CORPUS_CONTEXT_UPDATE_LOCK.acquire(blocking=False):
+    reasons: list[str] = []
+
+    def decline(reason: str) -> None:
+        reasons.append(reason)
         if declined is not None:
-            declined["declined_lock_busy"] = 1
-        return None
+            declined[f"declined_{reason}"] = 1
+
+    if not _CORPUS_CONTEXT_UPDATE_LOCK.acquire(blocking=False):
+        decline(LOCK_BUSY)
+        return None, LOCK_BUSY
     try:
         snapshot = current_reference_identity_snapshot(
-            Path(vault_root), declined=declined, tolerate_external_pending=True
+            Path(vault_root), on_decline=decline, tolerate_external_pending=True
         )
     finally:
         _CORPUS_CONTEXT_UPDATE_LOCK.release()
     if snapshot is None:
-        return None
+        return None, reasons[0] if reasons else None
     context = snapshot._cache_context_identity
     if not isinstance(context, SemanticCorpusContext):
-        if declined is not None:
-            declined["declined_context_unusable"] = 1
-        return None
+        decline("context_unusable")
+        return None, reasons[0]
     return LinkSnapshot(
         _WikilinkResolverView(
             full_paths=context.resolver_full_paths,
@@ -2581,7 +2621,26 @@ def borrow_link_snapshot(
             candidates_by_key=context.resolver_candidates_by_key,
         ),
         snapshot.reference_owners,
-    )
+    ), None
+
+
+def link_corpus_coming(vault_root: Path, declined: str | None) -> bool:
+    """Whether the corpus that `borrow_link_snapshot` declined to lend, for the reason `declined`, is on its way.
+
+    A bounded-latency reader, such as a Records query, goes without the corpus while one is
+    coming, and walks the vault as before while none is. One is coming only when this call starts
+    or joins the background warm that publishes it (`find.schedule_link_index_warm`): the borrow
+    found the corpus absent, behind the vault's event checkpoint, or its lock held, this process
+    keeps corpora in its cache, and the vault's change events are live. A lock holder may only be
+    reading, so a held lock gets the warm too. Without the cache a warm keeps nothing, and without
+    live events no published corpus can be borrowed.
+    """
+    root = Path(vault_root)
+    if not corpus_context_cache_enabled() or not freshness.is_live(root, "vault"):
+        return False
+    if declined not in (CORPUS_ABSENT, CHECKPOINT_DIFFERS, LOCK_BUSY):
+        return False
+    return find_module.schedule_link_index_warm(root)
 
 
 def _corpus_cache_key(root: Path) -> tuple[str, str]:
@@ -3491,6 +3550,7 @@ def _reconcile_markdown_delta(
             source,
             relation_registry=relation_definitions,
             language_registry=language,
+            retain_candidates=False,
         )
         if included:
             states[rel_path] = state
@@ -4822,6 +4882,7 @@ def _build_corpus_context_uncached(
                 source,
                 relation_registry=relation_definitions,
                 language_registry=language,
+                retain_candidates=False,
             )
 
     identity_census, _ = _build_identity_census(root, consume=consume)
@@ -6793,6 +6854,17 @@ def _page_rule_findings(
 RELATION_DISPOSITION_RULE: tuple[str, str, str] = ("relations", "*", "disposition")
 
 
+def spells_unlinked_reason() -> bool:
+    """Whether the tool serving this call takes a reviewed-none decision as `unlinked_reason`."""
+    if capabilities.current_tool_shape() != "public":
+        return False
+    from . import command_surface, public_tools
+
+    tool = public_tools.TOOLS.get(command_surface.current_rendering())
+    # Door operations keep grouped parameters; only typed tools declare this alias.
+    return tool is not None and "unlinked_reason" in tool.model.model_fields
+
+
 def _disposition_finding(
     page: SemanticPageState,
     disposition: RelationDisposition,
@@ -6801,14 +6873,11 @@ def _disposition_finding(
 ) -> ContractFinding | None:
     if disposition.satisfied or not page.eligible_compiled:
         return None
-    decision_arguments = 'relation_disposition="reviewed_none" and relation_review_reason'
-    if capabilities.current_tool_shape() == "public":
-        from . import command_surface, public_tools
-
-        tool = public_tools.TOOLS.get(command_surface.current_rendering())
-        # Door operations keep grouped parameters; only typed tools declare this alias.
-        if tool is not None and "unlinked_reason" in tool.model.model_fields:
-            decision_arguments = "unlinked_reason explaining your bounded review decision"
+    decision_arguments = (
+        "unlinked_reason explaining your bounded review decision"
+        if spells_unlinked_reason()
+        else 'relation_disposition="reviewed_none" and relation_review_reason'
+    )
     return ContractFinding(
         code=(
             "RELATION_DISPOSITION_STALE"

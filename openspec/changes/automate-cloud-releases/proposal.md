@@ -21,12 +21,9 @@ The operator decided on 2026-11-10 that cells upgrade automatically, once a day,
 
 ## Capabilities
 
-### New Capabilities
-
-- `cloud-release-automation`: the `cloud-deploy` workflow, the deploy principal's scope, the platform gate and its Deployment record, the barrier file, the platform upgrade command and the rollout alerts.
-
 ### Modified Capabilities
 
+- `cloud-release-automation`: adds the `cloud-deploy` workflow, the deploy principal's scope, the platform gate and its Deployment record, the barrier file, the platform upgrade command and the rollout alerts.
 - `cloud-cell`: the release requirement gains upgrade windows, per-node concurrency after the canary and the snapshot restore point. The backup requirement takes a local cell's pre-upgrade off-site backup from the snapshot, after the target starts. New requirements cover the cell's hourly traffic counts and each cell's upgrade window. `cloud-cell` is not canonical yet. It lives in the delta of `adopt-exomem-cloud-plain-cells`, and `move-cloud-cells-to-local-storage` modifies the backup requirement. This change archives after both.
 - `hosted-gateway-contract`: the gateway holds a request while its cell restarts, and every call to a cell has a timeout.
 

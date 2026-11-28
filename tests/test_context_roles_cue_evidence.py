@@ -141,10 +141,8 @@ def test_no_anchor_resolves_via_category_match_on_a_turn_with_no_old_eligible_ca
         anchor_id="a",
         path="a.md",
         ref=None,
-        # Five tokens: longer than `MAX_NGRAM` (4), so the turn below can
-        # never reproduce the whole title as one contiguous n-gram and earn
-        # `exact_alias` by accident -- this test wants a `lexical_overlap`-
-        # ONLY candidate, the case `category_match` alone can promote.
+        # The turns below supply only part of this title, so they earn
+        # lexical overlap without spelling a registered name in full.
         title="Northern Freight Corridor Bypass Plan",
         kind="hub",
         lifecycle="active",

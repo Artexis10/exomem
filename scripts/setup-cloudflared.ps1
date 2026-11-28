@@ -1,4 +1,4 @@
-# Set up a Cloudflare Tunnel as the public ingress for exomem on this machine,
+# Set up a Cloudflare Tunnel as the public ingress for Evermatter on this machine,
 # replacing Tailscale Funnel. Run ONCE per machine, AFTER `cloudflared tunnel login`.
 #
 # What it does (idempotent):
@@ -16,13 +16,15 @@
 #     authorizing your domain's zone). This step is browser-interactive,
 #     so it is intentionally NOT in this script.
 #
+# For an existing tunnel, pass its current name.
 # Usage (desktop):
-#   pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb.example.com -TunnelName exomem-desktop
+#   pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb.example.com -TunnelName evermatter-desktop
 # Usage (laptop):
-#   pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb-laptop.example.com -TunnelName exomem-laptop
+#   pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb-laptop.example.com -TunnelName evermatter-laptop
 #
-# After this: set EXOMEM_BASE_URL=https://<Hostname> in .env, update the GitHub OAuth
-# App callback to https://<Hostname>/auth/callback, restart exomem, re-add the connector.
+# After this: run `uv run --no-sync python scripts/set-env.py EVERMATTER_BASE_URL https://<Hostname>`
+# (it removes any other name for the setting from .env), update the GitHub OAuth
+# App callback to https://<Hostname>/auth/callback, restart Evermatter, re-add the connector.
 
 param(
     [Parameter(Mandatory = $true)][string]$Hostname,
@@ -134,9 +136,9 @@ Write-Host "Tunnel '$TunnelName' ($Uuid) -> https://$Hostname -> http://127.0.0.
 Write-Host "Service status: $((Get-Service cloudflared).Status)"
 Write-Host ""
 Write-Host "NEXT (not automated):"
-Write-Host "  1. .env:  EXOMEM_BASE_URL=https://$Hostname"
+Write-Host "  1. .env:  uv run --no-sync python scripts/set-env.py EVERMATTER_BASE_URL https://$Hostname"
 Write-Host "  2. GitHub OAuth App: Homepage https://$Hostname ; callback https://$Hostname/auth/callback"
-Write-Host "  3. Restart exomem:  pwsh -File scripts/restart.ps1"
+Write-Host "  3. Restart Evermatter:  pwsh -File scripts/restart.ps1"
 Write-Host "  4. claude.ai: re-add the connector at https://$Hostname/mcp (redo GitHub OAuth)"
 Write-Host "  5. Cloudflare dashboard: for $Hostname turn OFF Bot Fight Mode + any WAF managed ruleset, Security Level low"
 Write-Host "  6. Verify:  cloudflared tunnel info $TunnelName   and   curl.exe -i https://$Hostname/mcp  (expect 401)"

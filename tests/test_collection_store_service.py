@@ -27,6 +27,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from conftest import held_link_index_warm
 from test_collection_row_references import DIARY, SITE_FIELD, SITES, diary_text, sites_text
 from test_collection_store_importer import ndjson, write_source
 from test_collection_store_s1_gate import (
@@ -52,9 +53,12 @@ from exomem import __main__ as cli
 from exomem import (
     capabilities,
     commands,
+    find,
+    memory_refs,
     record_governance,
     records,
     reserved_paths,
+    semantic_contract,
     state_migration,
     vault,
     writer_lease,
@@ -233,8 +237,8 @@ def offline_create(root, manifest_file, path, *, why):
                                       "--manifest-file", str(manifest_file), "--why", why])
 
 
-def _served_vault(tmp_path, monkeypatch):
-    """A/B in files and the service's environment, before the owner enrols summary C."""
+def _served_vault(tmp_path, monkeypatch, c_text=None):
+    """A/B in files and the service's environment, before the owner enrols summary C (`c_text` replaces its manifest)."""
     root = tmp_path / "vault"
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.delenv(OPERATOR, raising=False)
@@ -255,17 +259,18 @@ def _served_vault(tmp_path, monkeypatch):
         "EXOMEM_WRITER_LEASE_PREFERRED": "1",
     }.items():
         monkeypatch.setenv(name, value)
-    (tmp_path / "c.md").write_text(sqlite_text())
+    (tmp_path / "c.md").write_text(c_text or sqlite_text())
     # Only a release that enables the slice enrols a vault and serves its summary collection C.
     monkeypatch.setattr(capability, "RELEASED", ON)
     return root
 
 
 @pytest.fixture
-def service(tmp_path, monkeypatch):
+def service(tmp_path, monkeypatch, request):
     """A/B in files, summary C enrolled offline by the owner, then the service started without the operator
-    credential, all under a release that enables records-summary-v1."""
-    root = _served_vault(tmp_path, monkeypatch)
+    credential, all under a release that enables records-summary-v1. A test replaces C's manifest by
+    parametrizing `service` indirectly with the text."""
+    root = _served_vault(tmp_path, monkeypatch, getattr(request, "param", None))
     with coordinator(tmp_path / "coordinator.sqlite"):
         assert offline_create(root, tmp_path / "c.md", manifest_path(), why="new store collection") == 0
         started = Service(root, writer_lease.start_server_lifecycle())
@@ -1403,7 +1408,7 @@ def test_a_coordinator_that_never_enrolled_the_store_names_adopt_local_which_ser
         finally:
             replaced.stop()
         assert refusal.value.code == "COLLECTION_STORE_ADOPTION_REQUIRED"
-        assert "exomem collections adopt-local" in refusal.value.message
+        assert "evermatter collections adopt-local" in refusal.value.message
         assert refusal.value.code not in refusal.value.message
         with pytest.MonkeyPatch.context() as shell:  # the owner's offline step, in this same process
             shell.setenv(OPERATOR, "operator")
@@ -2587,6 +2592,428 @@ def test_queued_mutation_timeout_never_executes(service, monkeypatch, tmp_path):
     assert titles(service.root, CID) == ["Canonical"]
 
 
+INCIDENT_LOG = "Incident Log"
+INCIDENT_TEXT = sqlite_text(manifest_text().replace("title: Work", f"title: {INCIDENT_LOG}").replace(
+    "    count: {type: integer}\n", "    count: {type: integer}\n    status: {type: enum, enum: [open, closed]}\n"))
+
+
+@contextmanager
+def _store_thread_held_with_intake_on(service, monkeypatch):
+    """The store thread is busy, a save that would wait for it queues after 0.3 s, and the drainer runs."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from exomem import request_budget, write_intake
+
+    monkeypatch.setenv("EXOMEM_BUSY_INTAKE_AFTER_SECONDS", "0.3")
+    server = runtime._SERVERS[service.root]
+    entered, release = threading.Event(), threading.Event()
+
+    def occupy():
+        entered.set()
+        assert release.wait(10)
+
+    write_intake.start(service.root)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        occupied = pool.submit(server.call, occupy)
+        try:
+            assert entered.wait(5)
+            # The short budgets belong to the save, after the setup owns the thread.
+            token = request_budget.set_current(request_budget.RequestBudget(
+                seconds=request_budget.DELIVERY_RESERVE_SECONDS + 5))
+            with monkeypatch.context() as short:
+                short.setattr(service.manager, "_mutation_timeout_seconds", 0.1)
+                try:
+                    yield
+                finally:
+                    request_budget.reset_current(token)
+        finally:
+            release.set()
+            occupied.result(timeout=10)
+
+
+def _save_by_title(service, changes):
+    """The save an agent sends with the collection's title, under the busy intake's own scope."""
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "record_memory")
+    with request_scope(OWNER):
+        return writer_lease.invoke_command(
+            command, service.root, implicit_idempotency_scope="principal:session-b", action="update",
+            collection=INCIDENT_LOG, item_key=ROW, changes=changes, expected_container_hash="0" * 64,
+            expected_item_version="0" * 64, why="resolve the entry")
+
+
+@pytest.mark.parametrize("service", [pytest.param(INCIDENT_TEXT, id="incident-log")], indirect=True)
+def test_an_undeclared_value_for_a_store_collection_named_by_title_is_refused_while_the_store_is_busy(
+        service, monkeypatch):
+    """Defect: an agent set `status` to a value the collection never declares, by the collection's title, while the
+    store was busy. The call came back "Queued, not saved yet" and failed only at its replay."""
+    from exomem import write_intake
+
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch):
+            with pytest.raises(OpError) as refused:
+                _save_by_title(service, {"status": "resolved"})
+            assert refused.value.code == "SCHEMA_ENUM"
+            assert refused.value.message.endswith('allowed: "open", "closed"')
+            assert refused.value.details["field"] == "status"
+            assert write_intake.read(service.root)["items"] == []
+    finally:
+        write_intake.stop(service.root)
+    assert titles(service.root, CID) == ["Canonical"]
+
+
+@pytest.mark.parametrize("service", [pytest.param(INCIDENT_TEXT, id="incident-log")], indirect=True)
+def test_a_declared_value_for_a_store_collection_named_by_title_still_queues_while_the_store_is_busy(
+        service, monkeypatch):
+    from exomem import write_intake
+
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch):
+            queued = _save_by_title(service, {"status": "closed"})
+            assert queued["state"] == "queued"
+    finally:
+        write_intake.stop(service.root)
+
+
+RELEASE_PLAN = "Release Plan"
+RELEASE_PLAN_ID = "77777777-7777-4777-8777-777777777777"
+
+
+def _create_release_plan_with_effort(root):
+    text = sqlite_text(manifest_text("planning").replace(CID, RELEASE_PLAN_ID).replace("title: Work", f"title: {RELEASE_PLAN}"))
+    text = text.replace("    area: {type: string}\n", "    area: {type: string}\n    effort: {type: enum, enum: [small, large]}\n")
+    call(root, "plan_memory", action="create", manifest_path=manifest_path("planning").replace("Work", "Release"),
+         manifest_text=text, why="plan the releases")
+    return text
+
+
+@pytest.mark.parametrize(
+    ("named_by", "status", "refused"),
+    [
+        ("plan_id", "resolved", True),
+        ("plan_id", "waiting", False),
+        ("another item's plan_id", "waiting", True),
+        ("stale item_id", "resolved", False),
+    ],
+    ids=["undefined", "removed-but-stored", "removed-and-stored-by-another-item", "undefined-by-stale-item-id"],
+)
+def test_a_planning_status_for_a_store_collection_is_refused_while_the_store_is_busy_unless_its_item_stores_it(
+        service, monkeypatch, named_by, status, refused):
+    """Defect: a Planning status outside the Planning values came back "Queued, not saved yet" and failed only at its
+    replay. The check reads the item the update names by its key, at the caller's version, beside the busy store
+    thread. An item keeps a status that the owner has since removed, so an update that sends it again queues; another
+    item cannot take that status. An update by item id queues, so that a stale id gets its replay's STALE_ITEM and
+    the current id, not a refusal of its status."""
+    from exomem import write_intake
+
+    root = service.root
+    text = sqlite_text(manifest_text("planning").replace(CID, RELEASE_PLAN_ID).replace("title: Work", f"title: {RELEASE_PLAN}"))
+    call(root, "plan_memory", action="create", manifest_path=manifest_path("planning").replace("Work", "Release"),
+         manifest_text=text, why="plan the releases")
+    values = call(root, "schema_memory", subject="planning-values", operation="inspect")
+    call(root, "schema_memory", subject="planning-values", operation="save", expected_hash=values["content_hash"],
+         proposal={"upsert": {"status.waiting": {"attributes": {"class": "open"}}}}, why="items that wait")
+    for title, stored in (("Wait on the vendor", "waiting"), ("Ship the release", "active")):
+        call(root, "plan_memory", action="add", collection=RELEASE_PLAN, why="plan it", item={
+            "title": title, "kind": "outcome", "status": stored, "commitment": "committed", "horizon": "week"})
+    history = call(root, "schema_memory", subject="planning-values", operation="history")
+    call(root, "schema_memory", subject="planning-values", operation="restore", version=history["versions"][0]["version"],
+         expected_hash=history["content_hash"], why="keep the shipped statuses")
+    title = "Ship the release" if named_by == "another item's plan_id" else "Wait on the vendor"
+    view = call(root, "plan_memory", action="query", collection=RELEASE_PLAN)
+    (row,) = [row for row in view["rows"] if row["title"] == title]
+    target = {"plan_id": row["plan_id"], "expected_container_hash": view["snapshot"],
+              "expected_item_version": row["item_version"]}
+    if named_by == "stale item_id":
+        target = {"item_id": row["id"]}
+        call(root, "plan_memory", action="update", collection=RELEASE_PLAN, item_id=row["id"],
+             changes={"priority": "low"}, why="it can wait")
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
+            def save():
+                return writer_lease.invoke_command(
+                    command, root, implicit_idempotency_scope="principal:session-b", action="update",
+                    collection=RELEASE_PLAN, changes={"status": status, "priority": "high"}, why="settle the release",
+                    **target)
+            if refused:
+                with pytest.raises(OpError) as refusal:
+                    save()
+                assert refusal.value.code == "INVALID_PLAN"
+                assert refusal.value.message.startswith("status must be one of: candidate, planned")
+                assert write_intake.read(root)["items"] == []
+            else:
+                assert save()["state"] == "queued"
+    finally:
+        write_intake.stop(root)
+
+
+def test_an_area_update_that_deletes_a_field_it_lacks_is_refused_for_its_value_while_the_store_is_busy(
+        service, monkeypatch):
+    """Defect: an update of an area that deleted a parent it never had and set an undeclared effort queued, and its
+    replay refused the effort. A null deletes its field and supplies nothing that an area may not carry, so the
+    effort is refused at once, as a direct update refuses it."""
+    from exomem import write_intake
+
+    root = service.root
+    _create_release_plan_with_effort(root)
+    call(root, "plan_memory", action="add", collection=RELEASE_PLAN, why="plan the platform",
+         item={"title": "Platform", "kind": "area"})
+    view = call(root, "plan_memory", action="query", collection=RELEASE_PLAN)
+    (row,) = view["rows"]
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
+            with pytest.raises(OpError) as refused:
+                writer_lease.invoke_command(
+                    command, root, implicit_idempotency_scope="principal:session-b", action="update",
+                    collection=RELEASE_PLAN, plan_id=row["plan_id"], expected_container_hash=view["snapshot"],
+                    expected_item_version=row["item_version"], changes={"parent": None, "effort": "medium"},
+                    why="size the platform")
+            assert refused.value.code == "SCHEMA_ENUM"
+            assert write_intake.read(root)["items"] == []
+    finally:
+        write_intake.stop(root)
+
+
+def test_a_busy_plan_add_queues_if_a_revision_declares_its_value_during_the_check(service, monkeypatch):
+    """A queued Planning revision that commits after the declaration read can make the add valid."""
+    from types import MappingProxyType
+
+    from exomem import write_intake
+
+    root = service.root
+    text = _create_release_plan_with_effort(root)
+    guards = call(root, "plan_memory", action="inspect", collection=RELEASE_PLAN)["lifecycle_guards"]
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
+    resume = threading.Event()
+    claim = write_intake._claim_head
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: claim(root) if resume.is_set() else 0.05)
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
+            revision = writer_lease.invoke_command(
+                command, root, implicit_idempotency_scope="principal:session-b", action="revise",
+                collection=RELEASE_PLAN, manifest_text=text.replace("[small, large]", "[small, medium, large]"),
+                why="declare medium effort", **guards)
+        assert revision["state"] == "queued"
+        revision_ref = revision["queued_write"]["ref"]
+        check = commands._DECLARED_VALUE_REFUSALS["plan_memory"]
+
+        def check_then_apply(*args):
+            refusal = check(*args)
+            assert refusal is not None and refusal.code == "SCHEMA_ENUM"
+            resume.set()
+            _until(lambda: write_intake.read(root, ref=revision_ref)["queued_write"]["state"] == "applied")
+            return refusal
+
+        monkeypatch.setattr(commands, "_DECLARED_VALUE_REFUSALS",
+                            MappingProxyType({**commands._DECLARED_VALUE_REFUSALS, "plan_memory": check_then_apply}))
+        monkeypatch.setattr(commands, "_DECLARED_REFUSAL_SECONDS", 10.0)
+        with request_scope(OWNER):
+            add = writer_lease.invoke_command(
+                command, root, implicit_idempotency_scope="principal:session-c", action="add", collection=RELEASE_PLAN,
+                item={"title": "Ship it", "kind": "area", "effort": "medium"}, why="size the release")
+        assert add["state"] == "queued"
+        add_ref = add["queued_write"]["ref"]
+        _until(lambda: write_intake.read(root, ref=add_ref)["queued_write"]["state"] == "applied")
+        (row,) = call(root, "plan_memory", action="query", collection=RELEASE_PLAN)["rows"]
+        assert row["effort"] == "medium"
+    finally:
+        write_intake.stop(root)
+
+
+@pytest.mark.parametrize(
+    ("action", "stored_kind", "sent", "at_once"),
+    [
+        ("triage", "outcome", {"transition": {"kind": "unregistered-kind", "status": None}}, False),
+        ("triage", "outcome", {"transition": {"kind": "unregistered-kind", "effort": "large"}}, False),
+        ("triage", "area", {"transition": {"parent": None, "kind": "unregistered-kind"}}, False),
+        ("update", "outcome", {"changes": {"kind": "unregistered-kind", "size": "large"}}, False),
+        ("update", "outcome", {"changes": {"kind": "unregistered-kind"}, "why": "size it\nthen ship it"}, False),
+        ("add", None, {"item": {"title": "x" * 513, "kind": "unregistered-kind"}}, False),
+        ("add", None, {"item": {"title": "Ship it", "lifecycle": "paused", "effort": "medium"}}, False),
+        ("add", None, {"item": {"title": "Ship it", "kind": "area", "effort": "medium"}}, True),
+        ("add", None, {"item": {"title": "Ship it", "kind": "area", "status": "bogus", "effort": "medium"}}, False),
+        ("add", None, {"item": {"title": "Ship it", "kind": "outcome", "status": "resolved",
+                                "commitment": "committed", "horizon": "week"}}, True),
+        ("add", None, {"item": {"title": "Ship it", "kind": "outcome", "status": None,
+                                "commitment": "committed", "horizon": "week"}}, True),
+        ("triage", "outcome", {"transition": {"parent": None, "kind": "unregistered-kind"}}, True),
+    ],
+    ids=["triage-with-a-null-status", "triage-with-an-unsupported-field", "triage-of-an-area",
+         "update-with-an-undeclared-field", "update-with-a-two-line-why", "add-with-a-long-title",
+         "add-with-an-unknown-lifecycle", "add-with-an-undeclared-effort", "area-with-a-status",
+         "add-with-an-undeclared-status", "add-with-a-null-status", "triage-that-deletes-a-parent"],
+)
+def test_a_busy_planning_save_gets_the_refusal_that_the_same_save_gets_directly(
+        service, monkeypatch, action, stored_kind, sent, at_once):
+    """Defect: a busy triage that the commit refuses as malformed, such as one with a null status or an unsupported
+    field, was refused for its undeclared kind and told to resend another kind, which cannot fix it. A busy save gets
+    a value's refusal at once only where the commit refuses that value first; otherwise it queues, and its replay
+    refuses it as the same save sent directly is refused."""
+    from exomem import write_intake
+
+    root = service.root
+    _create_release_plan_with_effort(root)
+    target = {}
+    if stored_kind is not None:
+        item = {"title": "Platform", "kind": "area"} if stored_kind == "area" else {
+            "title": "Ship the release", "kind": stored_kind, "status": "active", "commitment": "committed",
+            "horizon": "week"}
+        call(root, "plan_memory", action="add", collection=RELEASE_PLAN, why="plan it", item=item)
+        view = call(root, "plan_memory", action="query", collection=RELEASE_PLAN)
+        (row,) = view["rows"]
+        target = {"plan_id": row["plan_id"], "expected_container_hash": view["snapshot"],
+                  "expected_item_version": row["item_version"]}
+    save = {"action": action, "collection": RELEASE_PLAN, "why": "sort the release", **target, **sent}
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
+            try:
+                queued = writer_lease.invoke_command(
+                    command, root, implicit_idempotency_scope="principal:session-b", **save)
+            except OpError as refused:
+                busy = (refused.code, refused.message)
+                assert write_intake.read(root)["items"] == []
+            else:
+                busy = None
+        assert (busy is not None) == at_once
+        if busy is None:
+            ref = queued["queued_write"]["ref"]
+            _until(lambda: write_intake.read(root, ref=ref)["queued_write"]["state"] == "failed")
+            error = write_intake.read(root, ref=ref)["queued_write"]["error"]
+            busy = (error["code"], error["message"])
+    finally:
+        write_intake.stop(root)
+    with pytest.raises(OpError) as direct:
+        call(root, "plan_memory", **save)
+    assert busy == (direct.value.code, direct.value.message)
+
+
+def test_a_busy_plan_add_does_not_disclose_values_on_a_disabled_summary_route(service, monkeypatch):
+    """A disabled summary route must not disclose its enum when a Planning add would queue."""
+    from exomem import write_intake
+
+    root = service.root
+    _create_release_plan_with_effort(root)
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED - {capability.RECORDS_SUMMARY_V1})
+    save = {"action": "add", "collection": RELEASE_PLAN, "why": "size the release",
+            "item": {"title": "Ship it", "kind": "area", "effort": "medium"}}
+    with pytest.raises(OpError) as direct:
+        call(root, "plan_memory", **save)
+    assert direct.value.code == capability.UNAVAILABLE
+
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
+    queued_ref = None
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
+            try:
+                receipt = writer_lease.invoke_command(command, root, implicit_idempotency_scope="principal:session-b", **save)
+            except OpError as refused:
+                assert (refused.code, refused.message) == (direct.value.code, direct.value.message)
+                assert write_intake.read(root)["items"] == []
+            else:
+                assert receipt["state"] == "queued"
+                queued_ref = receipt["queued_write"]["ref"]
+        if queued_ref is not None:
+            _until(lambda: write_intake.read(root, ref=queued_ref)["queued_write"]["state"] == "failed")
+            error = write_intake.read(root, ref=queued_ref)["queued_write"]["error"]
+            assert (error["code"], error["message"]) == (direct.value.code, direct.value.message)
+    finally:
+        write_intake.stop(root)
+
+
+def test_a_cloud_read_only_cell_refuses_a_busy_planning_write_before_intake(service, monkeypatch):
+    """An existing queue must not bypass read-only mode or expose the collection's enum choices."""
+    from exomem import cloud_cell, write_intake
+
+    root = service.root
+    _create_release_plan_with_effort(root)
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05)
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
+            first = writer_lease.invoke_command(
+                command, root, implicit_idempotency_scope="principal:session-a", action="add",
+                collection=RELEASE_PLAN_ID, why="size the earlier release",
+                item={"title": "Earlier release", "kind": "area", "effort": "small"})
+            assert first["state"] == "queued"
+            monkeypatch.setenv(cloud_cell.CLOUD_READ_ONLY_ENV, "1")
+            with pytest.raises(OpError) as refused:
+                writer_lease.invoke_command(
+                    command, root, implicit_idempotency_scope="principal:session-b", action="add",
+                    collection=RELEASE_PLAN_ID, why="size the release",
+                    item={"title": "Ship it", "kind": "area", "effort": "medium"})
+            assert refused.value.code == "CLOUD_CELL_READ_ONLY"
+            assert [item["ref"] for item in write_intake.read(root)["items"]] == [first["queued_write"]["ref"]]
+    finally:
+        write_intake.stop(root)
+
+
+def test_a_busy_plan_add_queues_when_authorisation_needs_to_scan_many_holds(service, monkeypatch):
+    """The busy check cannot spend work proportional to another collection's held candidates."""
+    from exomem import write_intake
+
+    root = service.root
+    _create_release_plan_with_effort(root)
+    # These rows belong to the other collection. The write's release proof must look past them.
+    with closing(sqlite3.connect(connection.store_path(root))) as database, database:
+        database.executemany(
+            "INSERT INTO held_candidates (held_id, collection_id, kind, candidate_json) "
+            "VALUES (?, ?, 'write-refusal', '{}')",
+            ((f"held-{number}", CID) for number in range(10_000)))
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "plan_memory")
+    try:
+        with _store_thread_held_with_intake_on(service, monkeypatch), request_scope(OWNER):
+            receipt = writer_lease.invoke_command(
+                command, root, implicit_idempotency_scope="principal:session-b", action="add",
+                collection=RELEASE_PLAN_ID, why="size the release",
+                item={"title": "Ship it", "kind": "area", "effort": "medium"})
+            assert receipt["state"] == "queued"
+        ref = receipt["queued_write"]["ref"]
+        _until(lambda: write_intake.read(root, ref=ref)["queued_write"]["state"] == "failed")
+        assert write_intake.read(root, ref=ref)["queued_write"]["error"]["code"] == "SCHEMA_ENUM"
+    finally:
+        write_intake.stop(root)
+
+
+@pytest.mark.parametrize("steps", [None, 16_000], ids=["records", "planning"])
+def test_a_bounded_ownership_read_does_not_wait_for_a_locked_store(tmp_path, steps):
+    """A busy write's passive check must stop at the first locked schema read."""
+    from exomem import request_budget
+
+    path = tmp_path / "locked.sqlite"
+    with closing(sqlite3.connect(path)) as locker:
+        locker.execute("CREATE TABLE store_meta (key TEXT PRIMARY KEY, value TEXT)")
+        locker.execute("BEGIN EXCLUSIVE")
+        checkpoint = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=0.5),
+                                                   bound_store_reads=True, store_sql_steps=steps)
+        started = time.monotonic()
+        with request_budget.checking(checkpoint), pytest.raises(sqlite3.OperationalError, match="locked"):
+            with connection.ownership_reader(path):
+                pytest.fail("the locked store admitted a reader")
+        assert time.monotonic() - started < 1
+
+
+def test_a_passive_read_declines_an_active_store_publication(service, monkeypatch):
+    """An ongoing view publication must not make the busy check wait for the writer's timeout."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from exomem import request_budget
+
+    manager = service.manager
+    monkeypatch.setattr(manager, "_mutation_timeout_seconds", 3.0)
+
+    def read_beside_publication():
+        check = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=0.5), bound_store_reads=True)
+        with request_budget.checking(check), pytest.raises(OpError) as refused:
+            runtime.read_served(service.root, lambda: pytest.fail("publication admitted a passive reader"))
+        return refused.value.code
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with manager._store_publication_window(manager._fencing_token, patience=5):
+            assert pool.submit(read_beside_publication).result(timeout=1) == "COLLECTION_STORE_BUSY"
+
+
 def counted_appends(monkeypatch):
     from exomem.collection_store.writer import CollectionWriter
 
@@ -3151,3 +3578,192 @@ def test_a_cold_manifest_registry_offers_and_publishes_the_store_collections(ser
     published = working_set_index.published_collection_manifests(service.root, 1)
     assert CID in {manifest.collection_id for manifest in found}
     assert published is not None and CID in {manifest.collection_id for manifest in published}
+
+
+def _walks_inside_queries(monkeypatch) -> list[Path]:
+    """Record each vault walk made inside a Records query from now on.
+
+    The service runs a query on its store thread, beside a graph rebuild and warms that walk on their own.
+    """
+    querying, walks = threading.local(), []
+    real_query, real_walk = record_governance.query_collection, vault.walk_vault_md
+
+    def query(*args, **kwargs):
+        querying.active = True
+        try:
+            return real_query(*args, **kwargs)
+        finally:
+            querying.active = False
+
+    def walk(root):
+        if getattr(querying, "active", False):
+            walks.append(root)
+        return real_walk(root)
+
+    monkeypatch.setattr(record_governance, "query_collection", query)
+    monkeypatch.setattr(vault, "walk_vault_md", walk)
+    return walks
+
+
+def test_a_records_query_answers_from_its_rows_without_walking_the_vault_for_links(service, monkeypatch):
+    """While a published link index is coming, a query goes without it; it never walks the vault for one.
+
+    No link index is published here, as on a service whose corpus warm is still running. A walk
+    on the query's thread took most of the Records budget on a large vault, for every page and
+    aggregate, even one that returns no link field. A link field the query returns is named in
+    `unresolved_links`, so a reference left out is never mistaken for an empty field. A filter on
+    that field would match no row, so it is refused with a wait instead.
+    """
+    linked = "77777777-7777-4777-8777-777777777777"
+    text = sqlite_text(manifest_text().replace(CID, linked).replace("title: Work", "title: Linked").replace(
+        "    count: {type: integer}\n", "    status: {type: string}\n    related: {type: array, items: {type: link}}\n"))
+    assert call(service.root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Linked"),
+                manifest_text=text, why="rows with links")
+    reference = memory_refs.memory_ref(memory_refs.new_id())
+    assert call(service.root, "record_memory", action="append", collection=linked,
+                item={"title": "Lead", "status": "open", "related": [reference]}, why="row with a link")["outcome"] == "committed"
+    # The cache is on and holds no corpus yet; the warm that publishes one runs, held, through every query.
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    semantic_contract.reset_corpus_context_cache()
+    walks_inside_a_query = _walks_inside_queries(monkeypatch)
+
+    with held_link_index_warm(monkeypatch):
+        status = call(service.root, "record_memory", action="query", collection=linked, columns=["status"])
+        default = call(service.root, "record_memory", action="query", collection=linked)
+        distinct = call(service.root, "record_memory", action="query", collection=linked, aggregate="distinct:status")
+        with pytest.raises(OpError) as refused:
+            call(service.root, "record_memory", action="query", collection=linked,
+                 filters=[{"column": "related", "op": "contains", "value": reference}])
+
+    assert walks_inside_a_query == []
+    assert refused.value.code == "LINK_INDEX_WARMING"
+    assert refused.value.details["retry_after_ms"] > 0
+    assert [row["status"] for row in status["rows"]] == ["open"]
+    assert "unresolved_links" not in status
+    assert distinct["aggregate"]["distinct"] == ["open"]
+    assert "unresolved_links" not in distinct
+    assert [row["title"] for row in default["rows"]] == ["Lead"]
+    assert "related" not in default["rows"][0]
+    assert default["unresolved_links"] == ["related"]
+
+
+def test_a_link_filter_after_a_page_write_answers_once_the_warm_its_refusal_started_is_done(service, monkeypatch):
+    """A page write leaves the published link index behind the vault, and nothing else may catch it up.
+
+    A link filter refused then starts the warm that does, so the same query answers on its retry,
+    without walking the vault. A refusal that started no warm was repeated for good.
+    """
+    linked = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    text = sqlite_text(manifest_text().replace(CID, linked).replace("title: Work", "title: Current").replace(
+        "    count: {type: integer}\n", "    related: {type: array, items: {type: link}}\n"))
+    assert call(service.root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Current"),
+                manifest_text=text, why="rows with links")
+    page = call(service.root, "remember", title="Lead source", slug="lead-source", suggestions=False,
+                content="# Lead source\n\n- [operating constraint] Leads arrive weekly.\n")["path"]
+    reference = call(service.root, "read_memory", path=page)["ref"]
+    assert call(service.root, "record_memory", action="append", collection=linked,
+                item={"title": "Lead", "related": [reference]}, why="row with a link")["outcome"] == "committed"
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM", raising=False)
+    semantic_contract.reset_corpus_context_cache()
+    walks_inside_a_query = _walks_inside_queries(monkeypatch)
+    by_link = {"action": "query", "collection": linked,
+               "filters": [{"column": "related", "op": "contains", "value": reference}]}
+    call(service.root, "record_memory", action="query", collection=linked)
+    assert find.await_recall_resolver_warm()
+    before = call(service.root, "record_memory", **by_link)
+
+    call(service.root, "remember", title="Later note", slug="later-note", suggestions=False,
+         content="# Later note\n\n- [operating constraint] Notes arrive monthly.\n",
+         relation_disposition="reviewed_none", relation_review_reason="an unrelated fixture page")
+
+    # The watcher may deliver the write's event late, or miss it until the next reconcile, so the
+    # test drives the decline itself: one that finds the corpus behind must start the warm that ends it.
+    scheduled = []
+    schedule = find.schedule_link_index_warm
+    monkeypatch.setattr(find, "schedule_link_index_warm", lambda root: scheduled.append(root) or schedule(root))
+    assert semantic_contract.link_corpus_coming(service.root, semantic_contract.CHECKPOINT_DIFFERS)
+    assert scheduled == [service.root]
+    assert find.await_recall_resolver_warm()
+    try:
+        answered = call(service.root, "record_memory", **by_link)
+    except OpError as refused:
+        assert refused.code == "LINK_INDEX_WARMING"
+        assert find.await_recall_resolver_warm()
+        answered = call(service.root, "record_memory", **by_link)
+
+    assert [row["title"] for row in before["rows"]] == ["Lead"]
+    assert [row["title"] for row in answered["rows"]] == ["Lead"]
+    assert walks_inside_a_query == []
+
+
+def test_a_records_query_that_finds_no_link_index_warms_it_for_the_next_one(service, monkeypatch):
+    """A query that finds no published link index answers without it and starts the background warm that
+    publishes one, so the next query resolves the link; or no warm, and the link stays unresolved."""
+    linked = "88888888-8888-4888-8888-888888888888"
+    text = sqlite_text(manifest_text().replace(CID, linked).replace("title: Work", "title: Warmed").replace(
+        "    count: {type: integer}\n", "    related: {type: array, items: {type: link}}\n"))
+    assert call(service.root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Warmed"),
+                manifest_text=text, why="rows with links")
+    page = call(service.root, "remember", title="Lead source", slug="lead-source", suggestions=False,
+                content="# Lead source\n\n- [operating constraint] Leads arrive weekly.\n")["path"]
+    reference = call(service.root, "read_memory", path=page)["ref"]
+    assert call(service.root, "record_memory", action="append", collection=linked,
+                item={"title": "Lead", "related": [reference]}, why="row with a link")["outcome"] == "committed"
+    # As on a service whose corpus was never built or was dropped: the cache is on, empty, and may warm.
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM", raising=False)
+    semantic_contract.reset_corpus_context_cache()
+
+    cold = call(service.root, "record_memory", action="query", collection=linked)
+    assert find.await_recall_resolver_warm()
+    warm = call(service.root, "record_memory", action="query", collection=linked)
+
+    assert "related" not in cold["rows"][0]
+    assert cold["unresolved_links"] == ["related"]
+    assert warm["rows"][0]["related"] == [reference]
+    assert "unresolved_links" not in warm
+
+
+def test_a_write_that_records_source_dependencies_waits_for_a_read_beside_the_store_thread(original_service, monkeypatch):
+    """A read beside the store thread borrows the store while it reads; a Source write waits for it to return.
+
+    Release decisions read beside the thread on most turns that touch store pages. A write that records
+    Source dependencies refused as busy whenever one was still reading.
+    """
+    from exomem import provenance
+    from exomem.collection_store import preview
+
+    service, reference, _original, expected, _source_path = original_service
+    root, server = service.root, runtime._server(service.root)
+    at_metadata, reading = threading.Event(), threading.Event()
+    real_metadata = preview._PreviewPhase.source_metadata
+
+    asked = []
+
+    def observed(self):
+        asked.append(threading.current_thread() is not reader)
+        at_metadata.set()
+        return real_metadata(self)
+
+    def read():
+        reading.set()
+        assert at_metadata.wait(60), "the write never reached its Source metadata"
+        time.sleep(0.3)  # still reading when the write asks for the store
+
+    monkeypatch.setattr(preview._PreviewPhase, "source_metadata", observed)
+    reader = threading.Thread(target=lambda: server.read_beside(read, initial=None, progress=False))
+    reader.start()
+    assert reading.wait(20)
+    body = provenance.encode_origin({"inputs": {"original": {"representation": "original",
+        "reference": reference, "version": hashlib.sha256(expected).hexdigest(), "size": len(expected)}},
+        "assessments": [], "bindings": []}) + "\nRetain the observation.\n"
+    try:
+        result = call(root, "record_memory", action="append", collection=CID, item={"title": "Acquired"}, body=body,
+                      why="retain the acquired observation", response_detail="full")
+    finally:
+        at_metadata.set()
+        reader.join(60)
+
+    assert asked and all(asked), "the write never asked for its Source metadata"
+    assert result["outcome"] == "committed"

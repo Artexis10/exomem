@@ -1914,6 +1914,74 @@ def test_an_owner_only_page_without_units_that_leaves_its_project_still_ranks(
         assert set(search()) == both
 
 
+def test_a_limited_client_after_the_owners_patched_unit_build_answers_as_a_cold_store(
+    configured_boundary, private_instances, vault, monkeypatch
+):
+    """The owner's patched unit build keeps none of the owner-only parents that it read.
+
+    The owner ranks over a public page and an owner-only page whose reading yields no unit, then again
+    after a public write; the second build patches the first build's merge. A limited client then ranks
+    over both pages and must answer as a cold store does. This catches a patched build that keeps the
+    owner-only page's empty reading in the shared base: the limited client would reuse it instead of
+    reading the page itself.
+    """
+    from exomem import call_spans, epistemic_graph, freshness, lexstore
+    from exomem.governance import principal
+    from exomem.vocabulary import instances, registry_spec
+
+    def write(name: str, extra: str, number: int, content: str) -> str:
+        path = f"Knowledge Base/Notes/Insights/{name}.md"
+        (vault / path).parent.mkdir(parents=True, exist_ok=True)
+        (vault / path).write_text(
+            f"---\ntype: insight\n{extra}exomem_id: {number}8888888-8888-4888-8888-888888888888\n---\n"
+            f"# {name}\n\n{content}\n"
+        )
+        return path
+
+    public = write("patched-public", "", 1, "- [fact] harbor gauges read depth ^gauges")
+    # A heading section gives the page stored candidate rows but no unit under the owner's reading.
+    private = write(
+        "patched-private", "project: private-project\n", 2, "## Harbor notes\n\nHarbor tides rise in the evening."
+    )
+    full, limited = private_instances("full"), private_instances("limited")
+    both = {public, private}
+    patched: list[int] = []
+    real_patch = lexstore._patched_merge
+
+    def counted_patch(*args):
+        patched.append(1)
+        return real_patch(*args)
+
+    monkeypatch.setattr(lexstore, "_patched_merge", counted_patch)
+
+    def ranked(client) -> list[tuple[str, str, float]] | None:
+        with principal.request_scope(client), call_spans.meter(call_spans.STATS_REBUILT):
+            hits = lexstore.search_semantic_units(
+                vault, "harbor depth", 5, scope="kb", admitted_parent_paths=both,
+                released_parent_paths=both, _validate_current=False, repair=False,
+            )
+        return None if hits is None else [(hit.parent_path, hit.anchor, hit.lexical_score) for hit in hits]
+
+    with principal.request_scope(full):
+        overlay = instances.select(vault, registry_spec("categories"), SCOPE).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text("schema_version: 1\ncategories: {}\nkinds:\n  protocol:\n    description: Local procedure\n")
+        assert all(freshness.rebaseline(vault).values())
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        lexstore.ensure_fresh(vault)
+    assert [path for path, _anchor, _score in ranked(full)] == [public]
+    write("patched-public", "", 1, "- [fact] harbor gauges read depth and tide ^gauges")
+    with principal.request_scope(full):
+        assert all(freshness.rebaseline(vault).values())
+        lexstore.ensure_fresh(vault)
+    assert [path for path, _anchor, _score in ranked(full)] == [public]
+    assert patched == [1]
+
+    warm = ranked(limited)
+    lexstore.clear_stores()
+    assert warm == ranked(limited)
+
+
 def test_a_stopped_unit_build_keeps_the_public_parents_it_finished_and_never_a_private_one(
     configured_boundary, private_instances, vault, monkeypatch
 ):

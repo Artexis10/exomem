@@ -18,6 +18,9 @@ def main(path: str) -> None:
     if "raw_import" in report["stages"]:
         raw_import(report)
         return
+    if "home_import" in report["stages"]:
+        home_import(report)
+        return
     if "release_rollout" in report["stages"]:
         release_rollout(report)
         return
@@ -94,6 +97,9 @@ def large_import(report: dict) -> None:
             print(f"- **stage {stage} failed:** {(record.get('failure') or {}).get('message', '')[:600]}")
     for finding in run.get("findings", []):
         print(f"- **finding** in {finding.get('phase')}: {finding.get('message', '')[:600]}")
+    if run.get("hang_evidence"):
+        # Who held the cell's write boundary when the deadline ended a call; the report holds the rest.
+        print(f"- **cell at the deadline** (write boundary): {json.dumps(run['hang_evidence'].get('boundary'), default=str)[:600]}")
     for problem in (run.get("volume") or {}).get("problems", []):
         print(f"- **volume:** {problem}")
     print("\n| folder | criterion | passed | problems |\n|---|---|---|---|")
@@ -166,6 +172,19 @@ def raw_import(report: dict) -> None:
                 print(f"\n**losses in {group}, {cause}** ({found['count']}): " + "; ".join(found["listed"][:10]))
     for name, value in (("local arm", local.get("headline")), *((f"cloud arm, {k} vault", (v or {}).get("cloud")) for k, v in run.get("targets", {}).items())):
         print(f"\n**{name}**\n\n```json\n{json.dumps(value, indent=2, ensure_ascii=False)}\n```")
+
+
+def home_import(report: dict) -> None:
+    run = report["stages"]["home_import"]
+    print("## Home import filed by the cell (file-imports-on-the-cell task 5.1)\n")
+    print(f"- verdict: **{run.get('verdict', 'none: the run did not finish')}** ({run.get('verdict_meaning', '')})")
+    fixture = run.get("fixture") or {}
+    print(f"- fixture: {fixture.get('files')} files, {fixture.get('filed')} eligible, "
+          f"{fixture.get('left_by_cell')} left by the cell, {fixture.get('left_by_cli')} left by the CLI")
+    print(f"- restart during filing: {run.get('restart_during_filing')}; restarts: {len(run.get('restarts', []))}")
+    for finding in run.get("findings", []):
+        print(f"- **finding:** {str(finding)[:600]}")
+    print(f"\n**filing view**\n\n```json\n{json.dumps(run.get('filing_view'), indent=2, default=str)[:2000]}\n```")
 
 
 def _mib(value: int | None) -> str:

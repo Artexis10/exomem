@@ -78,19 +78,19 @@ TYPE_TO_KIND: Mapping[str, str] = {
 #: fairness evidence, not an extension point for a scenario or provider run.
 KIND_MAPPING_EVIDENCE: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
-        "source": ("src/exomem/_scaffold/_Schema/references/page-types.md:24",),
-        "research-note": ("src/exomem/_scaffold/_Schema/references/page-types.md:64",),
-        "insight": ("src/exomem/_scaffold/_Schema/references/page-types.md:109",),
-        "pattern": ("src/exomem/_scaffold/_Schema/references/page-types.md:203",),
-        "failure": ("src/exomem/_scaffold/_Schema/references/page-types.md:156",),
-        "experiment": ("src/exomem/_scaffold/_Schema/references/page-types.md:332",),
-        "production-log": ("src/exomem/_scaffold/_Schema/references/page-types.md:487",),
-        "entity": ("src/exomem/_scaffold/_Schema/references/page-types.md:584",),
+        "source": ("src/exomem/_scaffold/_Schema/references/page-types.md:115",),
+        "research-note": ("src/exomem/_scaffold/_Schema/references/page-types.md:157",),
+        "insight": ("src/exomem/_scaffold/_Schema/references/page-types.md:201",),
+        "pattern": ("src/exomem/_scaffold/_Schema/references/page-types.md:277",),
+        "failure": ("src/exomem/_scaffold/_Schema/references/page-types.md:239",),
+        "experiment": ("src/exomem/_scaffold/_Schema/references/page-types.md:373",),
+        "production-log": ("src/exomem/_scaffold/_Schema/references/page-types.md:492",),
+        "entity": ("src/exomem/_scaffold/_Schema/references/page-types.md:551",),
         "entity:decision": (
-            "src/exomem/_scaffold/_Schema/references/page-types.md:682",
-            "src/exomem/_scaffold/_Schema/references/page-types.md:683",
+            "src/exomem/_scaffold/_Schema/references/page-types.md:551",
+            "src/exomem/_scaffold/_Schema/references/page-types.md:606",
         ),
-        "sources_fallback": ("src/exomem/_scaffold/_Schema/references/page-types.md:21",),
+        "sources_fallback": ("src/exomem/_scaffold/_Schema/references/page-types.md:117",),
     }
 )
 
@@ -148,22 +148,22 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
     FieldDeclaration(
         field="current",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/references/frontmatter.md:17",
+        evidence="src/exomem/_scaffold/_Schema/references/page-types.md:31",
     ),
     FieldDeclaration(
         field="revision_of",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/references/supersession.md:37",
+        evidence="src/exomem/_scaffold/_Schema/references/page-types.md:36",
     ),
     FieldDeclaration(
         field="prior_revision",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/references/supersession.md:70",
+        evidence="src/exomem/_scaffold/_Schema/references/page-types.md:36",
     ),
     FieldDeclaration(
         field="cites",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/references/frontmatter.md:59",
+        evidence="src/exomem/_scaffold/_Schema/references/page-types.md:34",
     ),
     FieldDeclaration(
         field="contradicts",
@@ -178,22 +178,22 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
     FieldDeclaration(
         field="authored_by",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/references/page-types.md:21",
+        evidence="src/exomem/_scaffold/_Schema/references/page-types.md:128",
     ),
     FieldDeclaration(
         field="locator",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/references/frontmatter.md:163",
+        evidence="src/exomem/episode_materials.py:29",
     ),
     FieldDeclaration(
         field="open_question",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/references/page-types.md:98",
+        evidence="src/exomem/_scaffold/_Schema/references/page-types.md:190",
     ),
     FieldDeclaration(
         field="uncertainty",
         status="available_via:open_threads_section",
-        evidence="src/exomem/_scaffold/_Schema/references/frontmatter.md:144",
+        evidence="src/exomem/_scaffold/_Schema/references/writing.md:61",
     ),
     FieldDeclaration(
         field="review_state",

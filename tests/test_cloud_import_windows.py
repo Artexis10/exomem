@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import tarfile
@@ -17,9 +18,9 @@ from pathlib import Path
 import httpx2
 import pytest
 
-from exomem import import_stage
+from exomem import extraction_parts, import_stage
 from exomem.cli_progress import Progress
-from exomem.cloud_import_client import CloudImportClientConfig, CloudImportError
+from exomem.cloud_import_client import CloudImportClientConfig, CloudImportError, _report_failure
 from exomem.cloud_import_windows import Cell, FilingUnavailable, import_folder
 
 CONFIG = CloudImportClientConfig("https://cloud.example/mcp", "https://cloud.example")
@@ -59,6 +60,9 @@ class FakeCell(Cell):
         self.refuses_file = False
         self.file_replies: list[dict] = []
         self.room_after_filing = BIG
+
+    async def offers_file(self) -> bool:
+        return not self.refuses_file
 
     async def file(self, path, *, collection=None, continuation=None) -> dict:
         if self.refuses_file:
@@ -125,6 +129,7 @@ class FakeCloud:
         self.rows: dict[str, dict] = {}
         self.parts: dict[str, dict[int, bytes]] = {}
         self.members: dict[str, dict[str, bytes]] = {}
+        self.member_times: dict[str, dict[str, int]] = {}
         self.completed: list[str] = []
         self.registered_at: list[float] = []
         self.registered_calls: list[int] = []
@@ -232,6 +237,7 @@ class FakeCloud:
         plain = subprocess.run(["age", "-d", "-i", str(self.identity)], input=cipher, capture_output=True, check=True).stdout
         with tarfile.open(fileobj=io.BytesIO(plain)) as archive:
             self.members[import_id] = {m.name: archive.extractfile(m).read() for m in archive if m.isfile()}
+            self.member_times[import_id] = {m.name: m.mtime for m in archive if m.isfile()}
         if self.refuse_when(self.members[import_id]):
             row.update(observed_state="failed", error_code=self.refusal_code)
             return
@@ -322,6 +328,51 @@ def test_three_times_the_budget_becomes_three_or_more_windows_each_within_the_bu
     assert len(rig.cloud.completed) >= 3
     assert all(rig.cloud.cost(import_id) <= 2000 for import_id in rig.cloud.completed)
     assert rig.cloud.all_sent() == sorted(f"a{n:02}.bin" for n in range(1, 10))
+
+
+SERIES_COST = 2 * 368  # the series file of a run in several windows, which the cell counts as text
+
+
+def _transcript(rig: Rig, name: str, parts: int, size: int) -> list[str]:
+    """A page and its further parts, as a long transcript lays them out in a folder; returns the paths."""
+    page = Path(f"{name}.md")
+    paths = [page.as_posix(), *(extraction_parts.part_path(page, number).as_posix() for number in range(2, parts + 1))]
+    for path in paths:
+        (rig.source / path).parent.mkdir(parents=True, exist_ok=True)
+        (rig.source / path).write_bytes(path.encode().ljust(size, b"."))
+    return paths
+
+
+def test_a_window_whose_budget_would_end_between_a_page_and_its_part_folder_takes_both_in_the_next_window(rig):
+    """Catches a split that files the page in one window and its parts in another, so the Source could not keep its parts."""
+    rig.files(a01__bin=800, a02__bin=800, a03__bin=800)
+    page, part = _transcript(rig, "talk", 2, 300)
+    # The whole folder is 16 bytes over one window (a lone import's series file is 83 bytes), and each window of
+    # several carries the longer series file, so the page fits after the recordings but its part does not.
+    budget = SERIES_COST + 3 * 800 + 600 + 14
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = budget
+
+    rig.run()
+
+    windows = [rig.cloud.sent(import_id) for import_id in rig.cloud.completed]
+    assert len(windows) == 2 and {page, part} in windows
+    assert all(rig.cloud.cost(import_id) <= budget for import_id in rig.cloud.completed)
+    assert rig.cloud.all_sent() == sorted(["a01.bin", "a02.bin", "a03.bin", page, part])
+
+
+def test_more_long_transcripts_than_one_window_carries_are_sent_in_whole_windows_of_page_and_parts(rig):
+    """Catches a window that ends inside one transcript when the folder holds many."""
+    rig.files(a01__bin=800)
+    transcripts = [_transcript(rig, f"t{number}", 3, 200) for number in range(1, 6)]
+    budget = SERIES_COST + 800 + 5400  # 13 of the 15 pages of 400 fit after the recording; four whole transcripts are 12
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = budget
+
+    rig.run()
+
+    windows = [rig.cloud.sent(import_id) for import_id in rig.cloud.completed]
+    assert len(windows) == 2
+    assert all(any(set(group) <= window for window in windows) for group in transcripts)
+    assert all(rig.cloud.cost(import_id) <= budget for import_id in rig.cloud.completed)
 
 
 def test_each_window_stays_within_the_published_admission_limit(rig):
@@ -543,6 +594,70 @@ def test_each_window_carries_the_series_file_with_the_label_and_every_path_relat
     assert sorted(series["paths"]) == ["a01.bin", "a02.bin", "a03.bin", "n01.md", "sub/deep.md"]
 
 
+def _stage_with(tmp_path: Path, series_file: bytes) -> tuple[Path, str]:
+    """A cell's stage that holds one series file, as the import Job leaves it."""
+    import uuid
+
+    import_id = str(uuid.uuid4())
+    stage = tmp_path / "vault" / "_Imports" / import_id
+    stage.mkdir(parents=True)
+    (stage / import_stage.SERIES_FILE).write_bytes(series_file)
+    return tmp_path / "vault", import_id
+
+
+def test_each_window_asks_the_cell_to_file_and_states_the_command_line_origin_the_cell_reads_back(rig, tmp_path):
+    """Catches a series file the cell cannot read, or without the request, so Cloud keeps waiting for an assistant."""
+    rig.files(a01__bin=800, a02__bin=800, n01__md=100)
+    rig.cell.budget = rig.cell.reachable = rig.cell.refill = 1200
+
+    rig.run(file=True, origin_label="  Phone photos ")
+
+    assert len(rig.cloud.completed) >= 2
+    for import_id in rig.cloud.completed:
+        vault, stage_id = _stage_with(tmp_path / import_id, rig.cloud.members[import_id][import_stage.SERIES_FILE])
+        series = import_stage.read_series(vault, stage_id)
+        assert series.filing == "cell"
+        assert series.origin == {"browser_family": "cli", "label": "Phone photos"}
+
+
+def test_a_no_file_run_states_the_origin_and_never_asks_the_cell_to_file(rig, tmp_path):
+    """Catches `--no-file` that still asks the cell to file, which would delete the person's choice to upload only."""
+    rig.files(a01__bin=800, n01__md=100)
+
+    rig.run(file=False)
+
+    (import_id,) = rig.cloud.completed
+    vault, stage_id = _stage_with(tmp_path, rig.cloud.members[import_id][import_stage.SERIES_FILE])
+    series = import_stage.read_series(vault, stage_id)
+    assert series.filing is None
+    assert series.origin == {"browser_family": "cli"}
+
+
+def test_a_run_that_asks_the_cell_to_file_without_filing_itself_writes_the_request_and_makes_no_file_call(rig, tmp_path):
+    """Catches `--no-wait` that files itself, or leaves out the request: no one would then file the stage."""
+    rig.files(a01__bin=800, n01__md=100)
+
+    rig.run(file=False, ask_cell=True)
+
+    (import_id,) = rig.cloud.completed
+    vault, stage_id = _stage_with(tmp_path, rig.cloud.members[import_id][import_stage.SERIES_FILE])
+    assert import_stage.read_series(vault, stage_id).filing == "cell"
+    assert rig.cell.filed == []
+
+
+def test_each_archive_member_carries_the_modification_time_of_its_source_file(rig):
+    """Catches an archive that stamps every member with the upload time, so each Source's file_modified would be wrong."""
+    rig.files(a01__bin=800, n01__md=100)
+    stamps = {"a01.bin": 1_500_000_000, "n01.md": 1_600_000_000}
+    for name, stamp in stamps.items():
+        os.utime(rig.source / name, (stamp, stamp))
+
+    rig.run(file=True)
+
+    (import_id,) = rig.cloud.completed
+    assert rig.cloud.member_times[import_id] == stamps | {import_stage.SERIES_FILE: rig.cloud.member_times[import_id][import_stage.SERIES_FILE]}
+
+
 # -- Resuming
 
 
@@ -616,16 +731,191 @@ def test_a_window_that_the_job_refuses_for_space_is_planned_again_smaller(rig):
 # -- Older cells
 
 
-def test_an_older_cell_gets_one_import_with_no_series_file(rig):
+def test_an_older_cell_gets_one_import_with_no_series_file_when_nothing_asks_it_to_file_or_labels_it(rig):
     """Catches windows against a cell that reports no budget, which could not size them."""
     nine(rig)
     rig.cell.older = True
 
-    rig.run()
+    result = rig.run()
 
     assert len(rig.cloud.completed) == 1
     assert import_stage.SERIES_FILE not in rig.cloud.members[rig.cloud.completed[0]]
     assert len(rig.cloud.sent(rig.cloud.completed[0])) == 9
+    assert "cell_filing" not in result
+
+
+def _lone_series(rig, tmp_path: Path):
+    """The series file of the one import that an older cell received, as the cell reads it."""
+    (import_id,) = rig.cloud.completed
+    vault, stage_id = _stage_with(tmp_path, rig.cloud.members[import_id][import_stage.SERIES_FILE])
+    return import_stage.read_series(vault, stage_id)
+
+
+@pytest.mark.parametrize("ask", [{"file": True}, {"file": False, "ask_cell": True}], ids=["default", "no-wait"])
+def test_a_cell_with_no_window_budget_is_asked_to_file_its_one_import_and_the_result_says_so(rig, tmp_path, ask):
+    """Catches `--no-wait` on a cell without a media store: the import lands, nothing asks the cell to file, and the CLI says done."""
+    rig.files(a01__bin=800, n01__md=100)
+    rig.cell.older = True
+
+    result = rig.run(origin_label="Phone photos", **ask)
+
+    series = _lone_series(rig, tmp_path)
+    assert (series.filing, series.label) == ("cell", "Field Notes")
+    assert series.origin == {"browser_family": "cli", "label": "Phone photos"}
+    assert rig.cloud.all_sent() == ["a01.bin", "n01.md"]
+    assert result["cell_filing"] == "asked" and rig.cell.filed == []
+    assert "The upload is done and the cell files the folder by itself." in rig.said()
+
+
+def test_a_collection_name_becomes_the_label_the_cell_files_a_lone_import_under(rig, tmp_path):
+    """Catches `--collection` that a lone import drops, so the cell files under the folder name."""
+    rig.files(a01__bin=800)
+    rig.cell.older = True
+
+    rig.run(file=True, collection="Reading list")
+
+    assert _lone_series(rig, tmp_path).label == "Reading list"
+
+
+def test_a_no_file_run_on_a_cell_with_no_window_budget_records_the_label_and_does_not_ask_the_cell_to_file(rig, tmp_path):
+    """Catches `--no-file --label` that drops the label, which the assistant's later filing would have recorded."""
+    rig.files(a01__bin=800)
+    rig.cell.older = True
+
+    result = rig.run(file=False, origin_label="Phone photos")
+
+    series = _lone_series(rig, tmp_path)
+    assert series.filing is None and series.origin == {"browser_family": "cli", "label": "Phone photos"}
+    assert "cell_filing" not in result
+
+
+def test_a_cell_that_cannot_file_gets_a_plain_import_and_the_result_does_not_claim_filing(rig):
+    """Catches a result that says the cell will file an import that it ignores, and a label that vanishes unseen."""
+    rig.files(a01__bin=800)
+    rig.cell.older = True
+    rig.cell.refuses_file = True
+
+    result = rig.run(file=True, origin_label="Phone photos")
+
+    (import_id,) = rig.cloud.completed
+    assert import_stage.SERIES_FILE not in rig.cloud.members[import_id]
+    assert result["cell_filing"] == "not_offered"
+    assert "does not file imports itself" in rig.said() and "cannot record --label" in rig.said()
+    assert "the cell files the folder by itself" not in rig.said()
+
+
+def _stop_a_lone_import(rig, **flags) -> Path:
+    """Run the command until the upload fails once, so the checkpoint holds the import; returns its record."""
+    rig.cell.older = True
+    rig.cloud.fail_prepare_once = True
+    with pytest.raises(CloudImportError):
+        rig.run(**flags)
+    return rig.tmp / "checkpoint" / "checkpoint.json"
+
+
+def _landed_series_file(rig) -> bool:
+    (import_id,) = rig.cloud.completed
+    return import_stage.SERIES_FILE in rig.cloud.members[import_id]
+
+
+@pytest.mark.parametrize(("first", "rerun", "flag"), [
+    ({"file": True}, {"file": False}, "--no-file"),
+    ({"file": False}, {"file": False, "origin_label": "Phone photos"}, "--label"),
+], ids=["now-no-file", "label-added"])
+def test_a_rerun_of_a_lone_import_that_changes_what_its_series_file_carries_is_refused_and_keeps_the_checkpoint(rig, first, rerun, flag):
+    """Catches a rerun that reports filing, or drops a label, from its own flags while the stopped run's bytes carry others."""
+    rig.files(a01__bin=800)
+    record = _stop_a_lone_import(rig, **first)
+
+    with pytest.raises(CloudImportError) as refused:
+        rig.run(**rerun)
+
+    assert refused.value.code == "CHECKPOINT_OPTIONS_CHANGED" and flag in refused.value.message
+    assert record.exists() and not rig.cloud.completed
+    result = rig.run(**first)  # The command as it was first run lands the import the checkpoint holds.
+    assert _landed_series_file(rig) is first["file"] and result.get("cell_filing") == ("asked" if first["file"] else None)
+
+
+def test_a_checkpoint_reused_for_another_source_is_a_mismatch_even_when_the_flags_differ(rig):
+    """Catches a rerun for another folder that reports the checkpoint's flags as changed, so the person edits flags that are not the cause."""
+    rig.files(a01__bin=800)
+    record = _stop_a_lone_import(rig, file=False)
+    rig.source = rig.tmp / "other-source"
+    rig.source.mkdir()
+    rig.files(b01__bin=800)
+
+    with pytest.raises(CloudImportError) as refused:
+        rig.run(file=True)
+
+    assert refused.value.code == "CHECKPOINT_MISMATCH" and record.exists()
+
+
+def test_a_declared_lone_import_that_is_not_archived_is_refused_for_new_flags_and_not_blamed_on_the_source(rig):
+    """Catches a rerun that builds a different archive from the declared counts and stops with SOURCE_CHANGED."""
+    rig.files(a01__bin=800)
+    record = _stop_a_lone_import(rig, file=True)
+    state = json.loads(record.read_text())
+    for name in ("ciphertext_sha256", "ciphertext_bytes"):  # A stop while the archive was built leaves none of these.
+        state.pop(name, None)
+    record.write_text(json.dumps(state))
+    (rig.tmp / "checkpoint" / "archive.age").unlink()
+
+    with pytest.raises(CloudImportError) as refused:
+        rig.run(file=False)
+
+    assert refused.value.code == "CHECKPOINT_OPTIONS_CHANGED" and record.exists()
+    assert rig.run(file=True)["cell_filing"] == "asked" and _landed_series_file(rig)
+
+
+@pytest.mark.parametrize(("first_refuses", "carries", "claim"), [(False, True, "asked"), (True, False, "not_offered")],
+                         ids=["offer-withdrawn", "offer-gained"])
+def test_a_rerun_builds_the_archive_the_checkpoint_recorded_when_the_cells_offer_changed_before_it_was_built(
+        rig, first_refuses, carries, claim):
+    """Catches a rerun that is refused, or that builds another archive and claims what the live probe says, after an upgrade."""
+    rig.files(a01__bin=800)
+    rig.cell.refuses_file = first_refuses
+    record = _stop_a_lone_import(rig, file=True)
+    state = json.loads(record.read_text())
+    for name in ("ciphertext_sha256", "ciphertext_bytes"):  # A stop while the archive was built leaves none of these.
+        state.pop(name, None)
+    record.write_text(json.dumps(state))
+    (rig.tmp / "checkpoint" / "archive.age").unlink()
+    rig.cell.refuses_file = not first_refuses
+    rig.lines.clear()
+
+    result = rig.run(file=True)
+
+    assert _landed_series_file(rig) is carries and result["cell_filing"] == claim
+    assert ("the cell files the folder by itself" in rig.said()) is carries
+    assert ("does not file imports itself" in rig.said()) is not carries
+
+
+def test_a_checkpoint_from_before_the_record_was_a_plain_import_and_a_rerun_that_asks_to_file_is_refused(rig):
+    """Catches a stopped plain import that a rerun with the default flags resumes and then reports as filed by the cell."""
+    rig.files(a01__bin=800)
+    record = _stop_a_lone_import(rig, file=False)
+    state = json.loads(record.read_text())
+    del state["choices"]
+    record.write_text(json.dumps(state))
+
+    with pytest.raises(CloudImportError) as refused:
+        rig.run(file=True)
+    result = rig.run(file=False)
+
+    assert refused.value.code == "CHECKPOINT_OPTIONS_CHANGED" and "started as an upload only" in refused.value.message
+    assert "--no-file" in refused.value.message and "ask your assistant to file it" in refused.value.message
+    assert "cell_filing" not in result and not _landed_series_file(rig)
+
+
+def test_a_folder_with_nothing_to_send_is_refused_before_a_series_file_alone_is_uploaded(rig):
+    """Catches a stage that holds only the series file, which the empty selection would otherwise still declare."""
+    (rig.source / ".hidden").write_text("x")
+    rig.cell.older = True
+
+    with pytest.raises(CloudImportError) as refused:
+        rig.run(file=True)
+
+    assert refused.value.code == "NOTHING_TO_IMPORT" and not rig.cloud.registered_at
 
 
 def test_an_older_cell_refuses_a_folder_above_its_known_size_before_any_upload(rig):
@@ -954,6 +1244,25 @@ def test_a_window_whose_attempt_ended_failed_is_sent_again_under_a_new_import_an
 
     assert rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
     assert len(rig.cloud.rows) == 2
+
+
+@pytest.mark.parametrize(("code", "says_to_rerun"), [("IMPORT_OUT_OF_MEMORY", False), ("IMPORT_KILLED", True)])
+def test_a_folder_stop_after_an_ended_import_says_to_rerun_only_where_a_rerun_can_help(rig, code, says_to_rerun):
+    """Catches a folder run that says to rerun after an out-of-memory stop: the same archive stops the same way after hours of upload."""
+    rig.files(a01__bin=800, a02__bin=800)
+    refused = []
+    rig.cloud.refusal_code = code
+    rig.cloud.refuse_when = lambda members: not refused and not refused.append(True)
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+    shown: list[str] = []
+
+    _report_failure(stop.value, rig.tmp / "checkpoint", Progress(shown.append))
+
+    assert stop.value.code == code
+    assert ("Run the same command again" in " ".join(shown)) is says_to_rerun
+    rig.run()  # Either way the window is renewed, so a later rerun lands the members.
+    assert rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
 
 
 def test_a_window_whose_member_changed_after_a_failed_attempt_is_sent_again_under_a_new_import(rig):

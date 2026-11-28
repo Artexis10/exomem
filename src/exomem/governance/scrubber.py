@@ -43,7 +43,7 @@ from . import authorization_sessions
 
 #: What replaces a blocked value. Deliberately fixed text: a per-credential
 #: description would itself carry information about what was found.
-NOTICE = "[credential blocked by exomem egress policy]"
+NOTICE = "[credential blocked by Evermatter egress policy]"
 INSPECTION_UNAVAILABLE_NOTICE = "[content withheld: JSON inspection unavailable]"
 
 # The future authorization-session wire token is parsed here, rather than by

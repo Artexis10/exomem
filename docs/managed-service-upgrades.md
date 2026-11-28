@@ -81,8 +81,8 @@ symlink, if it is one) names `exomem-retrieve-nudge.sh`. A profile that never
 wired the hook is left untouched. This never fails or rolls back the upgrade
 itself -- a per-profile error, such as the installer's own refusal of a
 group-writable config, is reported under `hook_refresh` in the upgrade result
-and surfaced by `exomem doctor` (`upgrade.hook_refresh`), not raised. Set
-`EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH` to opt out.
+and surfaced by `evermatter doctor` (`upgrade.hook_refresh`), not raised. Set
+`EVERMATTER_DISABLE_UPGRADE_HOOK_REFRESH` to opt out.
 
 For status or recovery, read the runtime directory from the rendered unit's
 `--runtime-dir` argument and use the launcher's interpreter:
@@ -307,27 +307,27 @@ model cache path for `HF_HOME`, or for `HF_HUB_CACHE` when the live file sets
 that; the hub stays offline:
 
 ```sh
-EXOMEM_VAULT_PATH=/tmp/xr/vault
-EXOMEM_STATE_ROOT=/tmp/xr/state
-EXOMEM_LOG_DIR=/tmp/xr/logs
-EXOMEM_WRITER_LEASE_STATE_DIR=/tmp/xr/lease
+EVERMATTER_VAULT_PATH=/tmp/xr/vault
+EVERMATTER_STATE_ROOT=/tmp/xr/state
+EVERMATTER_LOG_DIR=/tmp/xr/logs
+EVERMATTER_WRITER_LEASE_STATE_DIR=/tmp/xr/lease
 HOME=/tmp/xr/home
 XDG_STATE_HOME=/tmp/xr/home/.local/state
 XDG_CONFIG_HOME=/tmp/xr/home/.config
 XDG_DATA_HOME=/tmp/xr/home/.local/share
-EXOMEM_REST_API_KEY=NEW_RANDOM_VALUE
-EXOMEM_DISABLE_MEDIA_EXTRACTION=1
-EXOMEM_ASR_PREWARM=0
-EXOMEM_DISABLE_CLIP=1
+EVERMATTER_REST_API_KEY=NEW_RANDOM_VALUE
+EVERMATTER_DISABLE_MEDIA_EXTRACTION=1
+EVERMATTER_ASR_PREWARM=0
+EVERMATTER_DISABLE_CLIP=1
 HF_HUB_OFFLINE=1
 HF_HOME=LIVE_VALUE
-EXOMEM_PRELOAD_MODELS=LIVE_VALUE
-EXOMEM_STANDBY_WARM_SECONDS=LIVE_VALUE
-EXOMEM_COLD_START_SECONDS=LIVE_VALUE
-EXOMEM_LOCAL_PORT=LOCAL_PORT
-EXOMEM_GITHUB_USER_ID=LIVE_VALUE
-EXOMEM_GITHUB_USERNAME=LIVE_VALUE
-EXOMEM_JWT_SIGNING_KEY=NEW_RANDOM_VALUE
+EVERMATTER_PRELOAD_MODELS=LIVE_VALUE
+EVERMATTER_STANDBY_WARM_SECONDS=LIVE_VALUE
+EVERMATTER_COLD_START_SECONDS=LIVE_VALUE
+EVERMATTER_LOCAL_PORT=LOCAL_PORT
+EVERMATTER_GITHUB_USER_ID=LIVE_VALUE
+EVERMATTER_GITHUB_USERNAME=LIVE_VALUE
+EVERMATTER_JWT_SIGNING_KEY=NEW_RANDOM_VALUE
 ```
 
 Generate each `NEW_RANDOM_VALUE` separately, for example with `openssl rand -hex 32`.
@@ -392,7 +392,7 @@ systemd-run --user --collect --unit=exomem-rehearsal.service -p Type=simple -p M
 ```
 
 ```sh
-HOME=/tmp/xr/home UV_CACHE_DIR=LIVE_UV_CACHE EXOMEM_DISABLE_UPGRADE_HOOK_REFRESH=1 /tmp/xr/launcher/bin/python -m exomem.service_upgrade --runtime-dir /tmp/xr/managed --package-version VERSION --profile standard
+HOME=/tmp/xr/home UV_CACHE_DIR=LIVE_UV_CACHE EVERMATTER_DISABLE_UPGRADE_HOOK_REFRESH=1 /tmp/xr/launcher/bin/python -m exomem.service_upgrade --runtime-dir /tmp/xr/managed --package-version VERSION --profile standard
 ```
 
 `UV_CACHE_DIR` keeps staging on the existing package cache instead of the empty
@@ -550,7 +550,7 @@ reason instead (for example `residue_exceeds_drain_limit`), leaves
 `graph_snapshot` waiting, and the candidate is discarded on budget expiry.
 
 `embeddings` joins `components` only when the process's mode and overrides allow
-a model preload (`EXOMEM_PRELOAD_MODELS=1`). A standby answers its own probe as
+a model preload (`EVERMATTER_PRELOAD_MODELS=1`). A standby answers its own probe as
 serving-ready while it warms; `cutover_ready` is what the supervisor polls, and
 `components` is what an operator reads to see which component a candidate is
 waiting on.
@@ -609,16 +609,16 @@ list after a promotion means the worker is paying the whole warm again.
 
 | Budget | Default | Override |
 | --- | --- | --- |
-| Standby warm | 300 s | `EXOMEM_STANDBY_WARM_SECONDS` in the unit's environment file |
+| Standby warm | 300 s | `EVERMATTER_STANDBY_WARM_SECONDS` in the unit's environment file |
 | Cutover (pause to the migrator) | 40 s | supervisor `transition_timeout` |
 | Drain of active finite requests | 30 s | within the cutover budget |
-| Replacement readiness after the stop | 300 s, never under 120 s | `EXOMEM_COLD_START_SECONDS` |
+| Replacement readiness after the stop | 300 s, never under 120 s | `EVERMATTER_COLD_START_SECONDS` |
 | Detached stream reattachment | 40 s | ingress `reattach_budget` |
 
 The standby warm budget (300 s unless the unit sets it) is the ceiling on how
 large a vault this handoff covers: the detached build measured 54-60 s at
 4.6k pages, so a vault several times larger needs a longer
-`EXOMEM_STANDBY_WARM_SECONDS` before a schema-bumping upgrade.
+`EVERMATTER_STANDBY_WARM_SECONDS` before a schema-bumping upgrade.
 
 The cold-start budget sizes every wait that begins after the previous worker
 has stopped: the supervisor's own start, the promotion of a standby, and the
@@ -815,7 +815,7 @@ release refuses an archive in shared original storage, and no offline cleanup
 removes that format. An older release also refuses a vault that recorded the
 cancellation format. Before you start an older release on that
 vault, stop the server, then run
-`exomem maintain --vault VAULT --migrate-state --offline --cleanup-held-upload-cancellations`.
+`evermatter maintain --vault VAULT --migrate-state --offline --cleanup-held-upload-cancellations`.
 
 A worker records each optional state format that it uses in the vault's state
 manifest, for example the schema of a migrated collection store. The supervisor
@@ -896,7 +896,7 @@ to the serving worker or the standby, and never on a command line.
 
 1. Find the directory that holds the unit's `service.env`, usually `~/.config/exomem`.
 2. Create the file `operator.env` in that directory.
-3. Write one line in it: `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token>`.
+3. Write one line in it: `EVERMATTER_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token>`.
 4. Run `chmod 600 operator.env`.
 5. Make sure that the service user owns the file and that the file is not a symlink.
 
@@ -953,7 +953,7 @@ changes during every handoff, or whose collections take longer than the
 budget, migrates offline instead:
 
 1. Stop the Evermatter service.
-2. Run `(set -a; . ~/.config/exomem/operator.env; exomem collections migrate --vault <vault> --apply)`.
+2. Run `(set -a; . ~/.config/exomem/operator.env; evermatter collections migrate --vault <vault> --apply)`.
 3. Start the Evermatter service.
 
 Step 2 reads the operator credential from the protected file in a subshell, so
@@ -967,7 +967,7 @@ fix its files as the report says, then repeat the steps.
 When the migrator publishes the store and then fails before it installs the
 marker, the supervisor runs it once more before it starts the new release. The
 migrator that failed keeps its lease for the lease time-to-live,
-`EXOMEM_WRITER_LEASE_TTL`, 30 s by default, so the supervisor waits that long
+`EVERMATTER_WRITER_LEASE_TTL`, 30 s by default, so the supervisor waits that long
 first. The rerun adds the time-to-live and up to 15 s to the handoff. When it
 finishes the migration, the outcome is `migrated` and the new release serves
 the store. The supervisor tries only once, because each attempt costs a
@@ -1018,7 +1018,7 @@ re-read at spawn time and overlaid in order on the inherited environment. system
 when the supervisor starts, so without this an edited service environment would
 reach a worker only after a full supervisor restart — which is exactly what a
 seamless upgrade avoids. The supervisor's own environment is never changed.
-This is how `EXOMEM_PRELOAD_MODELS=1` and `EXOMEM_STANDBY_WARM_SECONDS` reach
+This is how `EVERMATTER_PRELOAD_MODELS=1` and `EVERMATTER_STANDBY_WARM_SECONDS` reach
 the next worker: edit `service.env`, then run the ordinary
 `scripts/upgrade.sh`. A file that cannot be read is reported in the handoff
 record as `environment: ["unreadable: <name>"]`, not just logged.

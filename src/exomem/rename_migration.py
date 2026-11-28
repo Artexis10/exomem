@@ -2,10 +2,12 @@
 
 Every reader accepts both names, so an install made before the rename keeps working and
 nothing here runs unasked. The user runs it to adopt the new names. It changes only what
-setup wrote: the stdio server key in Claude Code and Codex, the managed instruction block and
-the explicit checkpoint bindings. A URL (HTTP) server keeps its key, because both clients store
-its sign-in under that key and a rename signs the user out. A rule or hook the user wrote stays
-as it is and is listed.
+setup wrote: the server key in Claude Code and Codex, the managed instruction block and the
+explicit checkpoint bindings. Both clients store a URL (HTTP) server's sign-in under its key, so
+renaming one can sign the user out once; the command prints the sign-in step for each. A URL that
+points at Evermatter Cloud keeps its key, because the Cloud plugin's address changes in a later
+release and one rename now would sign that user in twice. A rule or hook the user wrote stays as
+it is and is listed.
 """
 
 from __future__ import annotations
@@ -16,15 +18,21 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import client_config, prominence, setup_wizard
+from . import client_config, cloud_address, prominence, setup_wizard
 from . import install_hook as hook_module
 from . import install_skill as install_module
 
-#: Said for each URL server that this command leaves under its old key.
-_HTTP_KEPT = (
-    "kept `{old}` for {url}: renaming it would sign you out; "
-    "a later release moves it with a sign-in notice"
+#: Said for each Cloud URL registration that this command leaves under its old key.
+_CLOUD_KEPT = (
+    "kept `{old}` for {url}: it moves with the Cloud plugin's address change, "
+    "so you sign in once"
 )
+
+
+def _sign_in_line(client: str) -> str:
+    """The step for a renamed URL server. Its sign-in is OAuth only when the server asks for one,
+    which the command cannot tell, so the line is conditional."""
+    return f"  If `{client_config.SERVER_NAME}` shows as not connected, {client_config.SIGN_IN_STEPS[client]}."
 
 
 def _migrate_claude_servers(
@@ -53,8 +61,8 @@ def _migrate_claude_servers(
                 f"claude-{scope}",
                 f"[skipped: holds both `{old_key}` and `{new_key}`; remove the one you do not use]",
             )
-        elif "url" in old:
-            report(f"claude-{scope}", f"[skipped: {_HTTP_KEPT.format(old=old_key, url=old['url'])}]")
+        elif "url" in old and cloud_address.is_cloud_url(str(old["url"])):
+            report(f"claude-{scope}", f"[skipped: {_CLOUD_KEPT.format(old=old_key, url=old['url'])}]")
         else:
             to_rename[scope] = old
     others = _other_project_registrations(user_config, project_dir)
@@ -87,9 +95,11 @@ def _migrate_claude_servers(
         backup(file)
         payload = json.dumps(entry, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         failure = ""
+        # Add before remove: `claude mcp remove` deletes an http or sse server's stored sign-in, and
+        # restoring the two files cannot bring that back. A refused add then removes nothing.
         for argv in (
-            [claude, "mcp", "remove", old_key, "--scope", scope],
             [claude, "mcp", "add-json", "--scope", scope, new_key, payload],
+            [claude, "mcp", "remove", old_key, "--scope", scope],
         ):
             try:
                 result = run_fn(argv, **run_kwargs)
@@ -109,6 +119,8 @@ def _migrate_claude_servers(
                 report(f"claude-{scope}", f"[failed: {failure}; restored the previous registration]")
             continue
         report(f"claude-{scope}", f"[done] renamed to `{new_key}` in {file.name}")
+        if "url" in entry:
+            print_fn(_sign_in_line("claude"))
         if scope == "project":
             print_fn("  Claude Code asks you to approve the renamed project server again.")
 
@@ -146,7 +158,7 @@ def _migrate_codex_server(*, codex_home: Path, which_fn, print_fn, report) -> No
         report("codex", f"[failed: {exc}]")
         return
     skipped = {
-        "http": _HTTP_KEPT.format(old=client_config.LEGACY_SERVER_NAME, url=outcome.get("url")),
+        "kept": _CLOUD_KEPT.format(old=client_config.LEGACY_SERVER_NAME, url=outcome.get("url")),
         "current": f"no `{client_config.LEGACY_SERVER_NAME}` server in {path.name}",
         "conflict": f"{path.name} holds both `{client_config.LEGACY_SERVER_NAME}` and "
         f"`{client_config.SERVER_NAME}`; remove one by hand",
@@ -157,6 +169,8 @@ def _migrate_codex_server(*, codex_home: Path, which_fn, print_fn, report) -> No
         report("codex", f"[skipped: {skipped[outcome['action']]}]")
         return
     setup_wizard._report_file_outcome("codex", outcome, path=path, print_fn=print_fn, report=report)
+    if outcome.get("url"):
+        print_fn(_sign_in_line("codex"))
 
 
 def _migrate_instruction_blocks(*, claude_home: Path, codex_home: Path, print_fn, report) -> None:
@@ -181,7 +195,7 @@ def _migrate_instruction_blocks(*, claude_home: Path, codex_home: Path, print_fn
 
 
 def _migrate_bindings(*, client: str, home: Path, print_fn, report) -> None:
-    """Add the new tool prefix beside each old one in the explicit checkpoint bindings."""
+    """Add each new tool prefix, plugin prefix included, beside its old one in the checkpoint bindings."""
     from ._hooks import exomem_retrieve_nudge as retrieve
 
     step = f"bindings-{client}"
@@ -192,12 +206,12 @@ def _migrate_bindings(*, client: str, home: Path, print_fn, report) -> None:
         report(step, f"[skipped: {reason}]")
         return
     bindings = list(prior["bindings"])
-    old, new = client_config.LEGACY_TOOL_PREFIX, client_config.TOOL_PREFIX
     for binding in prior["bindings"]:
-        if binding.startswith(old) and (added := new + binding[len(old) :]) not in bindings:
-            bindings.append(added)
+        for old, new in client_config.TOOL_PREFIX_RENAMES.items():
+            if binding.startswith(old) and (added := new + binding[len(old) :]) not in bindings:
+                bindings.append(added)
     if len(bindings) == len(prior["bindings"]):
-        report(step, "[skipped: no binding names the old prefix, or the new one is already bound]")
+        report(step, "[skipped: no binding names an old prefix, or its new one is already bound]")
         return
     try:
         result = hook_module.install_hook(
@@ -287,12 +301,14 @@ def migrate(
     if references:
         print_fn("")
         print_fn(
-            "These permission rules and hooks are yours, so setup left them as they are. They name "
-            f"`{client_config.LEGACY_TOOL_PREFIX}`, and no `{client_config.LEGACY_SERVER_NAME}` "
-            f"server answers them now. Change each to the `{client_config.TOOL_PREFIX}` prefix:"
+            "These permission rules and hooks are yours, so setup left them as they are. Each "
+            "names an old tool prefix that no server answers now. Change it to the prefix shown:"
         )
         for reference in references:
-            print_fn(f"  {reference.path}: {reference.kind} {reference.name}")
+            print_fn(
+                f"  {reference.path}: {reference.kind} {reference.name} "
+                f"(change `{reference.prefix}` to `{reference.replacement}`)"
+            )
     print_fn("")
     print_fn(
         "To move the skills too, run `evermatter install-skill`; it moves the old `exomem` "

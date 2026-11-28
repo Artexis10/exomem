@@ -73,3 +73,18 @@ age keys are ignored by Git.
 The versioned non-printing secret workflow is documented in
 `docs/runbooks/cloud-secrets.md`. Its destination matrix keeps the hosted
 scheduler in its exact two peers and global `CRON_SECRET` out of K3s.
+
+## Cloudflare API tokens
+
+The operator keeps each Cloudflare token's scope and expiry, with its renewal
+date, outside this repository. Two rules hold for these tokens:
+
+- The token behind the cert-manager DNS-01 issuer must cover the zone of every
+  gateway hostname. A name outside its scope fails issuance and stalls renewal
+  of the whole gateway certificate. Its delivery route is the
+  `cloud_cloudflare_dns_token` row of
+  `infra/contracts/secret-destinations-v1.json`.
+- The foundation root reads its account token as the `cloudflare_api_token`
+  variable. When that token expires, every foundation plan fails to
+  authenticate. It also needs Account > Turnstile > Edit for the sign-in
+  widget (`docs/runbooks/cloud-turnstile-widget.md`).

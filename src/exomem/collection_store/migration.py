@@ -932,7 +932,7 @@ def _unproven(changed=()):
         f"collections changed after the migration published its store{named}, and that store cannot be proven to "
         "be the store it superseded plus only its imports, so nothing was restored. Restore their files to the "
         "bytes the migration imported (from a backup or the sync history), then run "
-        "`exomem collections migrate --apply` again"))
+        "`evermatter collections migrate --apply` again"))
 
 
 def _fenced(session, fence_client):

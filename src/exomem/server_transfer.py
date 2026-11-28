@@ -1010,7 +1010,7 @@ SEND_PAGE_HTML = f"""<!doctype html><meta charset=utf-8>
 <style>body{{font:16px system-ui;max-width:34rem;margin:2rem auto;padding:0 1rem}}
 input,button{{font:inherit;margin-top:1rem}}#out{{margin-top:1rem;overflow-wrap:anywhere}}</style>
 <h1>Save a file as evidence</h1>
-<form id=f><label for=file>File. Cover any card number, security code or password first.</label><br>
+<form id=f><label for=file>File. Best to cover any payment card number, security code or password.</label><br>
 <input id=file type=file name=file required><br><button type=submit>Save</button></form>
 <div id=out></div>
 <script>{_SEND_PAGE_SCRIPT}</script>"""
@@ -1865,7 +1865,7 @@ def register_transfer_routes(
 
         html = f"""<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>exomem upload</title>
+<title>Evermatter upload</title>
 <style>body{{font:16px system-ui;max-width:34rem;margin:2rem auto;padding:0 1rem}}
 label{{display:block;margin:.75rem 0 .2rem}}input,textarea{{width:100%;padding:.5rem;font:inherit}}
 button{{margin-top:1rem;padding:.6rem 1rem;font:inherit}}#out{{margin-top:1rem;white-space:pre-wrap}}</style>

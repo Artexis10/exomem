@@ -182,6 +182,138 @@ def test_an_agent_adds_an_observation_then_edits_it_by_unit_id(build, vault) -> 
     assert "Fixed intervals line retrying clients up #reliability" not in text and "Original wording" in text
 
 
+def test_a_dated_observation_with_no_kind_is_kept_as_a_record(build, vault) -> None:
+    async def scenario(client):
+        await _new_note(client, "Jitter policy")
+        added = await _call(client, "add_observation", {
+            "note": "Jitter policy", "category": "operating_constraint", "text": "Retries stay under five",
+            "as_of": "2026-11-25", "until": "2027-01-31",
+        })
+        units = await _call(client, "read_page", {"page": "Jitter policy", "part": "units"})
+        return added, units
+
+    added, units = _session(build(), scenario)
+
+    assert "error" not in added, added
+    assert "Saved with its dates." in added["user_summary"], added
+    stored = next(unit for unit in units["units"] if unit["id"] == added["unit_id"])
+    assert (stored["category"], stored["as_of"]) == ("operating_constraint", "2026-11-25"), units
+    text = _vault_text(vault, "Jitter policy")
+    # A record is the neutral kind: it carries no assertion trait, so it takes no inference mode.
+    assert text.index("\n## Observations\n") < text.index("\n### Record\n")
+    assert "- as_of: 2026-11-25" in text
+    assert "- until: 2027-01-31" in text and "Retries stay under five" in text
+
+
+def test_dated_observation_reply_reports_end_placement(build, vault) -> None:
+    async def scenario(client):
+        await _new_note(client, "Jitter policy")
+        added = await _call(client, "add_observation", {
+            "note": "Jitter policy", "category": "finding", "as_of": "2026-11-25",
+            "text": "Retries stay under five.",
+        })
+        assert "error" not in added, added
+        return await _call(client, "edit_note", {
+            "note": "Jitter policy", "why": "Include the rollout", "action": "edit_observation",
+            "observation": added["unit_id"], "category": "finding",
+            "text": "Retries stay under five.\n\n### Rollout details\n\nRead the run log.",
+        })
+
+    edited = _session(build(), scenario)
+
+    assert "The observation is at the end of the note." in edited["user_summary"], edited
+    text = _vault_text(vault, "Jitter policy")
+    assert text.endswith("### Rollout details\n\nRead the run log.\n"), edited
+
+
+def test_a_dated_observation_with_a_verdict_and_no_kind_is_refused_without_offering_to_drop_the_date(
+    build, vault
+) -> None:
+    async def scenario(client):
+        await _new_note(client, "Jitter policy")
+        return await _call(client, "add_observation", {
+            "note": "Jitter policy", "category": "operating_constraint", "text": "Retries stay under five",
+            "as_of": "2026-11-25", "verdict": "confirmed",
+        })
+
+    refused = _session(build(), scenario)
+
+    error = refused.get("error", {})
+    assert error.get("code") == "COMPACT_METADATA_REQUIRES_RICH_KIND", refused
+    message = error["message"]
+    # Two exits, and neither loses the date: pass a kind that takes the fields, or drop the verdict.
+    assert "pass a rich kind to keep verdict, as_of" in message, refused
+    assert "omit verdict to save as_of in a dated block" in message, refused
+    assert "omit verdict, as_of" not in message and "omit as_of" not in message, refused
+    assert "Retries stay under five" not in _vault_text(vault, "Jitter policy")
+
+
+def test_dating_a_compact_observation_keeps_it_in_observations(
+    build, vault
+) -> None:
+    async def scenario(client):
+        await _new_note(client, "Jitter policy")
+        added = await _call(client, "add_observation", {
+            "note": "Jitter policy", "category": "finding", "text": "First wording", "tags": ["reliability"],
+        })
+        edited = await _call(client, "edit_note", {
+            "note": "Jitter policy", "why": "Date it", "action": "edit_observation",
+            "observation": added.get("unit_id"), "category": "finding", "text": "First wording",
+            "as_of": "2026-11-25",
+        })
+        units = await _call(client, "read_page", {"page": "Jitter policy", "part": "units"})
+        return added, edited, units
+
+    added, edited, units = _session(build(), scenario)
+
+    assert "error" not in edited, edited
+    assert "Saved with its date." in edited["user_summary"], edited
+    # The unit keeps its anchor, and its id changes with the new version, as it does on every edit.
+    assert edited["unit_id"].split(".")[0] == added["unit_id"].split(".")[0], (added, edited)
+    assert edited["unit_id"] != added["unit_id"], (added, edited)
+    dated = [unit for unit in units["units"] if unit["as_of"] == "2026-11-25"]
+    assert [unit["id"] for unit in dated] == [edited["unit_id"]], units
+    text = _vault_text(vault, "Jitter policy")
+    assert text.count("First wording") == 1 and "- [finding] First wording" not in text, text
+    assert text.index("\n## Observations\n") < text.index("Original wording") < text.index("\n### Record\n"), text
+    assert text.rstrip().endswith("- as_of: 2026-11-25\n\nFirst wording"), text
+
+
+def test_an_unlinked_reason_on_a_page_that_takes_no_link_review_is_ignored_and_the_reply_says_so(build, vault) -> None:
+    entity = vault / "Knowledge Base" / "Entities" / "Harbour Co-op.md"
+    entity.parent.mkdir(parents=True, exist_ok=True)
+    entity.write_text(
+        "---\ntitle: Harbour Co-op\ntype: entity\nentity_type: organisation\nstatus: active\n"
+        "exomem_id: 00000000-0000-4000-8000-000000000092\nupdated: 2026-07-15\n---\n\n"
+        "# Harbour Co-op\n\n## Suppliers\n- Sells seeds.\n",
+        encoding="utf-8",
+    )
+
+    async def scenario(client):
+        added = await _call(client, "add_observation", {
+            "note": "Harbour Co-op", "category": "finding", "text": "Opens at nine",
+            "unlinked_reason": "No other page relates to this fact.",
+        })
+        edit = {
+            "note": "Harbour Co-op", "why": "More detail", "action": "replace_text",
+            "old_text": "Sells seeds.", "new_text": "Sells seeds and bulbs.",
+            "unlinked_reason": "No other page relates to this fact.",
+        }
+        previewed = await _call(client, "edit_note", {**edit, "preview": True})
+        edited = await _call(client, "edit_note", edit)
+        return added, previewed, edited
+
+    added, previewed, edited = _session(build(), scenario)
+
+    sentence = "No link review applies to this page, so the unlinked reason was not recorded."
+    assert "error" not in added and sentence in str(added), added
+    assert "error" not in edited and sentence in str(edited), edited
+    # The preview names the one field this tool takes, not the grouped fields it fills in.
+    assert "'relation_review_fields': {'ignored': ['unlinked_reason']}" in str(previewed), previewed
+    text = entity.read_text(encoding="utf-8")
+    assert "Opens at nine" in text and "Sells seeds and bulbs." in text
+
+
 def test_a_stale_unit_id_is_refused_and_leaves_the_page_unchanged(build, vault) -> None:
     async def scenario(client):
         await _new_note(client, "Jitter policy")
@@ -338,17 +470,22 @@ def test_an_agent_adds_queries_and_edits_a_record_by_its_id(build, vault) -> Non
             "manifest_text": record_fixtures.LEDGER_MANIFEST_TEXT, "why": "Track published entries", "scaffold": True}})
         added = await _call(client, "add_record", {
             "collection": "Publications ledger", "item": record_fixtures.ledger_item(), "why": "Log the first entry"})
-        rows = await _call(client, "query_records", {"collection": "Publications ledger", "columns": ["slug"]})
+        query = {"collection": "Publications ledger", "columns": ["slug"]}
+        rows = await _call(client, "query_records", query)
+        export = await _call(client, "query_records", {**query, "options": {"output_format": "json"}})
         row = rows["rows"][0]
         edit = {"collection": "Publications ledger", "record": row.get("id"), "why": "Corrected count"}
         edited = await _call(client, "edit_record", {**edit, "changes": {"word_count": 50}})
         stale = await _call(client, "edit_record", {**edit, "changes": {"word_count": 60}})
-        return created, added, row, edited, stale
+        return created, added, rows, export, edited, stale
 
-    created, added, row, edited, stale = _session(build(), scenario)
+    created, added, rows, export, edited, stale = _session(build(), scenario)
 
     assert "error" not in created and "error" not in added and "error" not in edited, (created, added, edited)
-    assert row["slug"] == "quarterly-note" and row["id"]
+    assert rows["rows"][0]["slug"] == "quarterly-note" and rows["rows"][0]["id"]
+    assert "rendered" not in rows, rows
+    assert {key: value for key, value in export.items() if key != "rendered"} == rows
+    assert "quarterly-note" in export["rendered"]
     assert stale.get("error", {}).get("code") == "STALE_ITEM", stale
     items = _item_files(vault, "Knowledge Base/Records/Publications")
     assert "word_count: 50" in items and "word_count: 60" not in items
@@ -634,6 +771,41 @@ def test_every_route_a_public_reply_carries_names_a_listed_tool_and_arguments_it
     assert not [reply for reply in replies if "error" in reply], replies
     # A route reply that carried no route would pass vacuously, so each spelling the surface re-writes must appear.
     assert {"edit_note", "decide_review_item", "create_note", "search_memory"} <= {route["tool"] for route in routes}
+
+
+def test_a_review_item_from_the_held_pass_spells_its_call_for_the_surface_that_lists_it(
+    build, vault, warm_managed_cell
+) -> None:
+    """The refresh worker holds the pass with no surface bound, so a held item named a tool that
+    the public surface does not list."""
+    from test_name_drift import _invent
+
+    from exomem import due_state, find, review_pass
+
+    _invent(vault)
+    find.clear_cache()
+    warm_managed_cell(vault)
+    due_state.reconcile(vault)
+    review_pass.start(vault)
+
+    async def scenario(client):
+        for _ in range(600):
+            reply = await _call(client, "list_review_items", {"categories": ["name_drift"]})
+            if "as_of" in reply:  # only a listing that read the held pass names its time
+                return reply
+            await asyncio.sleep(0.05)
+        raise AssertionError("no listing read the held pass")
+
+    try:
+        reply = _session(build(), scenario)
+    finally:
+        review_pass.stop()
+
+    (item,) = reply["items"]
+    (reason,) = item["reasons"]
+    for call in (reason["detail"], reason["meta"]["call"]):
+        assert "manage_memory" in call and "curation.relocate" in call, call
+        assert "maintain_memory" not in call, call
 
 
 def test_an_uncoded_fault_names_the_tool_the_agent_called_not_the_command_behind_it(build, monkeypatch) -> None:

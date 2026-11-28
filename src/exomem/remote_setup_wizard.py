@@ -6,14 +6,14 @@ verify the live triple, add the connector) into a single interactive,
 idempotent wizard, so a non-engineer can expose exomem for claude.ai / iOS.
 
 Every step is a converger: existing `.env` values are read back as defaults and
-an already-set `EXOMEM_JWT_SIGNING_KEY` is preserved (rotating it would orphan
+an already-set `EVERMATTER_JWT_SIGNING_KEY` is preserved (rotating it would orphan
 the OAuth token store and force every client to re-authorize — see
 server.build_server). Re-running is always safe.
 
 The env-var contract is the source of truth in `server.build_server`
-(require_auth branch): EXOMEM_BASE_URL, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET,
-EXOMEM_GITHUB_USERNAME, EXOMEM_GITHUB_USER_ID, EXOMEM_JWT_SIGNING_KEY, plus
-EXOMEM_VAULT_PATH and matching coordinator credentials when HA is configured.
+(require_auth branch): EVERMATTER_BASE_URL, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET,
+EVERMATTER_GITHUB_USERNAME, EVERMATTER_GITHUB_USER_ID, EVERMATTER_JWT_SIGNING_KEY, plus
+EVERMATTER_VAULT_PATH and matching coordinator credentials when HA is configured.
 
 CLI-only by design: it writes `.env` (secrets), reloads the environment, and
 runs doctor's live probes. All side-effect seams (`input_fn`, `print_fn`,
@@ -31,21 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from . import doctor as doctor_module
-
-# The keys this wizard owns in `.env`. Written/patched in place; every other
-# line (comments, unrelated keys) is preserved verbatim by `patch_env`.
-_OAUTH_KEYS = (
-    "EXOMEM_BASE_URL",
-    "GITHUB_CLIENT_ID",
-    "GITHUB_CLIENT_SECRET",
-    "EXOMEM_GITHUB_USERNAME",
-    "EXOMEM_GITHUB_USER_ID",
-    "EXOMEM_JWT_SIGNING_KEY",
-    "EXOMEM_LEASE_COORDINATOR_TOKEN",
-    "EXOMEM_WRITER_LEASE_TOKEN",
-    "EXOMEM_OAUTH_STORAGE_TOKEN",
-    "EXOMEM_VAULT_PATH",
-)
+from . import env_compat
 
 _TUNNELS = ("ngrok", "cloudflare")
 
@@ -56,7 +42,7 @@ _TUNNELS = ("ngrok", "cloudflare")
 
 
 class BaseUrlError(ValueError):
-    """EXOMEM_BASE_URL failed validation (empty / no scheme / trailing slash / /mcp)."""
+    """EVERMATTER_BASE_URL failed validation (empty / no scheme / trailing slash / /mcp)."""
 
 
 def generate_signing_key() -> str:
@@ -109,19 +95,19 @@ def validate_base_url(raw: str) -> str:
     """
     url = (raw or "").strip()
     if not url:
-        raise BaseUrlError("EXOMEM_BASE_URL is empty — set the public HTTPS origin.")
+        raise BaseUrlError("EVERMATTER_BASE_URL is empty — set the public HTTPS origin.")
     if not (url.startswith("https://") or url.startswith("http://")):
         raise BaseUrlError(
-            f"EXOMEM_BASE_URL must include the scheme, e.g. https://{url}"
+            f"EVERMATTER_BASE_URL must include the scheme, e.g. https://{url}"
         )
     if url.endswith("/"):
         raise BaseUrlError(
-            f"EXOMEM_BASE_URL must not end with a trailing slash: {url!r}. "
+            f"EVERMATTER_BASE_URL must not end with a trailing slash: {url!r}. "
             f"Use {url.rstrip('/')!r}."
         )
     if url.endswith("/mcp"):
         raise BaseUrlError(
-            f"EXOMEM_BASE_URL must be the bare origin, not the /mcp endpoint: "
+            f"EVERMATTER_BASE_URL must be the bare origin, not the /mcp endpoint: "
             f"{url!r}. Use {url[: -len('/mcp')]!r} (the wizard appends /mcp itself)."
         )
     return url
@@ -130,6 +116,13 @@ def validate_base_url(raw: str) -> str:
 def connector_url(base_url: str) -> str:
     """The exact URL to paste into claude.ai's Add-custom-connector field."""
     return f"{base_url}/mcp"
+
+
+def plugin_url(base_url: str) -> str:
+    """Where this server serves its one-upload Claude plugin."""
+    from .self_hosted_plugin import ROUTE
+
+    return f"{base_url}{ROUTE}"
 
 
 def callback_url(base_url: str) -> str:
@@ -174,29 +167,30 @@ def parse_env(text: str) -> dict[str, str]:
 def patch_env(existing: str, updates: dict[str, str | None]) -> str:
     """Merge `updates` into `.env` text, preserving every unrelated line.
 
-    An existing `KEY=` line is replaced IN PLACE (position, and any surrounding
-    comments/blank lines, preserved); a new key is appended. A `None` value
-    removes every `KEY=` line instead. `export KEY=` lines count as `KEY` and
-    keep their prefix when replaced. Comments and keys the wizard doesn't own
-    are never touched. Always returns text ending in a single newline (empty
-    input with no updates returns "").
+    `updates` is keyed by the setting's internal name (`EXOMEM_X`) and writes it under the
+    product name `EVERMATTER_X`. The first line that sets the setting under any of its three
+    names is replaced IN PLACE (position, and any surrounding comments/blank lines,
+    preserved); every other line for it is removed, so the file never holds a setting under
+    two names and an alias line cannot bring an old value back. A new key is appended. A
+    `None` value removes every line for the setting instead. `export KEY=` lines count as
+    `KEY` and keep their prefix when replaced. Comments, keys the wizard doesn't own and
+    settings it doesn't update are never touched. Always returns text ending in a single
+    newline (empty input with no updates returns "").
     """
-    remaining = {key: value for key, value in updates.items() if value is not None}
-    removed = {key for key, value in updates.items() if value is None}
+    owner = {name: key for key in updates for name in env_compat.names_for(key)}
+    pending = {key: value for key, value in updates.items() if value is not None}
     out: list[str] = []
     for line in existing.splitlines():
-        key, prefix = _env_line_key(line)
-        if key is not None and key in removed:
-            continue
-        if key is not None and key in remaining:
-            out.append(f"{prefix}{key}={remaining.pop(key)}")
-        else:
+        name, prefix = _env_line_key(line)
+        key = owner.get(name) if name is not None else None
+        if key is None:
             out.append(line)
+        elif key in pending:
+            out.append(f"{prefix}{env_compat.emitted_name(key)}={pending.pop(key)}")
+        # else: the setting is removed, or this is another line of one already written.
     # Append any keys not already present, in the caller's insertion order.
-    for key, value in updates.items():
-        if key in remaining:
-            out.append(f"{key}={value}")
-            del remaining[key]
+    for key, value in pending.items():
+        out.append(f"{env_compat.emitted_name(key)}={value}")
     text = "\n".join(out)
     if text and not text.endswith("\n"):
         text += "\n"
@@ -209,7 +203,7 @@ def render_oauth_fields(base_url: str) -> str:
         "Create a GitHub OAuth App — https://github.com/settings/developers",
         "  → OAuth Apps → New OAuth App — with these EXACT fields:",
         "",
-        "    Application name             exomem",
+        "    Application name             Evermatter",
         f"    Homepage URL                 {base_url}",
         f"    Authorization callback URL   {callback_url(base_url)}",
         "",
@@ -258,9 +252,7 @@ def _prompt_base_url(input_fn, print_fn, default: str) -> str:
 
 def _load_env(env_path: Path) -> None:
     """Reload `.env` into os.environ so doctor's remote checks see fresh values."""
-    from dotenv import load_dotenv
-
-    load_dotenv(env_path, override=True)
+    env_compat.load_dotenv(env_path, override=True)
 
 
 def run_remote_setup(
@@ -300,7 +292,7 @@ def run_remote_setup(
             print_fn(f"  {name:<12} {status}")
         return 1 if any("[failed" in s for _, s in steps) else 0
 
-    print_fn("exomem setup --remote")
+    print_fn("evermatter setup --remote")
     print_fn("")
 
     from .dotenv_guard import dotenv_load_guard
@@ -322,7 +314,11 @@ def run_remote_setup(
         return 2
 
     existing_text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-    existing = parse_env(existing_text)
+    # This command writes credentials, so a conflict between names refuses it rather than pick.
+    env_compat.refuse_process_conflicts(every_setting=True)
+    existing = env_compat.canonical_settings(
+        parse_env(existing_text), source="the .env file", refuse_all=True
+    )
 
     def _existing(key: str) -> str:
         return existing.get(key) or os.environ.get(key, "")
@@ -417,7 +413,7 @@ def run_remote_setup(
                 and resolved_user_id != preserved_user_id
             ):
                 raise ValueError(
-                    "--github-user-id conflicts with existing EXOMEM_GITHUB_USER_ID"
+                    "--github-user-id conflicts with existing EVERMATTER_GITHUB_USER_ID"
                 )
             report("github_id", "[done] supplied explicitly")
         else:
@@ -435,7 +431,7 @@ def run_remote_setup(
             ):
                 raise ValueError(
                     "GitHub login resolves to a different immutable user ID than "
-                    "the existing EXOMEM_GITHUB_USER_ID"
+                    "the existing EVERMATTER_GITHUB_USER_ID"
                 )
             resolved_user_id = preserved_user_id or online_user_id
             report(
@@ -491,11 +487,11 @@ def run_remote_setup(
         missing_ha = [
             name
             for name, value in (
-                ("EXOMEM_WRITER_LEASE_URL", writer_url),
-                ("EXOMEM_WRITER_LEASE_VAULT_ID", writer_vault_id),
-                ("EXOMEM_WRITER_LEASE_REPLICA_ID", writer_replica_id),
-                ("EXOMEM_OAUTH_STORAGE_URL", storage_url),
-                ("EXOMEM_OAUTH_STORAGE_NAMESPACE or EXOMEM_WRITER_LEASE_VAULT_ID", storage_namespace),
+                ("EVERMATTER_WRITER_LEASE_URL", writer_url),
+                ("EVERMATTER_WRITER_LEASE_VAULT_ID", writer_vault_id),
+                ("EVERMATTER_WRITER_LEASE_REPLICA_ID", writer_replica_id),
+                ("EVERMATTER_OAUTH_STORAGE_URL", storage_url),
+                ("EVERMATTER_OAUTH_STORAGE_NAMESPACE or EVERMATTER_WRITER_LEASE_VAULT_ID", storage_namespace),
             )
             if not value
         ]
@@ -525,7 +521,8 @@ def run_remote_setup(
             else "[done] generated matching coordinator credential",
         )
 
-    # 6. Patch .env in place, preserving every other line.
+    # 6. Patch .env in place, preserving every other line. The keys are internal names;
+    # `patch_env` writes each as EVERMATTER_X and removes its other spellings.
     updates: dict[str, str | None] = {
         "EXOMEM_VAULT_PATH": vault_path,
         "EXOMEM_BASE_URL": base_url,
@@ -560,7 +557,8 @@ def run_remote_setup(
     # this run removed must not survive in the process environment (inherited
     # from the shell or service), or the gate would judge the old value.
     for removed_key in [key for key, value in updates.items() if value is None]:
-        os.environ.pop(removed_key, None)
+        for name in env_compat.names_for(removed_key):
+            os.environ.pop(name, None)
     load_env_fn(env_path)
     dr = doctor_fn(vault=vault_path, profile="remote", probe=probe)
     if dr.success:
@@ -571,18 +569,22 @@ def run_remote_setup(
         report("doctor", "[failed: remote preflight reported failures]")
         print_fn("")
         print_fn(
-            "Fix the FAIL rows above and re-run `exomem setup --remote`. The most "
-            "common causes: the server isn't running (`exomem --transport http`), or "
+            "Fix the FAIL rows above and re-run `evermatter setup --remote`. The most "
+            "common causes: the server isn't running (`evermatter --transport http`), or "
             "the tunnel isn't up / forwarding to 127.0.0.1:8765 yet."
         )
         return finish()
 
     # 8. Success — print the connector URL and tunnel-specific next steps.
     print_fn("")
-    print_fn("Ready. Add the connector on claude.ai:")
-    print_fn("  Settings → Connectors → Add custom connector →")
+    print_fn("Ready. Install Evermatter in Claude with one upload:")
+    print_fn(f"  1. Download {plugin_url(base_url)}")
+    print_fn("  2. Upload that file as a plugin in Claude.")
+    print_fn("  3. Open the plugin's Connectors tab, connect Evermatter and sign in")
+    print_fn(f"     with the GitHub account: {github_username}")
+    print_fn("  The plugin brings the connection, every skill and the hooks. To add only")
+    print_fn("  the connection instead: Settings → Connectors → Add custom connector →")
     print_fn(f"      {connector_url(base_url)}")
-    print_fn(f"  then sign in with the GitHub account: {github_username}")
     print_fn("")
     if tunnel == "ngrok":
         print_fn("ngrok notes:")
@@ -612,16 +614,16 @@ def run_remote_setup(
 
 def remote_setup_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem setup --remote",
+        prog="evermatter setup --remote",
         description=(
             "Guided remote-connector setup: pick a tunnel, generate a stable JWT "
-            "signing key, write/patch .env (validating EXOMEM_BASE_URL), print the "
+            "signing key, write/patch .env (validating EVERMATTER_BASE_URL), print the "
             "exact GitHub OAuth App fields, gate on `doctor --profile remote "
             "--probe`, and print the connector URL. Idempotent; existing .env keys "
             "and an existing signing key are preserved."
         ),
     )
-    parser.add_argument("--vault", help="Vault root (default: prompt, or existing .env / $EXOMEM_VAULT_PATH).")
+    parser.add_argument("--vault", help="Vault root (default: prompt, or existing .env / $EVERMATTER_VAULT_PATH).")
     parser.add_argument("--base-url", dest="base_url", help="Public HTTPS origin, no trailing slash, no /mcp.")
     parser.add_argument("--tunnel", choices=_TUNNELS, help="Ingress you'll front the host with.")
     parser.add_argument("--github-client-id", dest="github_client_id", help="GitHub OAuth App Client ID.")
@@ -636,12 +638,12 @@ def remote_setup_main(argv: list[str]) -> int:
     owner.add_argument(
         "--remote-owner", dest="remote_owner", action="store_const", const=True,
         help="Remote sign-ins by this GitHub account act as you, the owner "
-        "(writes EXOMEM_OWNER_OAUTH_SUBJECT).",
+        "(writes EVERMATTER_OWNER_OAUTH_SUBJECT).",
     )
     owner.add_argument(
         "--no-remote-owner", dest="remote_owner", action="store_const", const=False,
         help="Remote sign-ins stay a separate non-owner principal "
-        "(removes EXOMEM_OWNER_OAUTH_SUBJECT).",
+        "(removes EVERMATTER_OWNER_OAUTH_SUBJECT).",
     )
     parser.add_argument(
         "--yes", action="store_true",

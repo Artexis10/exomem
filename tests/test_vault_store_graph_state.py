@@ -81,7 +81,7 @@ def test_doctor_and_status_report_a_store_mode_vault_from_the_store_not_file_mod
     queue = resource_status.collect(stored)["deferred_work"]
 
     assert backlog.status == "pass"
-    assert "exomem index" not in f"{backlog.message} {backlog.remediation or ''}"
+    assert "evermatter index" not in f"{backlog.message} {backlog.remediation or ''}"
     assert lexical.status == "pass"
     assert f"{stored_pages} pages indexed" in lexical.message
     assert queue["state"] == "not_applicable"

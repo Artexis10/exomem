@@ -168,7 +168,7 @@ def _deadline(_signal: int, _frame: object) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="exomem cell-media-collect")
+    parser = argparse.ArgumentParser(prog="evermatter cell-media-collect")
     parser.add_argument("--snapshot", required=True, help="the snapshot that this hold's backup produced")
     parser.add_argument("--manifest-path", required=True, help="where each snapshot holds its media manifest")
     args = parser.parse_args(argv)

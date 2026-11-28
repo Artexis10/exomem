@@ -98,6 +98,9 @@ the recent activity log shows `null`.
 
 Use `query_records`, `add_record` and `edit_record`, and the `records` operations of `inspect_memory` and `manage_memory`, for collection actions:
 
+Read `rows` in a standard `query_records` reply. To include an export, pass a supported format in
+`options.output_format`, such as `json`, `markdown` or `csv`.
+
 | Action | Use it for |
 | --- | --- |
 | `inspect` | Report a collection's contract, direct-edit drift, schema issues, template availability, or bounded audit gaps. It never repairs canonical data. |
@@ -106,7 +109,7 @@ Use `query_records`, `add_record` and `edit_record`, and the `records` operation
 | `append` | Safely add a new item with a concise reason and current container guard. |
 | `update` | Target one item with its item key, current container and item-version guards, and a concise reason. |
 | `retract` | Take one row of a store-backed summary or log collection out of current state, with a reason and the current container and item-version guards. The row keeps its history. |
-| `history` | Read retained prior payloads for one authorized item, with bounded pagination and explicit missing legacy content. |
+| `history` | Read retained prior payloads for one authorized item, with bounded pagination and explicit missing legacy content. Name the row by exactly one of `item_key`, `item_id` (a stale id still names its row) or `natural_key` (an object of the collection's natural-key values; a retracted row is found by it too). |
 | `revise` | Change a collection declaration with current manifest and container guards. |
 | `rebaseline` | Acknowledge an exact, positively established imported audit gap. |
 | `bulk_upsert` | Import a bounded batch of observations from preserved source references. |
@@ -183,7 +186,7 @@ Natural routing stays simple:
 
 Use remote `maintain_memory(mode="reconcile", dry_run=true)` to preview derived-index
 repair, then start it as a maintenance job with the preview's `plan_id` and a `why` (the
-host CLI is `exomem maintain --reconcile`); never use it as a way to rewrite or
+host CLI is `evermatter maintain --reconcile`); never use it as a way to rewrite or
 reinterpret a person's canonical history.
 
 ## Human-owned storage

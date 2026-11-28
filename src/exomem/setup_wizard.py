@@ -24,6 +24,7 @@ import os
 import shutil
 import stat
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +37,13 @@ from . import install_skill as install_module
 from . import knowledge_packs as knowledge_packs_module
 from . import overview as overview_module
 from . import personalize as personalize_module
+from .env_compat import (
+    canonical_settings,
+    emitted_name,
+    inherited_environment,
+    names_for,
+    rename_settings,
+)
 from .governance.principal import library_scope
 from .kbdir import managed_join, managed_root_rel
 from .vault_store import cli_fence
@@ -136,11 +144,35 @@ def _server_command(which_fn) -> list[str]:
     return ["uvx", "exomem", "--transport", "stdio"]
 
 
-def _registration_matches(route: client_config.McpRoute, server: dict) -> bool:
+def _registration_matches(
+    route: client_config.McpRoute, server: dict, inherited: Mapping[str, str]
+) -> bool:
     if route.transport == "http":
         return server.get("url") == route.url and server.get("type", "http") == "http"
-    desired = route.as_claude_config()
-    return all(server.get(key) == value for key, value in desired.items())
+    for key, value in route.as_claude_config().items():
+        if key == "env":
+            held = server.get(key)
+            if not isinstance(held, dict) or not _held_env_matches(held, value, inherited):
+                return False
+        elif server.get(key) != value:
+            return False
+    return True
+
+
+def _held_env_matches(
+    held: dict, desired: dict[str, str], inherited: Mapping[str, str]
+) -> bool:
+    """Whether a registration env that the client holds gives the server what `desired` gives it.
+
+    A registration that an earlier release wrote names the same settings as EXOMEM_X; that is
+    the route the user has, so it matches. The client starts the server with its own
+    environment (`inherited`) and the registration env on top, by literal name. So a held env
+    whose names leave an exported spelling outranking or contradicting it, or that holds two
+    spellings with different values, does not match: that server reads another value or exits.
+    """
+    return rename_settings(held)[0] == rename_settings(desired)[0] and rename_settings(
+        {**inherited, **held}
+    ) == rename_settings({**inherited, **desired})
 
 
 @dataclass(frozen=True)
@@ -196,7 +228,9 @@ def _legacy_stdio_plugins(claude: str, run_fn, run_kwargs: dict) -> list[str]:
         if not isinstance(plugin, dict) or plugin.get("enabled") is not True:
             continue
         plugin_id = str(plugin.get("id") or plugin.get("name") or "")
-        if not any(name in plugin_id.casefold() for name in client_config.SERVER_NAMES):
+        # Only the plugin that carries the MCP server is checked; it takes the server's name, and a
+        # sibling such as `evermatter-self-hosted@exomem` has no server by design.
+        if plugin_id.partition("@")[0].casefold() not in client_config.SERVER_NAMES:
             continue
         entry = client_config.server_entry(plugin.get("mcpServers"))
         if entry is None:
@@ -233,12 +267,37 @@ def _configured_mcp_url(
         if env_path is not None and env_path.is_file():
             from .remote_setup_wizard import parse_env
 
-            parsed = parse_env(env_path.read_text(encoding="utf-8"))
+            parsed = canonical_settings(
+                parse_env(env_path.read_text(encoding="utf-8")), source="the .env file"
+            )
             if "EXOMEM_BASE_URL" in parsed:
                 configured = parsed["EXOMEM_BASE_URL"]
-    if configured is None and "EXOMEM_BASE_URL" in environ:
-        configured = environ["EXOMEM_BASE_URL"]
+    if configured is None:
+        configured = canonical_settings(environ, source="the process environment").get(
+            "EXOMEM_BASE_URL"
+        )
     return client_config.normalize_mcp_url(configured) if configured is not None else None
+
+
+def _registration_env(
+    vault_path: Path, profile: str, environ: Mapping[str, str]
+) -> dict[str, str]:
+    """The settings a stdio registration gives the server, each under the names it must replace.
+
+    The client starts a stdio server with its own environment and the registration env on
+    top, by literal name. A registered EVERMATTER_X beside an exported EXOMEM_X would give one
+    setting two names: the server refuses a vault path set two ways, and the export wins any
+    other setting. So a setting takes every spelling that `environ`, the environment setup
+    started with, already holds; else EVERMATTER_X.
+    """
+    settings = {"EXOMEM_VAULT_PATH": str(vault_path)}
+    if profile == "lean":
+        settings["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
+    env: dict[str, str] = {}
+    for name, value in settings.items():
+        for spelling in [n for n in names_for(name) if n in environ] or [emitted_name(name)]:
+            env[spelling] = value
+    return env
 
 
 def _resolve_client_route(
@@ -251,9 +310,7 @@ def _resolve_client_route(
     vault_path: Path,
     profile: str,
 ) -> client_config.McpRoute:
-    env = {"EXOMEM_VAULT_PATH": str(vault_path)}
-    if profile == "lean":
-        env["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
+    env = _registration_env(vault_path, profile, environ)
     if force_stdio:
         return client_config.McpRoute.stdio(_server_command(which_fn), env)
 
@@ -285,6 +342,7 @@ def _register_claude(
     run_fn,
     run_kwargs: dict,
     report,
+    inherited: Mapping[str, str],
 ) -> None:
     try:
         registrations = client_config.claude_registrations(
@@ -299,7 +357,7 @@ def _register_claude(
     scope_text = _format_scopes(existing_scopes)
     desired_is_active = (
         existing_scopes == [scope]
-        and _registration_matches(route, registrations[scope][1])
+        and _registration_matches(route, registrations[scope][1], inherited)
     )
     if desired_is_active:
         report("register", f"[skipped: already registered in {scope}]")
@@ -587,7 +645,7 @@ def _offer_learning_instruction(
         print_fn(f"    {prominence.LEARNING_INSTRUCTION}")
         print_fn(
             "  Setup keeps it between the `evermatter learning instruction` markers. Delete that "
-            "block, or run `exomem install-hook --uninstall --client all`, to remove it."
+            "block, or run `evermatter install-hook --uninstall --client all`, to remove it."
         )
     for name, client, path, change in pending:
         verb = "Update it in" if change == "updated" else "Add it to"
@@ -627,7 +685,9 @@ def run_setup(
     persist_profile_fn=None,
     print_fn=print,
 ) -> int:
-    environ = dict(os.environ if environ is None else environ)
+    # The environment by literal name, before the settings rename: the client that starts a
+    # registered server inherits these names, so the registration env must replace them.
+    environ = dict(inherited_environment() if environ is None else environ)
     project_dir = Path.cwd() if project_dir is None else Path(project_dir)
     claude_config_path = (
         client_config.default_claude_config_path(environ)
@@ -659,7 +719,7 @@ def run_setup(
             print_fn(f"  {name:<10} {status}")
         return 1 if any("[failed" in status for _, status in steps) else 0
 
-    print_fn("exomem setup")
+    print_fn("evermatter setup")
     print_fn("")
 
     # 1. vault path
@@ -667,7 +727,7 @@ def run_setup(
         if yes:
             print_fn("setup: --yes requires --vault.")
             return 2
-        env_default = environ.get("EXOMEM_VAULT_PATH", "")
+        env_default = rename_settings(environ)[0].get("EXOMEM_VAULT_PATH", "")
         raw = input_fn(f"Vault folder [{env_default}]: ").strip()
         vault = raw or env_default
         if not vault:
@@ -714,7 +774,7 @@ def run_setup(
         print_fn(f"    Likely packs: {_format_pack_suggestions(packs)}")
     print_fn("")
     print_fn(f"  Contract: {overview_module.SCOPE_NOTE}")
-    print_fn("  Adoption: run `exomem adopt` anytime for manifest review, source copy, and compile planning.")
+    print_fn("  Adoption: run `evermatter adopt` anytime for manifest review, source copy, and compile planning.")
     print_fn("")
     report("scan", "[done]")
 
@@ -834,7 +894,7 @@ def run_setup(
                 input_fn,
                 "\nA capable idle GPU was detected. Use performance mode for "
                 "faster explicit indexing? Normal mode avoids steady-state CUDA "
-                "residency. (change anytime with `exomem mode`)",
+                "residency. (change anytime with `evermatter mode`)",
                 False,
             ):
                 mode_mod.write_mode("performance")
@@ -847,7 +907,7 @@ def run_setup(
             mcp_url=configured_mcp_url,
             force_stdio=force_stdio,
             cwd=project_dir,
-            environ={},
+            environ=environ,
             which_fn=which_fn,
             vault_path=vault_path,
             profile=profile,
@@ -862,9 +922,15 @@ def run_setup(
     else:
         if route.transport == "stdio" and route.command[0] == "uvx":
             print_fn(
-                "  Note: exomem is not durably installed, so the server will be "
+                "  Note: Evermatter is not durably installed, so the server will be "
                 "registered as `uvx exomem`. For a registration that never "
                 "re-resolves, run `uv tool install exomem` first."
+            )
+        exported = [name for name in route.env or {} if name != emitted_name(name)]
+        if exported:
+            print_fn(
+                f"  Note: your environment exports {', '.join(exported)}, so the registration "
+                "sets the same names and the server uses the values setup chose."
             )
         claude = which_fn("claude")
         if not claude:
@@ -908,6 +974,7 @@ def run_setup(
                     run_fn=run_fn,
                     run_kwargs=run_kwargs,
                     report=report,
+                    inherited=environ,
                 )
 
     # 6b. Codex registration — symmetric with Claude Code above. Codex reads
@@ -1051,10 +1118,10 @@ def run_setup(
     else:
         print_fn("  1. Restart Claude Code so it loads the Evermatter server and skill.")
     print_fn('  2. Try: "what does this vault look like" or "find my notes on X".')
-    print_fn("  3. Optional, for direct CLI use (`kb find ...`): set EXOMEM_VAULT_PATH.")
+    print_fn("  3. Optional, for direct CLI use (`kb find ...`): set EVERMATTER_VAULT_PATH.")
     print_fn(
-        "  4. For foreground work/gaming: exomem mode quiet; inspect with "
-        "exomem status --resources --json."
+        "  4. For foreground work/gaming: evermatter mode quiet; inspect with "
+        "evermatter status --resources --json."
     )
     return code
 
@@ -1069,17 +1136,17 @@ def setup_main(argv: list[str]) -> int:
         return remote_setup_main([a for a in argv if a != "--remote"])
 
     parser = argparse.ArgumentParser(
-        prog="exomem setup",
+        prog="evermatter setup",
         description=(
             "Guided local setup: scan the vault, init the "
             f"{managed_root_rel()}, pick a "
             "search profile, run doctor, register with Claude Code, and install "
             "the skill — one idempotent command. Existing vault content is never "
-            f"touched; exomem writes only under {managed_join('')}. For remote "
-            "connector setup (claude.ai / iOS), use `exomem setup --remote`."
+            f"touched; Evermatter writes only under {managed_join('')}. For remote "
+            "connector setup (claude.ai / iOS), use `evermatter setup --remote`."
         ),
     )
-    parser.add_argument("--vault", help="Vault root (default: prompt, or $EXOMEM_VAULT_PATH).")
+    parser.add_argument("--vault", help="Vault root (default: prompt, or $EVERMATTER_VAULT_PATH).")
     parser.add_argument("--yes", action="store_true", help="Non-interactive; requires --vault.")
     profile = parser.add_mutually_exclusive_group()
     profile.add_argument("--lean", action="store_const", const="lean", dest="profile",

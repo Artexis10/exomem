@@ -8,14 +8,13 @@ the page through a content-hash-guarded write of the page's frontmatter, and wri
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
-from . import duplicates, frontmatter_update, preserve
-from .held_fs import vault_name_key
+from . import duplicates, frontmatter_update, preserve, sensitivity_classes
 from .preserve import DuplicateArtifact
-from .vault import kb_root
+from .vault import folder_lookalike_key, kb_root
 
 Family = tuple[str, str]
 
@@ -29,7 +28,8 @@ class EvidenceLookup:
 
 
 def same_family(left: Family, right: Family) -> bool:
-    return tuple(map(vault_name_key, left)) == tuple(map(vault_name_key, right))
+    # Folder identity, as writes steer it: `garden_tools` and `garden-tools` are one family.
+    return tuple(map(folder_lookalike_key, left)) == tuple(map(folder_lookalike_key, right))
 
 
 def folder_family(vault_root: Path, rel: str) -> Family | None:
@@ -110,27 +110,34 @@ def _stored_description(text: str) -> str | None:
     return text[at + len(marker):].partition("\n## ")[0].strip() or None
 
 
-def _not_applied(hit: duplicates.Duplicate, *, filename: str, description: str | None) -> tuple[dict[str, str | None], ...]:
-    """The caller-provided filename and description that the earlier page does not hold, in the shape capture reuse names them.
+def _not_applied(
+    hit: duplicates.Duplicate, *, filename: str, description: str | None, sensitivity: Sequence[str] | None = None
+) -> tuple[dict[str, str | None], ...]:
+    """The caller-provided filename, description and classes that the earlier page does not hold, in the shape capture reuse names them.
 
     A field the caller omitted, or that equals the kept value, is not listed. The scope and category are
-    applied: the page lists that family.
+    applied: the page lists that family. Classes read as a comma-separated list, or `none` for an empty one.
     """
     kept_name = PurePosixPath(hit.payload.artifact_path or "").name
     provided_name = preserve._sanitize_filename(filename)  # noqa: SLF001 - the stored name's own derivation
     caption = description.strip() if description and description.strip() else None
+    kept_classes = sensitivity_classes.classes_of(hit.payload.frontmatter)
+    classes_differ = sensitivity is not None and set(sensitivity) != set(kept_classes)
     return tuple(
         {"field": name, "provided": provided, "kept": kept}
         for name, provided, kept in (
             ("filename", provided_name or None, kept_name or None),
             ("description", caption, _stored_description(hit.payload.text)),
+            ("sensitivity", (", ".join(sensitivity or ()) or "none") if classes_differ else None,
+             ", ".join(kept_classes) or "none"),
         )
         if provided is not None and provided != kept
     )
 
 
 def reuse(
-    vault_root: Path, *, scope: str, category: str, sha256: str, protected: bool, filename: str, description: str | None = None
+    vault_root: Path, *, scope: str, category: str, sha256: str, protected: bool, filename: str,
+    description: str | None = None, sensitivity: Sequence[str] | None = None,
 ) -> EvidenceLookup:
     """The Evidence page that already holds these bytes, with the requested family listed on it.
 
@@ -150,7 +157,7 @@ def reuse(
         return EvidenceLookup()
     duplicate = DuplicateArtifact(
         hash=sha256, path=hit.payload.artifact_path or "", sidecar_path=hit.path, ref=hit.ref, families=families,
-        fields_not_applied=_not_applied(hit, filename=filename, description=description),
+        fields_not_applied=_not_applied(hit, filename=filename, description=description, sensitivity=sensitivity),
     )
     if any(same_family(pair, wanted) for pair in families):
         return EvidenceLookup(duplicate)

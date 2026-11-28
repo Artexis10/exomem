@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem import extraction_parts
 from exomem.import_selection import Reason, select
 
 not_root = pytest.mark.skipif(
@@ -62,6 +63,54 @@ def test_hidden_entries_at_any_depth_stay_behind_unless_asked_for_and_are_counte
     assert [item.rel for item in default.kept] == ["a.txt"]
     assert default.tally()[Reason.HIDDEN] == (4, 5 + 3 + 4 + 2)
     assert [item.rel for item in opted_in.kept] == [".cache/deep/two", ".cache/one", ".env", "a.txt", "d/.note"]
+
+
+def _parts_of(page: str) -> str:
+    """The folder that holds the further parts of the transcript on `page`, as the product names it."""
+    return extraction_parts.folder_for(Path(page)).as_posix()
+
+
+def test_the_hidden_part_folder_of_a_selected_transcript_page_is_taken_without_the_hidden_flag(tmp_path):
+    folder = _parts_of("Notes/talk.md")
+    _write(tmp_path, {"Notes/talk.md": "page", f"{folder}/part-02.md": "second", f"{folder}/part-03.md": "third", ".env": "12345"})
+
+    default = select(tmp_path)
+
+    assert [item.rel for item in default.kept] == [f"{folder}/part-02.md", f"{folder}/part-03.md", "Notes/talk.md"]
+    assert default.part_folders == 1 and default.tally() == {Reason.HIDDEN: (1, 5)}  # the stray hidden file still stays behind
+    assert default.summary()["part_folders"] == 1
+    assert any("1 hidden part folder" in line for line in default.report_lines())
+
+
+def test_the_part_folder_of_a_page_with_the_raw_protection_mark_is_taken_as_an_ordinary_folder(tmp_path):
+    page = "__exomem_raw_v1__talk.md"
+    folder = _parts_of(page)
+    _write(tmp_path, {page: "page", f"{folder}/part-02.md": "second"})
+    assert not folder.startswith("."), "the floor reads the mark at the start of a name, so this folder carries no dot"
+
+    selection = select(tmp_path)
+
+    assert [item.rel for item in selection.kept] == [page, f"{folder}/part-02.md"]
+    assert selection.part_folders == 0 and not selection.skipped
+
+
+def test_a_hidden_folder_stays_behind_unless_its_transcript_page_is_taken_and_the_gitignore_allows_it(tmp_path):
+    orphan, ignored_page, ignored_folder = _parts_of("orphan.md"), _parts_of("ignored.md"), _parts_of("kept.md")
+    _write(tmp_path, {
+        ".gitignore": f"ignored.md\n{ignored_folder}/\n",
+        f"{orphan}/part-02.md": "its page is not here",
+        "ignored.md": "page left out by the gitignore", f"{ignored_page}/part-02.md": "second",
+        "kept.md": "page", f"{ignored_folder}/part-02.md": "second, left out by the gitignore",
+    })
+
+    selection = select(tmp_path)
+
+    assert [item.rel for item in selection.kept] == ["kept.md"]
+    assert {item.rel: item.reason for item in selection.skipped} == {
+        ".gitignore": Reason.HIDDEN, orphan: Reason.HIDDEN, ignored_page: Reason.HIDDEN,
+        "ignored.md": Reason.GITIGNORE, ignored_folder: Reason.GITIGNORE,
+    }
+    assert selection.part_folders == 0
 
 
 def test_gitignore_rules_are_honoured_by_default_and_can_be_switched_off(tmp_path):

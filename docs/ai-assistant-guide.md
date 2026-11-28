@@ -111,17 +111,17 @@ undated pages remain explicit and `updated` is not used as a cohort date.
 For CLI use, these actions are also available as friendly aliases:
 
 ```bash
-exomem ask "what did I conclude about onboarding?" --json
-exomem ask "warranty dispute context" --deep --graph-enrich --json
-exomem ask "battery policy" --category config --result-level mixed --explain --json
-exomem create_note "# Decision\n\n## Claim\n\nUse simple actions first." --title "Use simple actions first" --json
-exomem capture "raw article excerpt" --title "Article title" --source-type article --url "https://example.com" --json
-exomem capture "receipt text" --as evidence --scope warranty --category receipts --filename receipt.txt --json
-exomem review --json
-exomem review --category relation_debt
-exomem review snooze exomem://review/0123456789abcdef01234567 --until 2026-08-01
-exomem connect --path "Notes/Insights/example" --json
-exomem maintain --json
+evermatter ask "what did I conclude about onboarding?" --json
+evermatter ask "warranty dispute context" --deep --graph-enrich --json
+evermatter ask "battery policy" --category config --result-level mixed --explain --json
+evermatter create_note "# Decision\n\n## Claim\n\nUse simple actions first." --title "Use simple actions first" --json
+evermatter capture "raw article excerpt" --title "Article title" --source-type article --url "https://example.com" --json
+evermatter capture "receipt text" --as evidence --scope warranty --category receipts --filename receipt.txt --json
+evermatter review --json
+evermatter review --category relation_debt
+evermatter review snooze exomem://review/0123456789abcdef01234567 --until 2026-08-01
+evermatter connect --path "Notes/Insights/example" --json
+evermatter maintain --json
 ```
 
 ## Examples
@@ -379,7 +379,7 @@ content-read smoke-tested before their new digest is marked verified.
 
 Use this block when a client has no loaded Evermatter skill. Claude Chat and ChatGPT
 can load the skills from a plugin. Claude Code and Codex load them through
-`exomem setup`.
+`evermatter setup`.
 
 Trim the tone line to your preference.
 
@@ -395,11 +395,11 @@ Save durable conclusions on your own: decisions, solved problems, diagnosed fail
 
 ## Codex CLI
 
-`exomem setup` now wires Codex the same way it wires Claude Code — MCP
+`evermatter setup` now wires Codex the same way it wires Claude Code — MCP
 registration, all ten skills, and hooks — so the usual answer is simply:
 
 ```bash
-exomem setup
+evermatter setup
 ```
 
 It detects Codex from `codex` on PATH or a `~/.codex` directory, registers the
@@ -413,7 +413,7 @@ skills nor hooks. To do the steps individually:
 ```bash
 evermatter install-skill --client codex
 evermatter install-hook --client codex
-codex mcp add evermatter --env EXOMEM_VAULT_PATH="/path/to/vault" -- evermatter --transport stdio
+codex mcp add evermatter --env EVERMATTER_VAULT_PATH="/path/to/vault" -- evermatter --transport stdio
 ```
 
 `--transport stdio` is not optional: the server defaults to HTTP, so a config
@@ -422,7 +422,7 @@ that omits it starts a web server on port 8765 instead of speaking MCP.
 Check deployed Claude Code and Codex hooks:
 
 ```bash
-exomem install-hook --check
+evermatter install-hook --check
 ```
 
 The continuation portion uses one client-neutral, stdlib-only core with thin
@@ -445,14 +445,14 @@ turns checkpoint data into an automatic Evermatter write.
 State is per client and collision-resistant under
 `~/.claude/.cache/exomem-continuation/` or
 `~/.codex/.cache/exomem-continuation/`. `CLAUDE_CONFIG_DIR` and `CODEX_HOME`
-relocate the respective client roots; `EXOMEM_HOOK_HOME` overrides either root
+relocate the respective client roots; `EVERMATTER_HOOK_HOME` overrides either root
 for isolated installs. Current state is accepted only for the exact
 client/session/root and transcript provenance, and only for 30 days. A validated
 previous generation may be reinjected as an explicit `rollback`; corrupt,
 foreign, stale, truncated, or oversized state stays silent. Metadata-only logs
 contain no environment values or absolute paths.
 
-Set `EXOMEM_CONTINUATION_DISABLE=1` in the environment that launches the client
+Set `EVERMATTER_CONTINUATION_DISABLE=1` in the environment that launches the client
 to bypass checkpoint writes and reinjection without deleting state. Reload or
 restart the target client after installation and accept any local-hook trust
 prompt. `install-hook --check` validates exact supported registrations and
@@ -487,7 +487,7 @@ Use the standard stdio config shape:
       "command": "evermatter",
       "args": ["--transport", "stdio"],
       "env": {
-        "EXOMEM_VAULT_PATH": "/path/to/vault"
+        "EVERMATTER_VAULT_PATH": "/path/to/vault"
       }
     }
   }
@@ -510,13 +510,13 @@ Claude Code skill. To set one up:
 3. If the client has no loaded Evermatter skill, add the instruction block above after it.
 
 ```text
-Use Evermatter as the memory for my work. Before you start a task, recall what Evermatter holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again. Keep each file I hand you to read, such as an attachment, a screenshot or a document I point to, as a Source by its exact bytes, even when it settles nothing; tell me in one line, and treat what it claims as unverified. A file that proves something, such as a label, receipt or warranty, goes in Evidence in the same turn, cited in what you write about it. Files you work on in my own repositories are not handed files. Files that hold secrets, such as keys, tokens, a .env file, a card number or a code, are not kept; ask me for a copy with the secret covered.
+Use Evermatter as the memory for my work. Before you start a task, recall what Evermatter holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again. Keep each file I hand you to read, such as an attachment, a screenshot or a document I point to, as a Source by its exact bytes, even when it settles nothing; tell me in one line, and treat what it claims as unverified. A file that proves something, such as a label, receipt or warranty, goes in Evidence in the same turn, cited in what you write about it. Files you work on in my own repositories are not handed files. Files that hold secrets, such as keys, tokens, a .env file, a payment card number or a security code, are not kept; ask me for a copy with the secret covered.
 ```
 
 The agent then recalls what Evermatter holds before a task and saves what it learns.
 The learning instruction is your own request, so it goes where the client reads
 your instructions. With the instruction block it is longer than a 1,500-character
-field, so where the client caps a field, give each text its own field. `exomem
+field, so where the client caps a field, give each text its own field. `evermatter
 setup` offers the same text for Claude Code (`CLAUDE.md`) and Codex
 (`AGENTS.md`). Leave it out at the `light` and `off` prominence levels: they save
 only when you ask.
@@ -564,8 +564,8 @@ was cold.
 After setup:
 
 ```bash
-exomem doctor
-exomem install-hook --check
+evermatter doctor
+evermatter install-hook --check
 ```
 
 Then ask the client to call `read_instructions(profile="compact")`. A good response

@@ -38,8 +38,12 @@ KIND_TRAITS = frozenset(
         # `position` marks a unit as the person's own standing position, which recall carries with
         # attribution. A category can carry it as well as a kind.
         "position",
-        # The kind a supersede uses when the caller names none: the one admitted kind carrying it.
+        # The shipped carrier is the default when superseding a compact observation.
         "replacement",
+        # The kind a dated observation takes when the caller names none: a compact unit carries no
+        # metadata rows, so `as_of` or `until` with no `kind` writes the one kind carrying it. Only
+        # the shipped pack sets it, so every vault has exactly one such kind.
+        "dated_default",
     )
 )
 
@@ -127,6 +131,10 @@ def _from_pack(text: str) -> dict[str, PackKind]:
                 compact=compact,
                 teach=vocabulary_registry.pack_teach("kinds", key, value.get("teach")),
             )
+    if len(data["compact_kinds"]) != 1:
+        raise RuntimeError("shipped kinds pack: the compact grammar needs exactly one kind")
+    if sum("replacement" in kind.traits for kind in kinds.values()) != 1:
+        raise RuntimeError("shipped kinds pack: exactly one kind must carry the replacement trait")
     return kinds
 
 
@@ -140,6 +148,19 @@ def block_kinds() -> frozenset[str]:
 def compact_kinds() -> frozenset[str]:
     """The shipped kinds that have no heading, such as the one-line observation."""
     return frozenset(key for key, kind in pack().items() if kind.compact)
+
+
+@lru_cache(maxsize=1)
+def compact_kind() -> str:
+    """The one kind the compact grammar uses, because its line has no kind field."""
+    (kind,) = compact_kinds()
+    return kind
+
+
+@lru_cache(maxsize=1)
+def replacement_kind() -> str:
+    """The shipped kind for a supersession of a compact observation."""
+    return next(key for key, kind in pack().items() if "replacement" in kind.traits)
 
 
 @lru_cache(maxsize=1)

@@ -15,6 +15,7 @@ process memory only and never prints it.
     running-pods           print the Pods that could still use the cell volume
     outside-backup-window  exit 0 only outside the live cellctl's nightly backup window
     backup-paths           print the paths a backup covers and a restore rewrites
+    exclude-patterns       print the patterns a backup excludes, one per line
     restore-job-selector   print the label selector of cellctl's restore Jobs
 """
 
@@ -47,21 +48,24 @@ from cellctl.backup_window import (  # noqa: E402
 # pods match what Pod Security and cell admission already admit for its Jobs.
 from cellctl.manifests import (  # noqa: E402
     BACKUP_PATHS,
+    CATALOGUE_BACKUP_EXCLUDES,
     HOLD_ANNOTATION,
     JOB_KIND_LABEL,
     JOB_KIND_RESTIC_VERIFY,
     JOB_KIND_RESTORE,
+    OBJECT_STORE_KEY_SECRET,
     RESTIC_VERIFICATION_JOB_NAME_RE,
     SNAPSHOT_ID_RE,
     CellManifestSpec,
     _container_security_context,
     _pod_security_context,
+    backup_store,
     is_restic_verification_pod_spec,
     namespace_name,
     render_cell_manifests,
     render_restore_job,
 )
-from cellctl.storage_config import LEGACY_CLASS  # noqa: E402
+from cellctl.storage_config import parse_storage_config  # noqa: E402
 
 CELL_ID_RE = re.compile(r"[a-z2-7]{16}")  # shape check: a cell ID is 16 base32 characters
 DIGEST_IMAGE_RE = re.compile(r"@sha256:[a-f0-9]{64}$")
@@ -87,10 +91,13 @@ WORKLOAD_COMMAND_SECONDS = 12
 
 @dataclass(frozen=True)
 class PlatformSettings:
-    """What the live cellctl Deployment hands its own backup and restore Jobs."""
+    """What the live cellctl Deployment hands its own backup and restore Jobs. The field names
+    are cellctl's own, so cellctl's `backup_store` picks a cell's store from them."""
 
-    bucket: str
-    endpoint: str
+    object_storage_bucket: str
+    object_storage_endpoint: str
+    cell_data_backup_bucket: str
+    cell_data_endpoint: str
     job_egress_except: tuple[str, ...]
 
 
@@ -159,18 +166,25 @@ def runtime_of(statefulset: dict) -> tuple[str, dict]:
 def scratch_documents(
     *, cell_id: str, scratch: str, snapshot: str, image: str, storage_gib: int,
     credential: dict[str, str], settings: PlatformSettings, started_at: str,
+    storage_class: str, object_store_key: dict | None = None,
 ) -> list[dict]:
     """The scratch namespace's documents and the restore Job, in apply order.
 
     The namespace carries `exomem.io/scratch-of` and no `exomem.io/cloud-cell`
-    label, so cellctl never treats it as a cell.
+    label, so cellctl never treats it as a cell. The scratch volume takes the
+    source volume's class and passphrase, so it keeps the source's encryption.
+    An old cell's stored key rides in its Secret; a custodian-provisioned cell
+    has none, so its `object_store_key` Secret is copied into the scratch
+    namespace for the restore Job to read, as the cell's own Jobs do.
     """
 
     spec = CellManifestSpec(
         cell_id=cell_id, image=image, replicas=0, read_only=False,
-        storage_gib=storage_gib, bearer_current=secrets.token_urlsafe(32),
+        storage_gib=storage_gib, storage_class=storage_class,
+        bearer_current=secrets.token_urlsafe(32),
         backup_password=credential["backup-password"],
-        b2_key_id=credential["b2-key-id"], b2_key_secret=credential["b2-key-secret"],
+        volume_passphrase=credential.get("encryption-passphrase", ""),
+        b2_key_id=credential.get("b2-key-id", ""), b2_key_secret=credential.get("b2-key-secret", ""),
         hold_kind="restore", hold_started_at=started_at,
         job_egress_except=settings.job_egress_except,
     )
@@ -190,24 +204,34 @@ def scratch_documents(
             documents.append(document)
     if len(documents) != len(SCRATCH_DOCUMENTS) + 1 or documents[0]["kind"] != "Namespace":
         raise RuntimeError("cellctl no longer renders the documents a scratch restore needs")
-    job = render_restore_job(spec, bucket_name=settings.bucket, endpoint=settings.endpoint, snapshot_id=snapshot)
+    if not spec.b2_key_id:
+        if object_store_key is None:
+            raise ValueError("the cell has no stored object-store key and no custodian key Secret")
+        documents.append({
+            "apiVersion": "v1", "kind": "Secret", "type": object_store_key.get("type", "Opaque"),
+            "metadata": {"name": OBJECT_STORE_KEY_SECRET, "namespace": scratch,
+                         "labels": {"exomem.io/scratch-of": cell_id}},
+            "data": object_store_key["data"],
+        })
+    job = render_restore_job(spec, **backup_store(settings, stored_key=bool(spec.b2_key_id)), snapshot_id=snapshot)
     job["metadata"]["namespace"] = scratch
     return [*documents, job]
 
 
 def in_place_job(
     *, cell_id: str, statefulset: dict, snapshot: str, settings: PlatformSettings, started_at: str,
+    stored_key_id: str = "",
 ) -> dict:
     """The restore Job for the cell's own namespace and volume, placed where
-    the cell's runtime runs. The Job reads the cell's Secret by reference, so
-    no credential passes through here."""
+    the cell's runtime runs. The Job reads the cell's key by Secret reference:
+    an old cell's stored key from its own Secret, else the custodian's key."""
 
     image, placement = runtime_of(statefulset)
     spec = CellManifestSpec(
         cell_id=cell_id, image=image, replicas=0, read_only=False, placement=placement,
-        hold_kind="restore", hold_started_at=started_at,
+        hold_kind="restore", hold_started_at=started_at, b2_key_id=stored_key_id,
     )
-    return render_restore_job(spec, bucket_name=settings.bucket, endpoint=settings.endpoint, snapshot_id=snapshot)
+    return render_restore_job(spec, **backup_store(settings, stored_key=bool(stored_key_id)), snapshot_id=snapshot)
 
 
 def helper_pod(*, cell_id: str, statefulset: dict, name: str, scratch: str | None = None) -> dict:
@@ -281,13 +305,22 @@ def backup_window_of(deployment: dict) -> tuple[int, int]:
 
 def platform_settings(deployment: dict) -> PlatformSettings:
     env = _cellctl_env(deployment)
-    bucket, endpoint = env["CELLCTL_B2_BUCKET_NAME"], env["CELLCTL_B2_ENDPOINT"]
-    if not bucket or urlparse(endpoint).scheme != "https" or not urlparse(endpoint).hostname:
-        raise ValueError("cellctl's object store settings are incomplete")
+    stores = (
+        (env["CELLCTL_B2_BUCKET_NAME"], env["CELLCTL_B2_ENDPOINT"]),
+        (env["CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME"], env["CELLCTL_CELL_DATA_ENDPOINT"]),
+    )
+    for bucket, endpoint in stores:
+        if not bucket or urlparse(endpoint).scheme != "https" or not urlparse(endpoint).hostname:
+            raise ValueError("cellctl's object store settings are incomplete")
     except_cidrs = tuple(env["CELLCTL_JOB_EGRESS_EXCEPT"].split(","))
     for cidr in except_cidrs:
         ipaddress.ip_network(cidr)
-    return PlatformSettings(bucket=bucket, endpoint=endpoint, job_egress_except=except_cidrs)
+    (founder_bucket, founder_endpoint), (cell_data_bucket, cell_data_endpoint) = stores
+    return PlatformSettings(
+        object_storage_bucket=founder_bucket, object_storage_endpoint=founder_endpoint,
+        cell_data_backup_bucket=cell_data_bucket, cell_data_endpoint=cell_data_endpoint,
+        job_egress_except=except_cidrs,
+    )
 
 
 def _check_cell_namespace(context: str, cell_id: str) -> str:
@@ -307,8 +340,15 @@ def apply_scratch(context: str, cell_id: str, snapshot: str, scratch: str, field
         raise ValueError(f"{scratch} already exists")
     source = _check_cell_namespace(context, cell_id)
     pvc = _get(context, "pvc", "cell-data", source)
-    if pvc["spec"]["storageClassName"] != LEGACY_CLASS:
-        raise ValueError(f"the cell's volume is not in the {LEGACY_CLASS} class")
+    deployment = _cellctl(context)
+    # The classes the live cellctl binds cell volumes to; a scratch volume takes the source's.
+    storage = parse_storage_config(_cellctl_env(deployment).get("CELLCTL_CELL_STORAGE"))
+    storage_class = pvc["spec"]["storageClassName"]
+    if storage_class not in storage.classes:
+        raise ValueError(f"the cell's volume class {storage_class} is not a cell class the live cellctl configures")
+    # A local-storage cell recovers through the node-loss runbook; nothing here has restored one.
+    if storage.is_local(storage_class):
+        raise ValueError(f"the cell's volume is in the local class {storage_class}")
     size = pvc["spec"]["resources"]["requests"]["storage"]
     if not re.fullmatch(r"[1-9][0-9]*Gi", size):
         raise ValueError("the cell's volume size is not whole GiB")
@@ -316,11 +356,15 @@ def apply_scratch(context: str, cell_id: str, snapshot: str, scratch: str, field
     data = _get(context, "secret", "cell-credentials", source)["data"]
     credential = {
         key: base64.b64decode(data[key], validate=True).decode()
-        for key in ("backup-password", "b2-key-id", "b2-key-secret")
+        for key in ("backup-password", "encryption-passphrase", "b2-key-id", "b2-key-secret") if key in data
     }
+    object_store_key = None
+    if not credential.get("b2-key-id"):
+        object_store_key = _get(context, "secret", OBJECT_STORE_KEY_SECRET, source)
     documents = scratch_documents(
         cell_id=cell_id, scratch=scratch, snapshot=snapshot, image=image, storage_gib=int(size[:-2]),
-        credential=credential, settings=platform_settings(_cellctl(context)), started_at=_now(),
+        credential=credential, settings=platform_settings(deployment), started_at=_now(),
+        storage_class=storage_class, object_store_key=object_store_key,
     )
     for document in documents:
         _apply(context, document, field_manager)
@@ -339,9 +383,11 @@ def apply_in_place(context: str, cell_id: str, snapshot: str, field_manager: str
         raise ValueError("the cell and cellctl must both be scaled to zero")
     if _running_pods(context, source, statefulset=statefulset):
         raise ValueError("a pod still runs in the cell namespace")
+    data = _get(context, "secret", "cell-credentials", source)["data"]
+    stored_key_id = base64.b64decode(data["b2-key-id"], validate=True).decode() if "b2-key-id" in data else ""
     job = in_place_job(
         cell_id=cell_id, statefulset=statefulset, snapshot=snapshot,
-        settings=platform_settings(deployment), started_at=_now(),
+        settings=platform_settings(deployment), started_at=_now(), stored_key_id=stored_key_id,
     )
     _apply(context, job, field_manager)
     print(job["metadata"]["name"])
@@ -480,6 +526,7 @@ def main(argv: list[str]) -> int:
             command.add_argument("--name", required=True)
             command.add_argument("--scratch")
     commands.add_parser("backup-paths", help="print what a restore rewrites, one line, space-separated")
+    commands.add_parser("exclude-patterns", help="print what a backup excludes, one pattern per line")
     commands.add_parser("restore-job-selector", help="print the label selector of cellctl's restore Jobs")
     args = parser.parse_args(argv)
     try:
@@ -497,6 +544,9 @@ def main(argv: list[str]) -> int:
             check_outside_backup_window(args.context)
         elif args.command == "restore-job-selector":
             print(f"{JOB_KIND_LABEL}={JOB_KIND_RESTORE}")
+        elif args.command == "exclude-patterns":
+            for pattern in CATALOGUE_BACKUP_EXCLUDES:
+                print(pattern)
         else:
             print(" ".join(BACKUP_PATHS))
     except (ValueError, RuntimeError, KeyError) as error:

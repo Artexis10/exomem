@@ -36,6 +36,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from exomem.env_compat import SETTING_PREFIXES
+
 SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPTS_DIR.parent
 if str(SCRIPTS_DIR) not in sys.path:
@@ -77,7 +79,7 @@ def prepare_environment(snapshot: Path, *, state_dir: str | None) -> None:
     directory next to the snapshot — exactly the shared-live-state boundary
     this script exists to stay outside of.
     """
-    for key in [k for k in os.environ if k.startswith("EXOMEM_") and k not in _KEPT_EXOMEM_ENV]:
+    for key in [k for k in os.environ if k.startswith(SETTING_PREFIXES) and k not in _KEPT_EXOMEM_ENV]:
         del os.environ[key]
     os.environ["EXOMEM_VAULT_PATH"] = str(snapshot)
     # This check judges resolved and partial anchors, which only the anchors packet carries.

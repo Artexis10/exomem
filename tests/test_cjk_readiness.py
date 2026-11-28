@@ -442,13 +442,13 @@ def test_cross_lingual_one_correction_offers_the_japanese_name_and_teaches_it(
     writer_lease.invoke_command(
         _command("edit_memory"),
         ja_vault,
-        path=name["path"],
+        path=name["call"]["args"]["path"],
         why="the user calls the wagon ハーロウ",
         operation={
             "kind": "patch_frontmatter",
-            "field": name["field"],
-            "value": [*name["current"], advisory["turn_terms"][0]],
-            "expected_hash": name["expected_hash"],
+            "field": name["call"]["args"]["operation"]["field"],
+            "value": [*name["call"]["args"]["operation"]["value"], advisory["turn_terms"][0]],
+            "expected_hash": name["call"]["args"]["operation"]["expected_hash"],
         },
     )
     working_set_index.WorkingSetIndex(ja_vault).update()

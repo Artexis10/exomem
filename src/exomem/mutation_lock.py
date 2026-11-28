@@ -42,7 +42,7 @@ _DEFAULT_TIMEOUT_SECONDS = 5.0
 _DEFAULT_POLL_INTERVAL_SECONDS = 0.025
 _BUSY_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN, errno.EDEADLK})
 _SAFE_LABEL = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
-_DEFAULT_LONG_HOLDER_SECONDS = 30.0
+DEFAULT_LONG_HOLDER_SECONDS = 30.0
 _STATUS_TIMEOUT_SECONDS = 0.25
 # Boundary log volume.  Reserved-state identity coordination takes and releases
 # this boundary several times a second per cell, for holds measured in
@@ -2021,7 +2021,7 @@ class _LocalLockState:
     operation: str | None = None
     holder_kind: str | None = None
     acquired_at: float | None = None
-    long_holder_seconds: float = _DEFAULT_LONG_HOLDER_SECONDS
+    long_holder_seconds: float = DEFAULT_LONG_HOLDER_SECONDS
     long_warning_emitted: bool = False
     after_release: dict[object, Callable[[], None]] = field(default_factory=dict)
     # Contention attribution. These are *measurement only* — nothing in the
@@ -2399,7 +2399,7 @@ class VaultMutationCoordinator:
         *,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         poll_interval_seconds: float = _DEFAULT_POLL_INTERVAL_SECONDS,
-        long_holder_seconds: float = _DEFAULT_LONG_HOLDER_SECONDS,
+        long_holder_seconds: float = DEFAULT_LONG_HOLDER_SECONDS,
         kind: str = COORDINATOR_VAULT_BOUNDARY,
         name: str | None = None,
         queued_writers: Callable[[], int] | None = None,
@@ -2435,6 +2435,18 @@ class VaultMutationCoordinator:
     def current_thread_holds_boundary(self) -> bool:
         """Whether this thread owns this vault/cell's exact mutation boundary."""
         return _state_for(self.lock_path).owner_thread == threading.get_ident()
+
+    def hold_room(self) -> float | None:
+        """Seconds before this thread's hold turns overdue, which is when a waiting writer is refused; None when it holds none.
+
+        The limit is the hold's own (`long_holder_seconds`), so a step that ends its call inside this room
+        never needs a second copy of it. Negative once the hold is overdue.
+        """
+        state = _state_for(self.lock_path)
+        with state.metadata_guard:
+            if state.owner_thread != threading.get_ident() or state.acquired_at is None:
+                return None
+            return state.long_holder_seconds - (time.monotonic() - state.acquired_at)
 
     def held_by_another_thread(self) -> bool:
         """Whether another thread of this process holds this boundary now, observed without waiting.
@@ -3405,6 +3417,34 @@ def planned_write_moved_busy() -> OpError:
         "a file this write planned changed while it waited",
         "The write did not commit. Retry it: the retry plans the changed file again.",
         details=busy.details,
+    )
+
+
+#: The `cause` of a busy refusal for a write whose call ran out of time before its commit began.
+PREPARATION_SPENT = "request_budget"
+
+
+def preparation_spent_busy() -> OpError:
+    """The retryable refusal for a write that used its call's time before its commit could begin.
+
+    Nothing was saved. A wait for the boundary cannot help it, so `waits_out` never absorbs it.
+    """
+    busy = _mutation_busy(None, kind=COORDINATOR_VAULT_BOUNDARY)
+    busy.details["cause"] = PREPARATION_SPENT
+    return OpError(
+        "MUTATION_BUSY",
+        "this write used its time preparing before it could start saving",
+        "The write did not commit. Retry it, with the same idempotency key if it had one.",
+        details=busy.details,
+    )
+
+
+def waits_out(error: OpError) -> bool:
+    """Whether a wait for the boundary can turn this refusal into a commit: busy, nothing saved."""
+    return (
+        error.code == "MUTATION_BUSY"
+        and error.details.get("committed") is False
+        and error.details.get("cause") != PREPARATION_SPENT
     )
 
 

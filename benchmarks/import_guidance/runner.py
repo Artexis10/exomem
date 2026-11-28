@@ -382,6 +382,9 @@ def run_once(
         shell_events=read_shell_events(shell_log),
         answer=transcript.result_text,
         shapes=shapes,
+        rejected_tools=checks.unavailable_tools(
+            proc.stdout.splitlines() if proc is not None else (), scenario.served_tools, scenario.builtin_tools
+        ),
     )
     deterministic = checks.run_checks(
         scenario.checks, evidence, scenario.served_tools, scenario.builtin_tools
@@ -424,6 +427,7 @@ def run_once(
         calls=[{"tool": c["tool"], "arguments": c["arguments"]} for c in evidence.calls],
         final_text=transcript.result_text,
         cost_usd=transcript.total_cost_usd,
+        rejected_unavailable_tools=None if evidence.rejected_tools is None else list(evidence.rejected_tools),
     )
     if proc is not None:
         row["api_key_source"] = init_field(proc.stdout, "apiKeySource")

@@ -14,7 +14,7 @@ import ssl
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import partial
@@ -22,7 +22,14 @@ from pathlib import Path, PurePosixPath
 from queue import Empty, Queue
 from urllib.parse import urljoin, urlsplit
 
-from . import duplicates, evidence_reuse, memory_refs, source_result_attribution
+from . import (
+    duplicates,
+    evidence_reuse,
+    memory_refs,
+    request_budget,
+    sensitivity_classes,
+    source_result_attribution,
+)
 from .cli_ops import OpError
 from .mutation_terminal import as_reused
 from .preserve import (
@@ -32,12 +39,14 @@ from .preserve import (
     DESTINATION_ACCEPTED_FORM,
     DuplicateArtifact,
     PreserveError,
+    declared_speech_tracks,
     destination_segment_refusal,
     diarize_pin,
     disclose_retained_speaker_choice,
     preserve_stream,
     validate_raw_capture,
 )
+from .speech_tracks import Track, TrackDeclarationError, declaration
 from .vault import (
     FrontmatterError,
     PathGuard,
@@ -173,6 +182,8 @@ class StagedArtifact:
     #: stores nothing can put it back.
     held: object | None = None
     diarize: bool | None = None
+    #: The declaration of tracks the file handle gave, read before anything is written (`speech_tracks.declaration`).
+    tracks: tuple[Track, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -243,35 +254,12 @@ def _bounded_retrieval_call(
         return SafeFetchError("SAFE_FETCH_FAILED", "download retrieval timed out")
 
     try:
-        timeout = remaining_retrieval_timeout(deadline)
-    except SafeFetchError as error:
+        return request_budget.bounded_blocking_call(
+            operation, remaining=lambda: min(_TIMEOUT_SECONDS, deadline - _monotonic()),
+            slots=_RETRIEVAL_WORKERS,
+        )
+    except TimeoutError as error:
         raise timed_out() from error
-    if not _RETRIEVAL_WORKERS.acquire(timeout=timeout):
-        raise timed_out()
-    result: Queue[tuple[bool, object]] = Queue(maxsize=1)
-
-    def _run() -> None:
-        try:
-            result.put((True, operation()))
-        except Exception as error:  # noqa: BLE001 - preserved for the caller
-            result.put((False, error))
-        finally:
-            _RETRIEVAL_WORKERS.release()
-
-    threading.Thread(target=_run, daemon=True).start()
-    try:
-        timeout = remaining_retrieval_timeout(deadline)
-        succeeded, value = result.get(timeout=timeout)
-    except SafeFetchError as error:
-        raise timed_out() from error
-    except Empty as error:
-        raise timed_out() from error
-    if not succeeded:
-        assert isinstance(value, Exception)
-        if isinstance(value, TimeoutError):
-            raise timed_out() from value
-        raise value
-    return value
 
 
 def validate_download_url(value: object):
@@ -501,6 +489,7 @@ def stage_artifact(
     diarize = file.get("diarize")
     if diarize is not None and not isinstance(diarize, bool):
         raise SafeFetchError("INVALID_FILE", "diarize must be true or false")
+    tracks = _declared_tracks(file.get("tracks"))
     if is_held_reference(file.get("download_url")):
         artifact = _redeem_held(file, budget, vault_root=vault_root, lane=lane)
     elif cloud_mode_enabled():
@@ -511,7 +500,24 @@ def stage_artifact(
         )
     else:
         artifact = stage_direct_artifact(file, budget, batch_deadline=batch_deadline)
-    return artifact if diarize is None else replace(artifact, diarize=diarize)
+    if diarize is not None:
+        artifact = replace(artifact, diarize=diarize)
+    return artifact if tracks is None else replace(artifact, tracks=tracks)
+
+
+def _declared_tracks(value: object) -> tuple[Track, ...] | None:
+    """A file handle's declaration of tracks, read; a refusal names what to change."""
+    if value is None:
+        return None
+    try:
+        tracks = declaration(value)
+    except TrackDeclarationError as error:
+        raise SafeFetchError("INVALID_FILE", str(error)) from error
+    if not tracks:
+        raise SafeFetchError(
+            "INVALID_FILE", "declare at least one track, or omit tracks; to clear a declaration, reprocess with tracks: []"
+        )
+    return tracks
 
 
 def stage_direct_artifact(
@@ -868,6 +874,17 @@ def _unless_written(result: dict) -> dict:
     return as_reused(result) if reused else result
 
 
+def _call_sensitivity(vault_root: Path, reports: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """One `sensitivity` report for a call that stored pages.
+
+    Every file of one call takes the same declaration. The ceiling is per page, so a call that stored several
+    pages states the governance state without naming one page's ceiling.
+    """
+    if len(reports) == 1:
+        return dict(reports[0])
+    return {**reports[0], "disclosure": sensitivity_classes.disclosure(vault_root, None)}
+
+
 def _finish_adoption(outcomes: list[dict[str, object] | None]) -> dict:
     final = [outcome for outcome in outcomes if outcome is not None]
     return _unless_written({
@@ -939,7 +956,9 @@ def _destination(vault_root: Path, *parts: str) -> str:
 
     # The spelling the capture lands under, so a receipt names the folder written.
     return respell_new_path(
-        vault_root, kb_root(vault_root).joinpath(*parts).relative_to(vault_root).as_posix()
+        vault_root,
+        kb_root(vault_root).joinpath(*parts).relative_to(vault_root).as_posix(),
+        leaf_is_folder=True,
     )
 
 
@@ -1277,7 +1296,7 @@ def _already_stored_outcome(
         # A stored row names its page as `page`; the earlier copy's page answers the same question.
         "page": duplicate.sidecar_path,
     }
-    disclose_retained_speaker_choice(out, artifact.diarize)
+    disclose_retained_speaker_choice(out, artifact.diarize, artifact.tracks)
     return source_result_attribution.bind(out, (duplicate.ref,)) if lane == "source" else out
 
 
@@ -1330,7 +1349,8 @@ def _assert_replay_identity(
 
 
 def _replayed_outcome(
-    receipt: Mapping[str, object], *, diarize: bool | None, source_refs: tuple[str, ...] | None = None,
+    receipt: Mapping[str, object], *, diarize: bool | None, tracks: object = None,
+    source_refs: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
     out = {
         "file_id": receipt["selected_file_id"],
@@ -1346,7 +1366,7 @@ def _replayed_outcome(
         "warnings": [],
         "adoption": dict(receipt),
     }
-    disclose_retained_speaker_choice(out, diarize)
+    disclose_retained_speaker_choice(out, diarize, tracks)
     return source_result_attribution.bind(out, source_refs) if source_refs is not None else out
 
 
@@ -1470,7 +1490,7 @@ def _capture_source_adoption(
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
             outcomes[selected_index] = _replayed_outcome(
-                receipt.receipt, diarize=artifact.diarize, source_refs=(receipt.source_ref,)
+                receipt.receipt, diarize=artifact.diarize, tracks=artifact.tracks, source_refs=(receipt.source_ref,)
             )
             return _finish_adoption(outcomes)
 
@@ -1507,6 +1527,7 @@ def _capture_source_adoption(
                                 filename=artifact.filename,
                                 content_type=artifact.content_type,
                                 diarize=artifact.diarize,
+                                tracks=artifact.tracks,
                             ),
                             adoption_seed=envelope.seed(
                                 lane="source", destination=destination
@@ -1516,7 +1537,7 @@ def _capture_source_adoption(
                         payload = _with_unavailable_warning(result.as_dict(), available, "this file")
             if raced is not None:
                 outcomes[selected_index] = _replayed_outcome(
-                    raced.receipt, diarize=artifact.diarize, source_refs=(raced.source_ref,)
+                    raced.receipt, diarize=artifact.diarize, tracks=artifact.tracks, source_refs=(raced.source_ref,)
                 )
             elif duplicate is not None:
                 # Nothing is written: the earlier copy answers, and the call settles without a commit.
@@ -1535,6 +1556,8 @@ def _capture_source_adoption(
         finished = _finish_adoption(outcomes)
         if isinstance(payload, dict) and "vocabulary_resolution" in payload:
             finished["vocabulary_resolution"] = payload["vocabulary_resolution"]
+        if isinstance(payload, dict) and "sensitivity" in payload:
+            finished["sensitivity"] = payload["sensitivity"]
         return finished
     finally:
         if artifact is not None:
@@ -1550,6 +1573,7 @@ def _preserve_evidence_adoption(
     files: list[Mapping[str, object]],
     adoption: object,
     raw_protection: bool = False,
+    sensitivity: tuple[str, ...] | None = None,
 ) -> dict:
     prepared = _adoption_inputs(files, adoption)
     if isinstance(prepared, dict):
@@ -1621,11 +1645,12 @@ def _preserve_evidence_adoption(
             except SafeFetchError as error:
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
-            outcomes[selected_index] = _replayed_outcome(receipt.receipt, diarize=artifact.diarize)
+            outcomes[selected_index] = _replayed_outcome(receipt.receipt, diarize=artifact.diarize, tracks=artifact.tracks)
             return _finish_adoption(outcomes)
 
         manager = active_manager()
         duplicate: DuplicateArtifact | None = None
+        payload: dict | None = None
         try:
             with manager.absorbing_mutation_guard(
                 vault_root,
@@ -1643,7 +1668,7 @@ def _preserve_evidence_adoption(
                     # another key, name or family, cannot both find nothing.
                     held = evidence_reuse.reuse(
                         vault_root, scope=scope, category=category, sha256=artifact.sha256, protected=protected,
-                        filename=artifact.filename,
+                        filename=artifact.filename, sensitivity=sensitivity,
                     )
                     duplicate = held.duplicate
                     if duplicate is None:
@@ -1665,10 +1690,12 @@ def _preserve_evidence_adoption(
                                 raw_protection=raw_protection,
                                 media_pending=True,
                                 diarize=artifact.diarize,
+                                tracks=artifact.tracks,
+                                sensitivity=sensitivity,
                             )
                         payload = _with_unavailable_warning(result.as_dict(), held.available, "this file")
             if raced is not None:
-                outcomes[selected_index] = _replayed_outcome(raced.receipt, diarize=artifact.diarize)
+                outcomes[selected_index] = _replayed_outcome(raced.receipt, diarize=artifact.diarize, tracks=artifact.tracks)
                 return _finish_adoption(outcomes)
 
             if _wrote(duplicate):
@@ -1692,7 +1719,11 @@ def _preserve_evidence_adoption(
             )
         except (PreserveError, SafeFetchError) as error:
             outcomes[selected_index] = _failed(artifact.file_id, error)
-        return _finish_adoption(outcomes)
+        finished = _finish_adoption(outcomes)
+        report = payload.get("sensitivity") if payload is not None else None
+        if isinstance(report, Mapping) and (outcomes[selected_index] or {}).get("outcome") == "stored":
+            finished["sensitivity"] = dict(report)
+        return finished
     finally:
         if artifact is not None:
             # A held upload is spent only by storing it; any refusal after the claim puts it back.
@@ -1791,6 +1822,7 @@ def _commit_staged_sources(
     )
 
     resolution: dict | None = None
+    sensitivity_reports: list[dict] = []
     manager = active_manager()
     refusals: list[OpError] = []
     wrote_import_receipt = False
@@ -1869,7 +1901,7 @@ def _commit_staged_sources(
                             vault_root, artifact.sha256, raw_protection=bool(source_fields.get("raw_protection")),
                         )
                     if duplicate is None:
-                        diarize = artifact.diarize
+                        diarize, tracks = artifact.diarize, artifact.tracks
                         if (
                             correction_speech_original is not None
                             and media_jobs.job_store_path(vault_root).is_file()
@@ -1879,6 +1911,8 @@ def _commit_staged_sources(
                             pending = store.get_by_binary(correction_speech_original, readonly=True)
                             if pending is not None and pending.do_ocr and pending.diarize is not None:
                                 diarize = pending.diarize
+                            if pending is not None and pending.do_ocr and pending.tracks is not None:
+                                tracks = pending.tracks
                         result = add_module.add(
                             vault_root,
                             source_schema,
@@ -1889,6 +1923,7 @@ def _commit_staged_sources(
                                 filename=artifact.filename,
                                 content_type=artifact.content_type,
                                 diarize=diarize,
+                                tracks=tracks,
                             ),
                             identity_check=identity.frontmatter() if identity is not None else None,
                             import_capture=import_capture,
@@ -1921,6 +1956,8 @@ def _commit_staged_sources(
                 # Every file shares one domain request; the first commit's
                 # record is the one that chose the destination.
                 resolution = resolution or payload.get("vocabulary_resolution")
+                if isinstance(payload.get("sensitivity"), dict):
+                    sensitivity_reports.append(payload["sensitivity"])
                 # A compact terminal reads `stored_path`, `media_id` and the other
                 # receipt fields through a bounded projection. A committed row
                 # whose field does not read keeps its state, loses that field and
@@ -1984,6 +2021,8 @@ def _commit_staged_sources(
         out["summary"]["already_stored"] = already_stored
     if resolution is not None:
         out["vocabulary_resolution"] = resolution
+    if sensitivity_reports:
+        out["sensitivity"] = _call_sensitivity(vault_root, sensitivity_reports)
     if source_fields.get("custody_only") is True:
         # The resolved mark (a correction carries its predecessor's): the outcome line says so.
         out["custody_only"] = True
@@ -2061,6 +2100,7 @@ def capture_source_correction(
         "stored-original", staged_path, size, digest.hexdigest(),
         str(metadata["original_content_type"]) if metadata.get("original_content_type") else None, str(filename),
         diarize=diarize_pin(plan.old_source),
+        tracks=declared_speech_tracks(plan.old_source),
     )
     original_path = vault_root.resolve() / stored
     speech_original = (
@@ -2091,6 +2131,7 @@ def preserve_artifacts(
     raw_protection: bool = False,
     archive: str | None = None,
     description: str | None = None,
+    sensitivity: Sequence[str] | None = None,
 ) -> dict:
     """Stage remote files first, then preserve each append-only artifact under a narrow guard.
 
@@ -2100,6 +2141,10 @@ def preserve_artifacts(
 
     `description` is one caption for every file in the call. Like a
     transcription, it is written only with a newly stored original.
+
+    `sensitivity` is one list of sensitivity classes for every file in the call, recorded on each new original's
+    page. An original that is already stored keeps the classes its page holds, and the outcome names the
+    declaration it did not take.
 
     With `archive="members"` each file is a held zip, kept as its members
     exactly as `/upload` with `archive=members` keeps it; see `_preserve_members`.
@@ -2129,6 +2174,16 @@ def preserve_artifacts(
             "Drop the caption, or save the file without adoption or archive.",
             details={"field": "description"},
         )
+    # Before anything is staged: an unknown class refuses the whole call and nothing is fetched or written.
+    declared_sensitivity = None if sensitivity is None else sensitivity_classes.validated(vault_root, sensitivity)
+    if archive is not None and declared_sensitivity:
+        # A members preservation has no original page to carry a class, and the members' pages are not classified here.
+        raise OpError(
+            "INVALID_PRESERVE",
+            "a sensitivity class is not accepted with archive=members",
+            "Drop the class, or save the file without archive and classify its page.",
+            details={"field": "sensitivity"},
+        )
     caption_warnings: list[str] = []
     if description is not None:
         from .preserve import redact_capture_text
@@ -2144,6 +2199,7 @@ def preserve_artifacts(
             files=files,
             adoption=adoption,
             raw_protection=raw_protection,
+            sensitivity=declared_sensitivity,
         )
     # Before the empty-batch shortcut: a malformed destination is a property of
     # the call, so `files=[]` with `scope="a/b"` must refuse rather than report
@@ -2176,8 +2232,8 @@ def preserve_artifacts(
             if archive is not None:
                 from .held_uploads import is_held_reference
 
-                if file.get("diarize") is not None:
-                    raise SafeFetchError("INVALID_FILE", "archive=members takes no speaker-label choice")
+                if file.get("diarize") is not None or file.get("tracks") is not None:
+                    raise SafeFetchError("INVALID_FILE", "archive=members takes no speaker-label choice or tracks")
                 if not is_held_reference(file["download_url"]):
                     # The manifest records what verified the zip's SHA-256 (`upload` or `session`);
                     # a fetched attachment had neither, so only a held upload can be kept as members.
@@ -2196,6 +2252,7 @@ def preserve_artifacts(
     manager = active_manager()
     refusals: list[OpError] = []
     body_started = False
+    sensitivity_reports: list[Mapping[str, object]] = []
 
     @contextmanager
     def commit_guard() -> Iterator[None]:
@@ -2238,7 +2295,7 @@ def preserve_artifacts(
                     # that stores a miss.
                     held = evidence_reuse.reuse(
                         vault_root, scope=scope, category=category, sha256=artifact.sha256, protected=protected,
-                        filename=artifact.filename, description=description,
+                        filename=artifact.filename, description=description, sensitivity=declared_sensitivity,
                     )
                     if held.duplicate is None:
                         with artifact.path.open("rb") as stream:
@@ -2253,7 +2310,9 @@ def preserve_artifacts(
                                 raw_protection=raw_protection,
                                 media_pending=True,
                                 diarize=artifact.diarize,
+                                tracks=artifact.tracks,
                                 description=description,
+                                sensitivity=declared_sensitivity,
                                 **(
                                     {"text": transcription, "text_origin": "client"}
                                     if transcription
@@ -2271,7 +2330,7 @@ def preserve_artifacts(
                         "file_id": artifact.file_id,
                         **held.duplicate.receipt(size=artifact.size, content_type=artifact.content_type),
                     }
-                    disclose_retained_speaker_choice(outcomes[index], artifact.diarize)
+                    disclose_retained_speaker_choice(outcomes[index], artifact.diarize, artifact.tracks)
                     if index in transcribed:
                         outcomes[index]["transcription"] = {
                             "state": "not_recorded",
@@ -2309,6 +2368,8 @@ def preserve_artifacts(
                 }
                 if isinstance(payload.get("document_container"), Mapping):
                     outcomes[index]["document_container"] = dict(payload["document_container"])
+                if isinstance(payload.get("sensitivity"), Mapping):
+                    sensitivity_reports.append(payload["sensitivity"])
                 if transcription:
                     outcomes[index]["transcription"] = {
                         "state": "recorded",
@@ -2330,7 +2391,10 @@ def preserve_artifacts(
     if staged and len(refusals) == len(staged):
         # Nothing began, so the call stays retryable under its own key instead of recording a failure.
         raise refusals[0]
-    return _batch_result(outcomes)
+    result = _batch_result(outcomes)
+    if sensitivity_reports:
+        result["sensitivity"] = _call_sensitivity(vault_root, sensitivity_reports)
+    return result
 
 
 #: Characters that end or split a wikilink target (`#` heading, `|` alias, brackets), so a path holding one cannot be cited.

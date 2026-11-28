@@ -80,7 +80,7 @@ def _fake_python(path: Path) -> None:
                 payload = plistlib.loads(unit.read_bytes())
                 existing = str(
                     payload.get("EnvironmentVariables", {}).get(
-                        "EXOMEM_STATE_ROOT", ""
+                        "EVERMATTER_STATE_ROOT", ""
                     )
                 ).strip()
             else:
@@ -97,7 +97,7 @@ def _fake_python(path: Path) -> None:
                 )
                 binding_path = env_path
                 for line in env_path.read_text(encoding="utf-8").splitlines():
-                    if line.startswith("EXOMEM_STATE_ROOT="):
+                    if line.startswith("EVERMATTER_STATE_ROOT="):
                         existing = line.split("=", 1)[1].strip().strip('"')
             if mode == "binding-path":
                 print(binding_path.resolve())
@@ -121,8 +121,8 @@ def _fake_python(path: Path) -> None:
                     continue
                 key, value = line.split("=", 1)
                 values[key.strip()] = value.strip().strip("\"'")
-            values.setdefault("EXOMEM_LOG_DIR", log_dir)
-            values["EXOMEM_STATE_ROOT"] = os.environ["EXOMEM_MANAGED_STATE_ROOT_DEFAULT"]
+            values.setdefault("EVERMATTER_LOG_DIR", log_dir)
+            values["EVERMATTER_STATE_ROOT"] = os.environ["EXOMEM_MANAGED_STATE_ROOT_DEFAULT"]
             values.setdefault("PATH", os.environ["PATH"])
             Path(systemd_path).write_text(
                 "".join(f'{key}="{value}"\n' for key, value in values.items()),
@@ -253,7 +253,7 @@ def _fixture(tmp_path: Path, *, os_name: str = "Linux", arch: str = "x86_64") ->
         '''
         #!/bin/sh
         if [ -n "${FAKE_EXPECT_STATE_ROOT:-}" ]; then
-            expected="EXOMEM_STATE_ROOT=\\\"${FAKE_EXPECT_STATE_ROOT}\\\""
+            expected="EVERMATTER_STATE_ROOT=\\\"${FAKE_EXPECT_STATE_ROOT}\\\""
             grep -Fx "$expected" "$FAKE_SERVICE_ENV_FILE" >/dev/null || exit 1
         fi
         printf 'uv %s\n' "$*" >> "$TRACE_FILE"
@@ -488,7 +488,7 @@ def test_linux_release_install_renders_env_gates_then_verifies(tmp_path: Path) -
     service_env_text = service_env.read_text(encoding="utf-8")
     assert "GITHUB_CLIENT_SECRET=" in service_env_text
     expected_state_root = Path(env["HOME"]) / ".local" / "state" / "exomem" / "state"
-    assert f'EXOMEM_STATE_ROOT="{expected_state_root}"' in service_env_text
+    assert f'EVERMATTER_STATE_ROOT="{expected_state_root}"' in service_env_text
     assert stat.S_IMODE(service_env.stat().st_mode) == 0o600
     assert "-> 401 (healthy, OAuth enforced)" in result.stdout
     assert "version:    9.9.9" in result.stdout
@@ -530,7 +530,7 @@ def test_linux_fresh_install_persists_the_state_root_before_target_install(
 
     assert result.returncode == 0, result.stderr
     service_env = Path(env["FAKE_SERVICE_ENV_FILE"])
-    assert f'EXOMEM_STATE_ROOT="{expected_state_root}"' in service_env.read_text(
+    assert f'EVERMATTER_STATE_ROOT="{expected_state_root}"' in service_env.read_text(
         encoding="utf-8"
     )
 
@@ -566,16 +566,16 @@ def test_linux_fresh_install_retry_keeps_its_persisted_state_root(tmp_path: Path
     service_env_entries = [
         line
         for line in service_env_text.splitlines()
-        if line.startswith("EXOMEM_STATE_ROOT=")
+        if line.startswith("EVERMATTER_STATE_ROOT=")
     ]
-    assert service_env_entries == [f'EXOMEM_STATE_ROOT="{initial_state_root}"'], (
+    assert service_env_entries == [f'EVERMATTER_STATE_ROOT="{initial_state_root}"'], (
         diagnostics(failed)
     )
     env["EXOMEM_STATE_ROOT"] = str(tmp_path / "different-state-root")
     resumed = _invoke(env, service_root, env_file, "--profile", "lean")
 
     assert resumed.returncode == 0, diagnostics(resumed)
-    assert f'EXOMEM_STATE_ROOT="{initial_state_root}"' in service_env.read_text(
+    assert f'EVERMATTER_STATE_ROOT="{initial_state_root}"' in service_env.read_text(
         encoding="utf-8"
     )
 
@@ -1215,7 +1215,7 @@ def test_existing_install_stops_binds_then_rolls_forward(tmp_path: Path) -> None
 
     service_env = Path(env["XDG_CONFIG_HOME"]) / "exomem" / "service.env"
     original_state_root = Path(env["HOME"]) / ".local" / "state" / "exomem" / "state"
-    assert f'EXOMEM_STATE_ROOT="{original_state_root}"' in service_env.read_text(
+    assert f'EVERMATTER_STATE_ROOT="{original_state_root}"' in service_env.read_text(
         encoding="utf-8"
     )
 
@@ -1619,13 +1619,12 @@ def test_windows_installer_gates_remote_and_verifies_before_success() -> None:
     # #578: installing is not deploying. The installer shares this helper, so a
     # fresh venv that ends up with nothing in it has to fail here too.
     assert "Assert-ExomemInstallApplied" in common
-    assert "Preflight: exomem doctor --profile remote" in text
     assert "function Test-McpEndpoint" in text
     assert "-SkipHttpErrorCheck" in text
     assert "OAuth is not enforced" in text
     assert "CHATGPT_PLUGIN_REFRESH_REQUIRED" in text
     assert "connector rollout is incomplete" in text
-    assert text.index("Preflight: exomem doctor --profile remote") < text.index("& $NssmPath install")
+    assert text.index("& $python @remoteDoctorArgs") < text.index("& $NssmPath install")
     assert text.index("Test-McpEndpoint -HostName") < text.index("Granted no-UAC")
     assert text.index("Test-McpEndpoint -HostName") < text.index("CHATGPT_PLUGIN_REFRESH_REQUIRED")
 

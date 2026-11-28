@@ -68,48 +68,82 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # and `save_evidence` says to keep proof in the turn it arrives.
 # `search_memory.file_types`, which lets an agent restrict a search to pictures and tells it to search both ways
 # when unsure, added 203 B on 2026-11-24 (add-images-only-search).
-TOTAL_BUDGET = 31_400
+# `add_observation`'s `verdict`, `as_of`, `until` and `check_by` say they need a rich `kind`, which a compact add
+# refuses them without, added 77 B on 2026-11-25 (compact-add-metadata-refusal). Its `links` now says that a compact
+# observation keeps only a source citation, such as a `derived_from` link to a saved Source or Evidence page, and every
+# other relation needs a rich kind, which added 160 B the same day.
+# The door operation `maintenance.path_variants`, the owner's preview and merge of folder splits that block an
+# export, added 43 B to the two door enums on 2026-11-25 (merge-vault-folder-splits).
+# The door operations `media.attach_speech` and `media.rename_speakers`, an owner's agent attaching a speech result it
+# computed and naming the speakers after the fact, added 41 B to the write door's enum on 2026-11-25
+# (keep-speech-results-in-cloud).
+# Search by person added 205 B on 2026-11-27 (add-face-search): `search_memory.people` 165 B, and the owner's door
+# operations `faces.status`, `faces.set` and `faces.name` 40 B to the two door enums. `faces.delete`, which erases
+# the face store, added 15 B to the write door's enum the same day. The wire measures 31,963 B.
+# `add_observation`'s `as_of` and `until` now say that a dated observation with no `kind` saves in a dated block, `edit_note`'s
+# `as_of` says that dating a compact unit moves it to a dated block, and `unlinked_reason` says that only active pages of a
+# compiled type take a link review, in `add_observation`, `create_note`, `edit_note` and `supersede_note`.
+# Together they added 315 B on 2026-11-27 (default-dated-observations-to-a-rich-kind): the wire measures 32,278 B, and
+# their four ceilings rise to 1,940 B, 1,900 B, 3,760 B and 1,410 B, and the total to 32,300 B.
+# The optional `sensitivity` list on `create_note`, `save_source`, `save_evidence`, `save_episode` and `add_record`, through which the
+# agent that reads the material names its classes, added 739 B on 2026-11-25 (classify-sensitive-material-at-capture).
+# The door operation `files.classify`, which changes a kept page's classes later without touching its bytes, added
+# 31 B to the tool surface the same day, 21 B of it in the two door enums (classify-sensitive-material-at-capture).
+# With the dated-observation wording above, the wire measures 33,051 B, and the `create_note` ceiling rises to 2,060 B.
+# The per-file `tracks` declaration of separate microphones on the `save_source` and `save_evidence` file handles added
+# 328 B on 2026-11-27 (keep-speech-results-in-cloud): with the `sensitivity` list above, the wire measures 33,379 B,
+# the two ceilings rise to 1,850 B and 1,650 B, and the total to 33,400 B. The handle names the shape that
+# `media.process` publishes, in 164 B each.
+TOTAL_BUDGET = 33_400
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
-    "add_observation": 1650,
+    "add_observation": 1940,
     "add_plan_item": 500,
-    "add_record": 940,
+    "add_record": 1150,
     "cancel_uploads": 600,
-    "create_note": 1850,
+    "create_note": 2060,
     "decide_review_item": 1000,
     "download_files": 550,
     # Claim-level supersede/assess/link actions joined edit_note on 2026-11-24
     # (add-unit-level-supersession).
-    "edit_note": 3700,
+    "edit_note": 3760,
     "edit_plan_item": 750,
     "edit_record": 850,
-    # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles).
-    "inspect_memory": 2230,
+    # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles); faces.status on 2026-11-27
+    # (add-face-search) took it to 2,265 B. `files.classify` joined the read door's preview enum on 2026-11-25
+    # (classify-sensitive-material-at-capture).
+    "inspect_memory": 2300,
     "list_review_items": 750,
-    "manage_memory": 2570,
+    # faces.set, faces.name and faces.delete joined the write door on 2026-11-27 (add-face-search): 2,679 B.
+    # `files.classify` joined the write door on 2026-11-25 (classify-sensitive-material-at-capture).
+    "manage_memory": 2700,
     "query_plan_items": 1050,
-    "query_records": 1100,
+    # `options` names `query`, the typed version-1 query that a derived collection also answers, added 32 B on
+    # 2026-11-25 (legacy arguments on a derived collection).
+    "query_records": 1150,
     "read_instructions": 750,
     "read_page": 700,
     "recall_context": 2800,
-    "save_episode": 1100,
-    "save_evidence": 1320,
-    "save_source": 1550,
-    "search_memory": 1250,
+    "save_episode": 1200,
+    "save_evidence": 1650,
+    "save_source": 1850,
+    # `people`, the restriction to pictures of named people, took it to 1,401 B on 2026-11-27 (add-face-search).
+    "search_memory": 1450,
     # A pointer to edit_note's supersede_observation joined 2026-11-24
     # (add-unit-level-supersession).
-    "supersede_note": 1400,
+    "supersede_note": 1410,
     "upload_files": 940,
 }
 
 #: A Cloud cell serves the local surface minus the tools it withholds plus the Cloud-only
 #: control-plane tools, so its budget is the local one re-based on exactly those differences.
 #: The only new numbers are the ceilings of the two tools that no other surface lists.
-# observe_transfer step 3 names the `file` call and the older-server fallback, so it measures 1,959 B and its
-# ceiling rounds to 2,000 B.
+# observe_transfer step 3 names the `file` call and the older-server fallback, so it measured 1,959 B. It adds the
+# filing view that reports a stage the cell files by itself (file-imports-on-the-cell), 138 B, and the `wait` false
+# call that registers a stage, 48 B, so it measures 2,145 B and its ceiling rounds to 2,150 B.
 CLOUD_ONLY_CEILINGS: dict[str, int] = {
-    "observe_transfer": 2000,
+    "observe_transfer": 2150,
     "transfer_memory": 1650,
 }
 
@@ -267,7 +301,7 @@ def test_cli_help_and_rest_point_to_the_contract_but_the_mcp_wire_does_not(
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "synthetic-test-key")
     server = _build_server(monkeypatch, tmp_path)
     pointer = semantic_authoring.CLI_REST_POINTER
-    assert 'bootstrap(profile="full")' in pointer and "exomem bootstrap --profile full" in pointer
+    assert 'bootstrap(profile="full")' in pointer and "evermatter bootstrap --profile full" in pointer
     assert all(pointer not in str(wire) for wire in _wires(server))
 
     openapi = (

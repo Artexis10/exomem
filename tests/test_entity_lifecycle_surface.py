@@ -7,8 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from exomem import attention, commands, curation, find
+from exomem import (
+    attention,
+    commands,
+    curation,
+    entity_evidence,
+    entity_recurrence,
+    find,
+    request_budget,
+)
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
+from exomem.cli_ops import OpError
 from exomem.vault import content_hash
 
 pytestmark = pytest.mark.reads_repository_docs
@@ -186,6 +195,33 @@ def test_entity_candidate_review_ref_round_trips_through_item_lookup(tmp_path: P
     assert resolved.fingerprint == candidate.fingerprint
     assert resolved.categories == ["entity_recurrence"]
     assert resolved.reasons[0]["meta"]["candidate_state"] == "promotion"
+
+
+def test_an_entity_candidate_lookup_the_deadline_cut_asks_for_a_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cold evidence store and no held pass: a lookup whose sweep the deadline cut must not call
+    a live candidate missing or closed, so an agent never stops work on it."""
+    _promotion(tmp_path)
+    candidate = _candidate(tmp_path)
+    entity_evidence.reset(tmp_path)
+    page_evidence = entity_recurrence.page_evidence
+
+    def cut_the_sweep(page, **kwargs):
+        request_budget.current().deadline = 0.0
+        return page_evidence(page, **kwargs)
+
+    monkeypatch.setattr(entity_recurrence, "page_evidence", cut_the_sweep)
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=50))
+    try:
+        with pytest.raises(OpError) as refused:
+            attention.entity_candidate_by_ref(
+                tmp_path, candidate.ref or "", expected_fingerprint=candidate.fingerprint
+            )
+    finally:
+        request_budget.reset_current(token)
+
+    assert refused.value.code == "REVIEW_QUEUES_WARMING"
 
 
 def test_curation_work_item_binds_the_exact_entity_candidate(tmp_path: Path) -> None:
@@ -819,68 +855,39 @@ def test_open_registry_projection_reports_leaf_folder_and_family(tmp_path: Path)
     assert community["family"] == "organization"
 
 
-def _lifecycle_block(path: Path) -> str:
-    """The one block in each carrier that states the recurrence cadence.
+ENGAGEMENT = Path("src/exomem/_scaffold/_Schema/references/engagement.md")
 
-    Scoped, not whole-file: `operations.md` also says "do not repeat the same
-    advice within one conversation" hundreds of lines away, which satisfies a
-    file-wide "do not repeat" check even when the cadence sentence beside
-    `entity_recurrence` has been inverted.
+
+def _lifecycle_block() -> str:
+    """The one section of the shipped skill that states the recurrence cadence.
+
+    Scoped, not whole-file: the reference says "do not repeat" elsewhere too, which would satisfy a
+    file-wide check even when the cadence sentence beside `entity_recurrence` had been inverted.
     """
-    text = path.read_text(encoding="utf-8")
-    if path.name == "operations.md":
-        block = text.split("## recurring entity lifecycle", 1)[1].split("\n## ", 1)[0]
-    else:
-        block = text.split(
-            "- **Recurring-identity maintenance boundary", 1
-        )[1].split("\n- ", 1)[0]
-    return " ".join(block.split())
+    text = ENGAGEMENT.read_text(encoding="utf-8")
+    return " ".join(text.split("## Recurring entities", 1)[1].split("\n## ", 1)[0].split())
 
 
-def test_every_carrier_file_states_the_cadence_bounds_on_its_own() -> None:
-    """Per FILE, not concatenated: a pair that is only jointly complete is not.
-
-    Asserting skill+operations together lets either file drop the cadence, the
-    once-per bound, the do-not-rescan rule or the three-candidate cap while the
-    other one covers for it -- and an agent that loads only one of them is then
-    told something the tests never checked.
-    """
-    for path in (
-        # The intent-router restructure moved the cadence bullet out of SKILL.md
-        # into the engagement reference the router points at; operations.md still
-        # carries the operation detail. The plugin copy is pinned byte-identical
-        # by test_plugin_sync.
-        Path("src/exomem/_scaffold/_Schema/references/engagement.md"),
-        Path("src/exomem/_scaffold/_Schema/references/operations.md"),
-    ):
-        block = _lifecycle_block(path)
-        folded = block.casefold()
-        assert "limit=3" in block, path
-        assert "once per session" in folded, path
-        assert "at most three candidates" in folded, path
-        assert ("do not rescan" in folded) or ("do not repeat" in folded), path
+def test_the_shipped_skill_states_the_cadence_bounds() -> None:
+    # The plugin copy is pinned byte-identical by test_plugin_sync.
+    block = _lifecycle_block()
+    folded = block.casefold()
+    assert "limit=3" in block
+    assert "once per session" in folded
+    assert "at most three candidates" in folded
+    assert ("do not rescan" in folded) or ("do not repeat" in folded)
 
 
-def test_portable_skill_and_operation_reference_carry_the_same_lifecycle() -> None:
-    for root in (Path("src/exomem/_scaffold/_Schema"),):
-        # Same move as above: the engagement reference now carries what the
-        # router used to state inline.
-        engagement = (root / "references/engagement.md").read_text(encoding="utf-8")
-        operations = (root / "references/operations.md").read_text(encoding="utf-8")
-        combined = engagement + "\n" + operations
-        prose = " ".join(combined.split())
-        assert "entity_recurrence" in combined
-        assert "after primary work" in prose
-        assert "before the final response" in prose
-        assert "at most three candidates" in prose
-        assert "eight contexts" in prose
-        assert "eighth recheck" in prose
-        assert "closure-only" in prose
-        assert "resolve exact and alias" in prose
-        assert "stop on ambiguity" in prose
-        assert "hydrate" in prose
-        assert "schema.save_entity_types" in combined
-        assert "person | organization | concept | library | decision" not in combined
+def test_the_shipped_skill_carries_the_whole_lifecycle() -> None:
+    block = _lifecycle_block()
+    prose = block.casefold()
+    assert "entity_recurrence" in block
+    for phrase in ("after primary work", "before the final response", "at most three candidates",
+                   "eight contexts", "eighth recheck", "closure-only", "resolve exact and alias",
+                   "stop on ambiguity", "hydrate"):
+        assert phrase in prose, phrase
+    assert "schema.save_entity_types" in block
+    assert "person | organization | concept | library | decision" not in ENGAGEMENT.read_text(encoding="utf-8")
 
 
 def test_hookless_custom_instruction_blocks_name_the_ordinary_entity_boundary() -> None:
@@ -903,7 +910,7 @@ def test_hookless_custom_instruction_blocks_name_the_ordinary_entity_boundary() 
         # so it defers the decision order to the bootstrap payload it already
         # instructs the agent to follow. That deferral is only honest if the
         # instruction to follow bootstrap is actually present.
-        assert 'bootstrap(profile="compact")' in block
+        assert 'read_instructions()' in block
         assert "follow it" in folded
         for restated in ("stop ambiguity", "hydrate before create", "resolve first"):
             assert restated not in folded, restated

@@ -65,6 +65,15 @@ def media_key_test_sql(fixtures: Path) -> str:
     return (fixtures / "exomem_cloud_media_keys.sql").read_text(encoding="utf-8")
 
 
+def media_usage_test_sql(fixtures: Path) -> str:
+    """The media usage columns and cellctl's grant on them, run after the pinned grants.
+
+    The pinned grants script revokes every earlier grant on the cell table, so this must follow it.
+    It mirrors the Substrate migration of task 4.9 and its grants stanza until the pin reaches a commit with both.
+    """
+    return (fixtures / "exomem_cloud_media_usage.sql").read_text(encoding="utf-8")
+
+
 def operation_grant_test_sql(fixtures: Path) -> str:
     """The grant columns of an export and an import, and Substrate's grants on them, run after the pinned grants.
 
@@ -102,4 +111,5 @@ def control_database_sql(fixtures: Path) -> list[str]:
         operation_grant_test_sql(fixtures),
         access_record_test_sql(fixtures),
         deletion_grant_test_sql(fixtures),
+        media_usage_test_sql(fixtures),
     ]

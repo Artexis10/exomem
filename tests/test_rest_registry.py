@@ -207,6 +207,7 @@ def test_preserve_artifacts_rest_schema_and_malformed_file_error(vault, monkeypa
         "mime_type",
         "file_name",
         "diarize",
+        "tracks",
     ]
     assert schema["items"]["required"] == ["download_url", "file_id"]
     assert "additionalProperties" not in schema["items"]
@@ -605,7 +606,7 @@ def test_cf_access_principals_isolate_explicit_rest_idempotency(
     assert alice.status_code == bob.status_code == alice_replay.status_code == 200
     assert alice.json()["data"] == {"sequence": 1}
     assert bob.json()["data"] == {"sequence": 2}
-    assert alice_replay.json()["data"] == {"sequence": 1}
+    assert alice_replay.json()["data"] == {"sequence": 1, "replayed": True}
     assert calls == ["write", "write"]
 
 
@@ -1190,7 +1191,9 @@ def test_process_media_has_one_generated_registry_rest_and_openapi_contract(
     assert command.surfaces == frozenset({"mcp", "rest", "cli"})
     assert command.cli_writes is True
     operation_param = next(param for param in command.params if param.name == "operation")
-    expected_operations = ("process", "status", "retry", "reprocess", "replicate")
+    expected_operations = (
+        "process", "status", "retry", "reprocess", "replicate", "attach-speech", "rename-speakers",
+    )
     assert get_args(get_type_hints(command.leaf)["operation"]) == expected_operations
     assert operation_param.choices == expected_operations
 
@@ -1212,7 +1215,8 @@ def test_process_media_has_one_generated_registry_rest_and_openapi_contract(
     ]["content"]["application/json"]["schema"]
     assert set(schema["properties"]) == {
         "path", "paths", "operation", "language", "multilingual", "store", "response_detail",
-        "diarize",
+        "diarize", "binary_sha256", "binary_size", "segments", "turns", "engine", "asr", "names",
+        "replace_labelled", "renames", "tracks",
     }
     assert schema["properties"]["diarize"]["type"] == "boolean"
     assert schema["properties"]["response_detail"]["enum"] == [

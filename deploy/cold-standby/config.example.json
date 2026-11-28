@@ -46,13 +46,13 @@
   },
   "identity_environment": {
     "dotenv_path": "operator-config/exomem.env",
-    "base_url": "EXOMEM_BASE_URL",
+    "base_url": "EVERMATTER_BASE_URL",
     "github_client_id": "GITHUB_CLIENT_ID",
     "github_client_secret": "GITHUB_CLIENT_SECRET",
-    "github_username": "EXOMEM_GITHUB_USERNAME",
-    "github_user_id": "EXOMEM_GITHUB_USER_ID",
-    "jwt_signing_key": "EXOMEM_JWT_SIGNING_KEY",
-    "instance_id": "EXOMEM_INSTANCE_ID"
+    "github_username": "EVERMATTER_GITHUB_USERNAME",
+    "github_user_id": "EVERMATTER_GITHUB_USER_ID",
+    "jwt_signing_key": "EVERMATTER_JWT_SIGNING_KEY",
+    "instance_id": "EVERMATTER_INSTANCE_ID"
   },
   "operations": {
     "probe_attempts": 3,

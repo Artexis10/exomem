@@ -1546,6 +1546,63 @@ def _validate_manifest_records(
     return records
 
 
+# A forward skip no longer than this is read and digested; a longer one, such as the
+# reader's first visit to the central directory, is left for finish().
+_DIGEST_GAP_FILL_BYTES = 64 * 1024
+
+
+class _OrderedDigestReader:
+    """Pass a ZIP reader's reads through and digest the object's bytes in order as the reads reach them.
+
+    A remote archive costs one download when its entries are verified in header order: the
+    whole-object digest grows from those same reads instead of from a second pass. A read that
+    jumps ahead, or back, leaves the digest where it is; finish() reads what it has not reached.
+    """
+
+    def __init__(self, stream: BinaryIO) -> None:
+        self._stream = stream
+        self._position = stream.tell()
+        self._digested = 0
+        self._digest = hashlib.sha256()
+
+    def seekable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._position
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        self._position = self._stream.seek(offset, whence)
+        return self._position
+
+    def read(self, size: int = -1) -> bytes:
+        start = self._position
+        if 0 < start - self._digested <= _DIGEST_GAP_FILL_BYTES:
+            self._stream.seek(self._digested)
+            while self._digested < start and (chunk := self._stream.read(start - self._digested)):
+                self._advance(chunk)
+            self._stream.seek(start)
+        data = self._stream.read(size)
+        self._position = start + len(data)
+        if start <= self._digested < self._position:
+            self._advance(data[self._digested - start:])
+        return data
+
+    def _advance(self, data: bytes) -> None:
+        self._digest.update(data)
+        self._digested += len(data)
+
+    def finish(self) -> tuple[int, str]:
+        """Read the object to its end and return its byte count and SHA-256."""
+        self._stream.seek(self._digested)
+        while chunk := self._stream.read(1024 * 1024):
+            self._advance(chunk)
+        return self._digested, self._digest.hexdigest()
+
+
 def _digest_zip_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> tuple[int, str]:
     digest = hashlib.sha256()
     size = 0
@@ -1593,7 +1650,8 @@ def verify_export_stream(
     effective_limits = limits or PortabilityLimits()
     _validate_limits(effective_limits)
     try:
-        with zipfile.ZipFile(stream, "r") as archive:
+        reader = _OrderedDigestReader(stream)
+        with zipfile.ZipFile(reader, "r") as archive:
             if archive.comment:
                 _fail("UNSAFE_ARCHIVE_ENTRY", "archive comments are not part of the export format")
             entries = _preflight_entries(archive.infolist(), effective_limits)
@@ -1622,7 +1680,8 @@ def verify_export_stream(
                 _fail("CELL_BINDING_MISMATCH", "archive does not belong to the expected cell")
             if expected_vault_id is not None and manifest["vault_id"] != expected_vault_id:
                 _fail("VAULT_BINDING_MISMATCH", "archive does not belong to the expected vault")
-            for record in records:
+            # Header order makes the entry reads one forward pass that the archive digest shares.
+            for record in sorted(records, key=lambda record: entries[record["path"]].header_offset):
                 actual_size, actual_digest = _digest_zip_entry(archive, entries[record["path"]])
                 if actual_size != record["size"]:
                     _fail("ARCHIVE_SIZE_MISMATCH", "an archive entry has the wrong byte size")
@@ -1633,17 +1692,12 @@ def verify_export_stream(
     except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile):
         _fail("INVALID_ARCHIVE", "archive is unavailable or malformed")
 
-    stream.seek(0)
-    digest = hashlib.sha256()
-    read_size = 0
-    while chunk := stream.read(1024 * 1024):
-        digest.update(chunk)
-        read_size += len(chunk)
+    read_size, archive_sha256 = reader.finish()
     if read_size != archive_size:
         _fail("ARCHIVE_SIZE_MISMATCH", "archive object has the wrong byte size")
     return VerifiedArchive(
         archive_path=None,
-        archive_sha256=digest.hexdigest(),
+        archive_sha256=archive_sha256,
         archive_size=archive_size,
         archive_format=ARCHIVE_FORMAT,
         manifest=manifest,

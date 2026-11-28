@@ -929,6 +929,7 @@ def test_built_in_vocabulary_is_pinned_so_additions_stay_reviewable() -> None:
     deliberate, visible diff that review can judge.
     """
     assert set(st.builtin_kinds()) == {
+        "app-note",
         "article",
         "book",
         "contract-legal-document",

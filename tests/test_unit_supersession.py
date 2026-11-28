@@ -236,6 +236,37 @@ def test_a_kind_passed_as_category_is_named(tmp_path: Path) -> None:
     assert 'kind="correction"' in message or "kind=`correction`" in message or "kind=correction" in message
 
 
+def test_a_vault_kind_that_declares_the_dated_default_trait_is_ignored_and_the_diagnostic_names_it(
+    tmp_path: Path,
+) -> None:
+    """Catches a second carrier: the shipped kind is always admitted, so a vault carrier would refuse every dated save."""
+    from exomem import semantic_language_registry
+
+    page = _write_page(tmp_path, source=_page_source("# Observe\n\nExisting prose.\n"))
+    overlay = semantic_language_registry.registry_path(tmp_path)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(
+        "schema_version: 1\nkinds:\n  vault_claim:\n"
+        "    description: A vault claim.\n    labels: {en: Vault claim}\n"
+        "    traits: [dated_default]\n",
+        encoding="utf-8",
+    )
+
+    result = commands.op_observe_memory(
+        tmp_path, path=PAGE, operation="add",
+        category="rule", content="A claim.", as_of="2026-07-01",
+    )
+
+    assert result["kind_defaulted"] == "record"
+    text = page.read_text(encoding="utf-8")
+    assert "## Record" in text and "- as_of: 2026-07-01" in text and "A claim." in text
+    registry = semantic_language_registry.load_registry(tmp_path)
+    assert registry.kinds_with("dated_default") == {"record"}
+    assert [(item["code"], item["path"], item["severity"]) for item in registry.findings] == [
+        ("trait_ignored", "kinds.vault_claim.traits", "warning")
+    ]
+
+
 def test_metadata_on_a_compact_unit_lists_the_admitted_kinds(tmp_path: Path) -> None:
     from exomem import semantic_language_registry
 
@@ -251,12 +282,24 @@ def test_metadata_on_a_compact_unit_lists_the_admitted_kinds(tmp_path: Path) -> 
     with pytest.raises(ValueError, match="COMPACT_METADATA_REQUIRES_RICH_KIND") as raised:
         commands.op_observe_memory(
             tmp_path, path=PAGE, operation="add",
-            category="rule", content="A claim.", as_of="2026-07-01",
+            category="rule", content="A claim.", check_by="2026-07-01",
         )
 
     message = str(raised.value)
     assert "correction" in message
     assert "vault_claim" in message
+
+
+def test_dates_with_the_compact_kind_named_are_still_refused(tmp_path: Path) -> None:
+    _write_page(tmp_path, source=_page_source("# Observe\n\nExisting prose.\n"))
+
+    with pytest.raises(ValueError, match="COMPACT_METADATA_REQUIRES_RICH_KIND"):
+        commands.op_observe_memory(
+            tmp_path, path=PAGE, operation="add", kind="observation",
+            category="rule", content="A claim.", as_of="2026-07-01",
+        )
+
+    assert "A claim." not in (tmp_path / PAGE).read_text(encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
@@ -358,6 +401,30 @@ def test_supersede_observation_uses_the_replacement_kind_for_a_compact_target(
         )
 
     assert result["unit"]["kind"] == "correction"
+
+
+@pytest.mark.parametrize(("requested_kind", "stored_kind"), [(None, "correction"), ("reviewed_change", "reviewed_change")])
+def test_a_custom_replacement_kind_does_not_disable_the_default(tmp_path: Path, requested_kind, stored_kind) -> None:
+    from exomem import semantic_language_registry
+
+    _write_page(tmp_path, source=_page_source("# Observe\n\n## Observations\n\n- [rule] Opens at nine. ^old-1\n"))
+    overlay = semantic_language_registry.registry_path(tmp_path)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(
+        "schema_version: 1\nkinds:\n  reviewed_change:\n"
+        "    description: A reviewed change.\n    labels: {en: Reviewed change}\n"
+        "    traits: [assertion, replacement]\n",
+        encoding="utf-8",
+    )
+    target, = _units_of(tmp_path, PAGE)
+
+    with request_scope(owner_principal(surface="cli")):
+        result = _edit_note(
+            tmp_path, action="supersede_observation", unit=target["id"], text="Opens at ten.", kind=requested_kind,
+        )
+
+    assert result["unit"]["kind"] == stored_kind
+    assert any(edge["kind"] == "supersedes" for edge in result["unit"]["relations"])
 
 
 def test_a_stale_unit_id_refuses_and_leaves_the_page_unchanged(tmp_path: Path) -> None:

@@ -28,9 +28,10 @@ from .manifests import ResourceSettings, check_model_env
 from .media_edge import MediaEdgeConfig
 from .reconcile import ClusterConfig, SecretsConfig, run_loop
 from .restic_verification import VerificationConfig
+from .setting_alias import setting
 from .storage.b2 import B2Config, B2ObjectStorage
 from .storage.hetzner import HetznerVolumeProvider
-from .storage_config import DEFAULT_STORAGE, LEGACY_CLASS, LocalStorage, StorageConfig
+from .storage_config import StorageConfig, parse_storage_config
 from .upgrade_window import WindowConfig, check_default_range
 
 # cellctl's own cell resources when CELLCTL_CELL_* is unset (the chart always
@@ -114,8 +115,9 @@ def build_reconcile_config() -> ReconcileConfig:
         # C6 names this setting. Substrate reads the same variable to state the time limit, so set both alike.
         ("export_ttl", "EXOMEM_EXPORT_TTL_HOURS", "hours"),
     ):
-        if variable in os.environ:
-            amount = int(os.environ[variable])
+        raw = setting(variable)
+        if raw is not None:
+            amount = int(raw)
             if amount <= 0:
                 raise ValueError(f"{variable} must be positive")
             kwargs[field] = timedelta(**{unit: amount})
@@ -188,24 +190,7 @@ def _retention_sources() -> tuple[object, ...]:
 def build_storage_config() -> StorageConfig:
     """Read the shared cap and optional local class; accept the earlier nested cap."""
 
-    raw = os.environ.get("CELLCTL_CELL_STORAGE")
-    if not raw:
-        return DEFAULT_STORAGE
-    value = json.loads(raw)
-    # These are the closed keys of the controller's storage configuration schema.
-    if not isinstance(value, dict) or not set(value) <= {"domain", "local", "max_cell_gib", "per_cell_class"}:
-        raise ValueError("cell storage must be a JSON object with optional domain, local and max_cell_gib")
-    local = value.get("local")
-    if local is not None and not isinstance(local, dict):
-        raise ValueError("cell storage local must be an object")
-    local = dict(local) if local is not None else None
-    legacy_cap = local.pop("max_cell_gib", None) if local is not None else None
-    cap = value.get("max_cell_gib", legacy_cap if legacy_cap is not None else DEFAULT_STORAGE.max_cell_gib)
-    if legacy_cap is not None and cap != legacy_cap:
-        raise ValueError("max_cell_gib and local.max_cell_gib must agree")
-    return StorageConfig(domain=value.get("domain", LEGACY_CLASS),
-                         local=LocalStorage(**local) if local is not None else None, max_cell_gib=cap,
-                         per_cell_class=value.get("per_cell_class"))
+    return parse_storage_config(os.environ.get("CELLCTL_CELL_STORAGE"))
 
 
 def build_alert_delivery_secret() -> tuple[str, str, str] | None:
@@ -355,6 +340,9 @@ def build_cluster_config() -> ClusterConfig:
     erasure_raw = json.loads(os.environ.get("CELLCTL_SOURCE_ERASURE_CELL_IDS", "{}"))
     if not isinstance(erasure_raw, dict) or not all(isinstance(ids, list) for ids in erasure_raw.values()):
         raise ValueError("Source erasure cell IDs must be a JSON object of identity system to cell ID array")
+    faces_raw = json.loads(os.environ.get("CELLCTL_FACES_HOSTED_CELL_IDS", "[]"))
+    if not isinstance(faces_raw, list):
+        raise ValueError("face search cell IDs must be a JSON array of cell IDs")
     resources = ResourceSettings(
         cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", DEFAULT_RESOURCES.cpu_request),
         cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", DEFAULT_RESOURCES.cpu_limit),
@@ -410,6 +398,7 @@ def build_cluster_config() -> ClusterConfig:
         media_engine_cell_ids=media_engine_cell_ids,
         media_engine_fleet_default=tuple(media_default_raw),
         source_erasure_cell_ids={system: tuple(ids) for system, ids in erasure_raw.items()},
+        faces_hosted_cell_ids=tuple(faces_raw),
         job_egress_except=tuple(job_egress_except_raw.split(",")) if job_egress_except_raw else (),
         storage=build_storage_config(),
         alert_delivery_secret=build_alert_delivery_secret(),

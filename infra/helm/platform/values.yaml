@@ -177,6 +177,10 @@ cellctl:
   # only when its owner enables erasure. A change restarts only the cells it names.
   # There is no fleet default: every cell not named here keeps erasure off.
   sourceErasureCellIds: {}
+  # The cells where the operator enabled face search (add-face-search), e.g. ["<cell id>"].
+  # Faces stay unavailable in every other cell, whatever its owner chooses. A change
+  # restarts only the cells it names.
+  facesHostedCellIds: []
   # Qualified values are operator supplied only after shared-worker acceptance.
   sharedWorker:
     mode: "off"
@@ -529,6 +533,11 @@ cloudGateway:
   # Substrate's public origin (EXOMEM_PUBLIC_BASE_URL), and the MCP path on
   # `hostname` the gateway serves (EXOMEM_CLOUD_MCP_URL is https://hostname+path).
   publicBaseUrl: ""
+  # The product site's origin (EVERMATTER_SITE_ORIGIN), such as https://evermatter.ai.
+  # The gateway names the OAuth issuer of the app origin that each accepted MCP host
+  # sits under, and builds the Home links in tool replies from this origin. Empty
+  # renders no setting. The web app must carry the same value.
+  siteOrigin: ""
   mcpPath: /mcp
   cellProtocolVersion: "1"
   databaseSecretName: exomem-cloud-gateway-database

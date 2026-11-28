@@ -5,6 +5,11 @@
 // Output: a JSON array of {sha, type, breaking, subject} for each visible entry.
 const fs = require('node:fs');
 const {parseConventionalCommits} = require('release-please/build/src/commit');
+// release-please logs to stdout by default; send it to stderr so stdout stays one JSON document.
+const toStderr = (...args) => console.error(...args);
+require('release-please/build/src/util/logger').setLogger({
+  info: toStderr, debug: toStderr, warn: toStderr, error: toStderr, trace: toStderr,
+});
 
 const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const sections = (config.packages?.['.'] ?? {})['changelog-sections'] ?? config['changelog-sections'];

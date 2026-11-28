@@ -232,6 +232,107 @@ def test_a_unit_write_after_a_warm_query_changes_the_next_answer(tmp_path: Path)
     assert best_parent() == [first.path]
 
 
+def _random_vectors() -> np.ndarray:
+    return np.random.default_rng().standard_normal(
+        (UNITS_PER_PARENT, embedding_index.VECTOR_DIM)
+    ).astype(np.float32)
+
+
+def _published_pages(tmp_path: Path, count: int = 4) -> tuple[embedding_index.EmbeddingIndex, list]:
+    """An index holding `count` pages' unit rows, and their parent states."""
+    index = embedding_index.EmbeddingIndex(tmp_path)
+    states = [
+        semantic_index.build_parent_index_state(tmp_path, _write_page(tmp_path, number))
+        for number in range(1, count + 1)
+    ]
+    for state in states:
+        index.upsert_semantic_units(state, _random_vectors(), 1.0)
+    return index, states
+
+
+def _count_full_loads(index: embedding_index.EmbeddingIndex, monkeypatch: pytest.MonkeyPatch):
+    """The unwrapped full load, and the list that gains one entry per full load."""
+    full_load = index._load_unit_rows
+    loads: list[tuple] = []
+
+    def counted(*args):
+        loads.append(args)
+        return full_load(*args)
+
+    monkeypatch.setattr(index, "_load_unit_rows", counted)
+    return full_load, loads
+
+
+def _query_units(index: embedding_index.EmbeddingIndex) -> None:
+    index.search_semantic_units(np.ones(embedding_index.VECTOR_DIM, dtype=np.float32), 1, validate=False)
+
+
+def test_a_unit_write_after_a_warm_query_patches_the_resident_matrix_to_what_a_full_load_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index, states = _published_pages(tmp_path)
+    # A parent whose record is gone is unproved, and no write below touches it.
+    with sqlite3.connect(index.path) as conn:
+        conn.execute(
+            "DELETE FROM meta WHERE key = ?", (embedding_index.COVERAGE_PREFIX + states[1].path,)
+        )
+    full_load, loads = _count_full_loads(index, monkeypatch)
+    _query_units(index)
+    assert len(loads) == 1
+
+    # The first parent is rewritten, so its rows move behind the others', and the third is deleted.
+    revised = semantic_index.build_parent_index_state(
+        tmp_path, _write_page(tmp_path, 1, body_suffix=" revised")
+    )
+    index.upsert_semantic_units(revised, _random_vectors(), 2.0)
+    index.delete_semantic_units(states[2].path)
+    _query_units(index)
+
+    assert len(loads) == 1, "the catch-up ran, not a second full load"
+    resident = index._unit_cache
+    conn = index._connect()
+    try:
+        conn.execute("BEGIN")
+        token = index._build_token(conn)
+        expected = full_load(conn, token, index.dim)
+    finally:
+        conn.rollback()
+        conn.close()
+    assert resident.generation == expected.generation == token[3]
+    assert expected.block.parents == [states[1].path, states[3].path, revised.path]
+    assert resident.block.rows == expected.block.rows
+    assert resident.block.parents == expected.block.parents
+    assert np.array_equal(resident.block.parent_of, expected.block.parent_of)
+    assert np.array_equal(resident.block.matrix, expected.block.matrix)
+    assert resident.coverage == expected.coverage
+    assert resident.unproved == expected.unproved == {states[1].path}
+
+
+def test_a_unit_bump_that_logged_no_parent_forces_the_full_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    index, states = _published_pages(tmp_path)
+    _full_load, loads = _count_full_loads(index, monkeypatch)
+    _query_units(index)
+    assert len(loads) == 1
+
+    # What an older binary does: rewrite a parent's rows and bump, logging nothing.
+    with sqlite3.connect(index.path) as conn:
+        conn.execute(
+            "UPDATE semantic_unit_vectors SET vector = ? WHERE parent_path = ?",
+            (np.zeros(embedding_index.VECTOR_DIM, dtype=np.float32).tobytes(), states[0].path),
+        )
+        sidecar_store.bump_meta(conn, embedding_index.SEMANTIC_UNIT_GENERATION)
+    # A later write that does log its parent must not wave that gap through.
+    index.upsert_semantic_units(states[1], _random_vectors(), 2.0)
+    _query_units(index)
+
+    assert len(loads) == 2
+    block = index._unit_cache.block
+    rewritten = [number for number, row in enumerate(block.rows) if row[1] == states[0].path]
+    assert rewritten and not block.matrix[rewritten].any()
+
+
 def test_the_idle_reaper_can_release_the_resident_unit_matrix(tmp_path: Path) -> None:
     index = embedding_index.EmbeddingIndex(tmp_path)
     state = semantic_index.build_parent_index_state(tmp_path, _write_page(tmp_path, 1))

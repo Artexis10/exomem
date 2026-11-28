@@ -28,9 +28,9 @@ CLAIM_DISPLACED = "VAULT_STORE_CLAIM_DISPLACED"
 CLAIM_UNKNOWN = "VAULT_STORE_CLAIM_UNKNOWN"
 WRITER_UNROUTED = "VAULT_STORE_WRITER_UNROUTED"
 
-ROLLBACK = "`exomem store-mode rollback`"
+ROLLBACK = "`evermatter store-mode rollback`"
 ROLLBACK_HELD = (
-    "Stop the service and run `exomem store-mode rollback --apply --export-held "
+    "Stop the service and run `evermatter store-mode rollback --apply --export-held "
     "--export-to EXPORT_DIR --why REASON` on this state root."
 )
 ELSEWHERE_REASON = (
@@ -56,13 +56,13 @@ def elsewhere_remedy(order) -> str:
     if not order.known:
         return (
             f"{start} This replica's store-mode decision is in a form that this build cannot read, "
-            "so `exomem store-mode release` is not available: use a build that reads it."
+            "so `evermatter store-mode release` is not available: use a build that reads it."
         )
     claim = LEGACY_CLAIM if order.decision is None else order.decision.id
     return (
         f"{start} If that root is gone, stop every service, set "
         "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN and run "
-        f"`exomem store-mode release --apply --claim {claim} --why REASON` on this root."
+        f"`evermatter store-mode release --apply --claim {claim} --why REASON` on this root."
     )
 
 

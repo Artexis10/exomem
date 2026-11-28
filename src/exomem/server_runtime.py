@@ -67,10 +67,14 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
 
     ``load_dotenv_func`` is injected from ``server.py`` so tests that monkeypatch
     ``exomem.server.load_dotenv`` still neutralize dotenv loading exactly as they
-    did before this extraction.
+    did before this extraction. The server passes ``env_compat.load_dotenv``, which
+    renames the file's ``EVERMATTER_*`` and ``KB_MCP_*`` names before the override.
+    A placement setting that the process environment or the file sets under two
+    names refuses the start.
     """
     from . import cloud_cell
 
+    env_compat.refuse_process_conflicts()
     cloud_cell.resource_policy()
 
     if cloud_cell.cloud_mode_enabled():
@@ -150,6 +154,7 @@ class LocalRuntimeActivation:
         self.vault_projector: Any | None = None
         self.derived_drain: Any | None = None
         self.write_intake: Any | None = None
+        self.import_filer: Any | None = None
         self.semantic_drain: Any | None = None
         self.vocabulary_recovery: Any | None = None
         self.catalogue_recovery: threading.Thread | None = None
@@ -327,6 +332,7 @@ class LocalRuntimeActivation:
             ("media replicas", self._start_media_replicas),
             ("review pass", self._start_review_pass),
             ("vault backup", self._start_vault_backup),
+            ("import filer", self._start_import_filer),
             # Last: upkeep is the least important background work and must
             # never contend with admission, the watcher or graph convergence.
             ("dreamer", self._start_dreamer),
@@ -475,11 +481,13 @@ class LocalRuntimeActivation:
 
     def _stop_background_workers(self) -> None:
         """Stop workers already owned by this activation during shutdown."""
-        from . import maintenance_jobs, working_set_runtime, write_intake
+        from . import import_filing, maintenance_jobs, working_set_runtime, write_intake
 
         # First, so no queued save starts a replay while the workers below stop; a replay in
         # flight is claimed by this process and re-claimed after the restart.
         write_intake.stop(self.vault_root)
+        # Next, so no new filing call starts; a call in flight finishes and is repeated under its identity after a restart.
+        import_filing.stop(self.vault_root)
         working_set_runtime.stop_builds(self.vault_root)
         # Jobs commit in chunks, so each stops at its next checkpoint and a restart can plan the rest again.
         maintenance_jobs.stop_all(self.vault_root)
@@ -506,6 +514,10 @@ class LocalRuntimeActivation:
             from . import vault_backup
 
             vault_backup.stop(worker=self.vault_backup)
+        if self.media_worker is not None:
+            from . import face_scan
+
+            face_scan.stop_backfill(self.vault_root, timeout=5)
         semantic_failure = None
         for label, worker in (
             ("semantic drain", self.semantic_drain),
@@ -544,6 +556,9 @@ class LocalRuntimeActivation:
         if self.write_intake is not None and self.write_intake.alive:
             # A replay still running may commit, so the lease stays with this process.
             raise RuntimeError("write intake is still running during shutdown")
+        if self.import_filer is not None and self.import_filer.alive:
+            # A filing call still running may commit, so the lease stays with this process.
+            raise RuntimeError("import filer is still running during shutdown")
         if semantic_failure is not None:
             raise RuntimeError("semantic drain is still running during shutdown") from semantic_failure
 
@@ -568,6 +583,14 @@ class LocalRuntimeActivation:
 
     def _start_media_worker(self, vault_root: Path) -> None:
         self.media_worker = _start_media_worker(vault_root)
+        if self.media_worker is not None:
+            from . import face_scan
+
+            try:
+                # Resumes a face backfill that a stop interrupted; nothing runs while faces are off.
+                face_scan.start_backfill(vault_root)
+            except Exception:  # noqa: BLE001 - faces must never deny the core service
+                log.warning("face backfill startup failed", exc_info=True)
 
     def _start_compute_runtime(self, vault_root: Path) -> None:
         _start_compute_runtime(vault_root, owner=self)
@@ -650,6 +673,17 @@ class LocalRuntimeActivation:
         from . import write_intake
 
         self.write_intake = write_intake.start(vault_root)
+
+    def _start_import_filer(self, vault_root: Path) -> None:
+        """Finish the import stages that the cell was asked to file, in the serving HTTP runtime only.
+
+        A local agent session drives `file` itself, and two serving processes never share one vault.
+        """
+        if not self.serves_upload_sessions:
+            return
+        from . import import_filing
+
+        self.import_filer = import_filing.start(vault_root)
 
     def _recover_maintenance_jobs(self, vault_root: Path) -> None:
         """Record the jobs that a previous process left running as interrupted."""

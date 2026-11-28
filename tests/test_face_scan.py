@@ -1,0 +1,467 @@
+"""The face step of the media worker, on real pictures and the real worker path.
+
+The repository holds no licence-clean pictures of faces, so the face models are replaced at their boundary
+(`face_models.load`) by a detector that reports each solid red or green square as a face. Everything around
+it is real: decoding, EXIF rotation, the CLIP keyframes, the worker's checks and the face stores.
+"""
+
+import io
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from exomem import (
+    embedding_backend,
+    embeddings,
+    extract,
+    face_models,
+    face_scan,
+    face_store,
+    media_models,
+    media_worker,
+    preserve,
+)
+
+WIDTH = int(media_models.model_spec("face-embed")["dimensions"])
+#: Each square colour the stub detector reports as a face, with that face's unit vector.
+SQUARES = {(230, 30, 30): 0, (30, 200, 30): 1}
+
+
+class _SquareFaces:
+    """Stands in for `face_models.FaceModels`: every solid red or green square is a face."""
+
+    def faces(self, picture) -> list[face_models.Face]:
+        pixels = np.asarray(picture.convert("RGB")).astype(int)
+        found = []
+        for colour, axis in SQUARES.items():
+            close = (np.abs(pixels - np.array(colour)).max(axis=2) < 60).nonzero()
+            if len(close[0]) < 100:
+                continue
+            top, left = close[0].min(), close[1].min()
+            box = (float(left), float(top), float(close[1].max() - left + 1), float(close[0].max() - top + 1))
+            vector = np.zeros(WIDTH, dtype=np.float32)
+            vector[axis] = 1.0
+            found.append(face_models.Face(box, 0.99, vector))
+        return found
+
+
+@pytest.fixture(autouse=True)
+def _no_loaded_face_models():
+    face_scan.unload()
+    yield
+    face_scan.unload()
+
+
+def turn_faces_on(vault: Path) -> None:
+    with closing(face_store.connect_index(vault)) as index:
+        face_store.record_opt_in(index, at="2026-01-05T10:00:00+00:00", surface="test")
+
+
+def face_rows(vault: Path) -> list[tuple]:
+    with closing(sqlite3.connect(face_store.index_path(vault))) as index:
+        return index.execute("SELECT page, frame_ts, x, y, width, height FROM faces ORDER BY page, frame_ts, x").fetchall()
+
+
+def clip_job(vault: Path, stored, media_type: str) -> media_worker._Job:
+    return media_worker._Job(
+        binary_path=vault / stored.path,
+        sidecar_path=vault / stored.sidecar_path,
+        media_type=media_type,
+        do_ocr=False,
+        do_clip=True,
+    )
+
+
+def test_an_image_with_two_faces_gets_two_rows_in_read_media_region_form(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches boxes in rotated or pixel coordinates that `read_media` would crop wrongly."""
+    pytest.importorskip("PIL")  # The core tier has no image decoder; the face step decodes the picture.
+    from PIL import Image
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(embeddings, "embed_image", lambda path: np.ones(embeddings.CLIP_DIM, dtype=np.float32))
+    monkeypatch.setattr(face_models, "load", _SquareFaces)
+    turn_faces_on(vault)
+    # Upright, the picture is 200 wide and 300 tall: red square top left, green square lower right.
+    upright = Image.new("RGB", (200, 300), (240, 240, 240))
+    upright.paste((230, 30, 30), (20, 30, 80, 90))
+    upright.paste((30, 200, 30), (120, 180, 180, 240))
+    # The camera stored it on its side, with EXIF orientation 6 telling viewers to turn it upright.
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    data = io.BytesIO()
+    upright.transpose(Image.Transpose.ROTATE_90).save(data, "JPEG", quality=95, exif=exif)
+    stored = preserve.preserve_bytes(
+        vault, scope="Rental", category="photos", filename="porch.jpg", data=data.getvalue(), text="porch"
+    )
+
+    media_worker.MediaWorker(vault)._process(clip_job(vault, stored, "image"))
+
+    rows = face_rows(vault)
+    assert [row[:2] for row in rows] == [(stored.path, None), (stored.path, None)]
+    regions = [row[2:] for row in rows]
+    assert regions == [
+        pytest.approx((20 / 200, 30 / 300, 60 / 200, 60 / 300), abs=0.02),
+        pytest.approx((120 / 200, 180 / 300, 60 / 200, 60 / 300), abs=0.02),
+    ]
+
+
+def write_video(path: Path, scenes: list[tuple[int, int, int]], seconds_per_scene: int = 6) -> None:
+    """An mp4 at 8 frames a second: each scene a plain background with a red square that drifts right."""
+    import av
+
+    with av.open(str(path), "w") as container:
+        stream = container.add_stream("mpeg4", rate=8)
+        stream.width = stream.height = 160
+        stream.pix_fmt = "yuv420p"
+        stream.codec_context.gop_size = 8
+        for background in scenes:
+            for number in range(8 * seconds_per_scene):
+                pixels = np.empty((160, 160, 3), dtype=np.uint8)
+                pixels[:] = background
+                left = 10 + number
+                pixels[50:110, left : left + 60] = (230, 30, 30)
+                frame = av.VideoFrame.from_ndarray(pixels, format="rgb24")
+                for packet in stream.encode(frame):
+                    container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+
+
+def preserve_video(vault: Path, tmp_path: Path, scenes: list[tuple[int, int, int]], filename: str):
+    pytest.importorskip("av")
+    source = tmp_path / filename
+    write_video(source, scenes)
+    return preserve.preserve_bytes(
+        vault, scope="Rental", category="video", filename=filename, data=source.read_bytes(), text="walk"
+    )
+
+
+def use_fake_clip(monkeypatch: pytest.MonkeyPatch) -> None:
+    from test_clip import _FakeClip
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(embeddings, "get_clip_model", lambda: _FakeClip())
+
+
+def test_a_video_gets_face_rows_at_the_clip_keyframe_times(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches keyframe faces that cannot collapse to the video: rows at times the CLIP index never held."""
+    use_fake_clip(monkeypatch)
+    monkeypatch.setattr(face_models, "load", _SquareFaces)
+    turn_faces_on(vault)
+    stored = preserve_video(vault, tmp_path, [(20, 20, 160), (240, 220, 120)], "walk.mp4")
+
+    media_worker.MediaWorker(vault, execution_mode="inline")._process(clip_job(vault, stored, "video"))
+
+    keyframe_times = embeddings.ClipIndex(vault).frame_timestamps(stored.path)
+    rows = face_rows(vault)
+    assert len(keyframe_times) >= 2
+    assert {row[0] for row in rows} == {stored.path}
+    assert sorted(row[1] for row in rows) == pytest.approx(sorted(keyframe_times))
+
+
+def test_a_video_in_scene_mode_gets_face_rows_at_its_scene_keyframes_and_its_scene_frames_get_none(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches duplicate faces from the scene-frame images that the video's keyframes already cover."""
+    use_fake_clip(monkeypatch)
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
+    monkeypatch.setattr(face_models, "load", _SquareFaces)
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(text="", media_type="image", engine="ocr:test"),
+    )
+    turn_faces_on(vault)
+    stored = preserve_video(vault, tmp_path, [(20, 20, 160), (240, 220, 120)], "scenes.mp4")
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+
+    worker._process(clip_job(vault, stored, "video"))
+    while not worker._q.empty():
+        # The jobs the worker queued for the scene-frame images it wrote.
+        worker._process(worker._q.get_nowait())
+
+    scene_frames = sorted((vault / stored.path).parent.glob("scenes.mp4.frames/*.jpg"))
+    assert scene_frames
+    keyframe_times = embeddings.ClipIndex(vault).frame_timestamps(stored.path)
+    rows = face_rows(vault)
+    assert {row[0] for row in rows} == {stored.path}
+    assert sorted(row[1] for row in rows) == pytest.approx(sorted(keyframe_times))
+
+
+def test_a_face_model_that_fails_its_digest_check_leaves_extraction_and_clip_as_they_were(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a face failure that blocks ordinary media processing."""
+    pytest.importorskip("onnxruntime")  # Without the runtime, loading stops before any digest is read.
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    clip_vector = np.linspace(-1.0, 1.0, embeddings.CLIP_DIM, dtype=np.float32)
+    clip_vector /= np.linalg.norm(clip_vector)
+    monkeypatch.setattr(embeddings, "embed_image", lambda path: clip_vector)
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="a receipt for two coffees", media_type="image", engine="ocr:test"
+        ),
+    )
+
+    def digest_mismatch(model_name, served):
+        raise embedding_backend.ModelFilesUnavailable(f"{model_name}: the installed bytes do not match the digest")
+
+    monkeypatch.setattr(embedding_backend, "ensure_artifact", digest_mismatch)
+    turn_faces_on(vault)
+    stored = preserve.preserve_stream(
+        vault, scope="Rental", category="photos", filename="receipt.jpg", stream=io.BytesIO(b"\xff\xd8\xff"),
+        media_pending=True,
+    )
+    job = media_worker._Job(
+        binary_path=vault / stored.path, sidecar_path=vault / stored.sidecar_path, media_type="image",
+        do_ocr=True, do_clip=True,
+    )
+
+    media_worker.MediaWorker(vault, execution_mode="inline")._process(job)
+
+    assert "a receipt for two coffees" in (vault / stored.sidecar_path).read_text(encoding="utf-8")
+    paths, _, matrix = embeddings.ClipIndex(vault).all_vectors()
+    assert paths == [stored.path]
+    np.testing.assert_array_equal(matrix[0], clip_vector)
+    assert face_rows(vault) == []
+    setting = face_store.read_setting(vault)
+    assert setting.enabled is True
+    assert "do not match the digest" in setting.unavailable
+
+
+def test_the_pinned_face_models_find_no_face_in_a_photo_of_a_bicycle(tmp_path: Path) -> None:
+    """Catches pinned models that fail on a real photo: a shape, scale or decode error in the real path."""
+    if not all(media_models.media_model_cached(kind) for kind in (face_models.DETECT, face_models.EMBED)):
+        pytest.skip("the pinned face models are not installed on this host")
+    try:
+        models = face_models.load()
+    except face_models.FacesUnavailable as error:
+        pytest.skip(str(error))
+    photo = Path(__file__).parent / "fixtures" / "clip" / "photo.jpg"
+
+    assert face_scan.image_faces(models, photo) == []
+
+
+def red_square_photo(name: str) -> bytes:
+    from PIL import Image
+
+    picture = Image.new("RGB", (200, 200), (240, 240, 240))
+    picture.paste((230, 30, 30), (40, 40, 120, 120))
+    data = io.BytesIO()
+    picture.save(data, "JPEG", quality=95)
+    return data.getvalue()
+
+
+def test_turning_faces_off_during_a_backfill_processes_no_further_picture(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches detection continuing after the owner turned it off."""
+    pytest.importorskip("PIL")  # The core tier has no image decoder; the face step decodes the picture.
+    import threading
+
+    from exomem import face_operations
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(embeddings, "embed_image", lambda path: np.ones(embeddings.CLIP_DIM, dtype=np.float32))
+    worker = media_worker.MediaWorker(vault)
+    for number in range(4):
+        stored = preserve.preserve_bytes(
+            vault, scope="Rental", category="photos", filename=f"guest-{number}.jpg",
+            data=red_square_photo(f"guest-{number}"), text="guest",
+        )
+        worker._process(clip_job(vault, stored, "image"))  # Faces are off: only the CLIP index learns them.
+    second_picture_started = threading.Event()
+    owner_turned_faces_off = threading.Event()
+    detected: list[int] = []
+
+    class _SlowSecondPicture(_SquareFaces):
+        def faces(self, picture):
+            detected.append(len(detected))
+            if len(detected) == 2:
+                second_picture_started.set()
+                owner_turned_faces_off.wait(30)
+            return super().faces(picture)
+
+    monkeypatch.setattr(face_models, "load", _SlowSecondPicture)
+    turn_faces_on(vault)
+    face_scan.start_backfill(vault)
+    assert second_picture_started.wait(30)
+
+    turning_off = threading.Thread(target=face_operations.turn_off, args=(vault,))
+    turning_off.start()
+    while face_store.enabled(vault):
+        threading.Event().wait(0.01)
+    owner_turned_faces_off.set()
+    turning_off.join(30)
+
+    assert not face_scan.backfill_running(vault)
+    assert len(detected) == 2
+    assert len({row[0] for row in face_rows(vault)}) == 1  # The picture in flight stored nothing.
+
+
+def test_a_changed_original_drops_the_faces_of_its_old_bytes(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches faces of a replaced photo still matching a person after its new bytes hold none."""
+    pytest.importorskip("PIL")  # The core tier has no image decoder; the face step decodes the picture.
+    import os
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(embeddings, "embed_image", lambda path: np.ones(embeddings.CLIP_DIM, dtype=np.float32))
+    monkeypatch.setattr(face_models, "load", _SquareFaces)
+    turn_faces_on(vault)
+    stored = preserve.preserve_bytes(
+        vault, scope="Rental", category="photos", filename="porch.jpg", data=red_square_photo("porch"), text="porch"
+    )
+    worker = media_worker.MediaWorker(vault)
+    worker._process(clip_job(vault, stored, "image"))
+    assert len(face_rows(vault)) == 1
+
+    from exomem import media_processing
+
+    held = media_processing.held_path(vault, vault / stored.path)
+    with open(held, "r+b") as original:  # The same picture with one byte of its comment changed.
+        original.seek(-3, os.SEEK_END)
+        original.write(b"\x00")
+    os.utime(held, (held.stat().st_atime, held.stat().st_mtime + 5))
+    monkeypatch.setattr(embeddings, "embed_image", lambda path: np.full(embeddings.CLIP_DIM, 0.5, dtype=np.float32))
+    monkeypatch.setattr(face_scan, "detect", lambda *args, **kwargs: None)  # The face step fails on the new bytes.
+    worker._process(clip_job(vault, stored, "image"))
+
+    assert face_rows(vault) == []
+
+
+@pytest.mark.parametrize("step", ["new picture", "backfill"])
+def test_a_picture_removed_while_its_faces_commit_keeps_no_face_row(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    """Catches the faces of an erased photo stored after its removal ran, which no later pass finds."""
+    pytest.importorskip("PIL")  # The core tier has no image decoder; the face step decodes the picture.
+    from exomem import face_groups, index_sync, media_processing, reconcile
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(embeddings, "embed_image", lambda path: np.ones(embeddings.CLIP_DIM, dtype=np.float32))
+    stored = preserve.preserve_bytes(
+        vault, scope="Rental", category="photos", filename="porch.jpg", data=red_square_photo("porch"), text="porch"
+    )
+    worker = media_worker.MediaWorker(vault)
+    if step == "backfill":
+        worker._process(clip_job(vault, stored, "image"))  # Faces are off: only the CLIP index learns it.
+    monkeypatch.setattr(face_models, "load", _SquareFaces)
+    turn_faces_on(vault)
+    real_record = face_groups.record_page
+
+    def removed_just_before(vault_root, page, faces, **kwargs):
+        # The owner erases the picture after the face step's last check, before its faces commit.
+        media_processing.held_path(vault, vault / stored.path).unlink()
+        index_sync.delete_after_remove(vault, [stored.path])
+        return real_record(vault_root, page, faces, **kwargs)
+
+    monkeypatch.setattr(face_groups, "record_page", removed_just_before)
+    if step == "backfill":
+        face_scan.backfill_batch(vault)
+    else:
+        worker._process(clip_job(vault, stored, "image"))
+
+    monkeypatch.setattr(face_groups, "record_page", real_record)
+    reconcile.reconcile(vault)
+    assert not embeddings.ClipIndex(vault).has(stored.path)
+    assert face_rows(vault) == []
+
+
+def test_a_damaged_face_index_leaves_a_new_picture_findable_by_what_it_shows(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches one damaged face file stopping image search from learning every picture added after it."""
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(embeddings, "embed_image", lambda path: np.ones(embeddings.CLIP_DIM, dtype=np.float32))
+    turn_faces_on(vault)
+    face_store.index_path(vault).write_bytes(b"not a database, just bytes" * 200)
+    stored = preserve.preserve_bytes(
+        vault, scope="Rental", category="photos", filename="porch.jpg", data=b"\xff\xd8 a picture", text="porch"
+    )
+
+    media_worker.MediaWorker(vault)._process(clip_job(vault, stored, "image"))
+
+    assert embeddings.ClipIndex(vault).has(stored.path)
+
+
+def test_a_large_pictures_face_is_cropped_from_its_own_pixels_not_the_detectors_downscale() -> None:
+    """Catches the embedder seeing a blurred, downscaled face in a large photo, which splits its person."""
+    pytest.importorskip("PIL")  # The core tier has no image decoder; the face step decodes the picture.
+    from PIL import Image
+
+    detect_spec, embed_spec = media_models.model_spec("face-detect"), media_models.model_spec("face-embed")
+    long_side = int(detect_spec["working_long_side"])
+    full = np.random.default_rng(3).integers(0, 256, size=(long_side * 3 // 2, long_side * 2, 3), dtype=np.uint8)
+    # The detector, a model boundary, reports one face in the half-size pixels it sees.
+    seen = face_models.Detection(
+        (100.0, 100.0, 60.0, 60.0), ((115.0, 120.0), (145.0, 120.0), (130.0, 135.0), (118.0, 150.0), (142.0, 150.0)), 0.9
+    )
+    detector = face_models.FaceDetector(None, detect_spec)
+    detector.detect_pixels = lambda pixels: [seen]
+
+    class EmbeddingModel:
+        """The embedder's model boundary: keeps the crop it receives."""
+
+        crop = None
+
+        def run(self, outputs, feeds):
+            EmbeddingModel.crop = next(iter(feeds.values()))[0].transpose(1, 2, 0)
+            return [np.ones((1, WIDTH), dtype=np.float32)]
+
+    embedder = face_models.FaceEmbedder(EmbeddingModel(), embed_spec)
+
+    [found] = face_models.FaceModels(detector, embedder).faces(Image.fromarray(full))
+
+    at_full_size = face_models.Detection(
+        tuple(value * 2 for value in seen.box), tuple((x * 2, y * 2) for x, y in seen.landmarks), seen.score
+    )
+    np.testing.assert_array_equal(EmbeddingModel.crop, embedder.crop(full, at_full_size))
+    assert found.box == at_full_size.box
+
+
+def test_a_face_much_larger_than_the_crop_reaches_the_embedder_smoothed_not_aliased() -> None:
+    """Catches a large face's fine detail (hair, fabric) sampled into moire that moves its vector between photos."""
+    pytest.importorskip("PIL")  # The core tier has no image decoder; the face step decodes the picture.
+    from PIL import Image
+
+    detect_spec, embed_spec = media_models.model_spec("face-detect"), media_models.model_spec("face-embed")
+    side = int(detect_spec["working_long_side"]) * 4
+    # A one-pixel checkerboard: its true average at any size above a pixel is mid-grey.
+    rows, columns = np.indices((side, side))
+    full = np.repeat((((rows + columns) % 2) * 255).astype(np.uint8)[..., None], 3, axis=2)
+    scale = int(detect_spec["working_long_side"]) / side
+    # A large face in the middle of the picture: about 300 picture pixels between the eyes, 35 in the crop.
+    at_full = ((side * 0.44, side * 0.45), (side * 0.56, side * 0.45), (side * 0.5, side * 0.52),
+               (side * 0.455, side * 0.59), (side * 0.545, side * 0.59))
+    detector = face_models.FaceDetector(None, detect_spec)
+    detector.detect_pixels = lambda pixels: [face_models.Detection(
+        (side * 0.2 * scale, side * 0.2 * scale, side * 0.6 * scale, side * 0.6 * scale),
+        tuple((x * scale, y * scale) for x, y in at_full), 0.9,
+    )]
+
+    class EmbeddingModel:
+        """The embedder's model boundary: keeps the crop it receives."""
+
+        crop = None
+
+        def run(self, outputs, feeds):
+            EmbeddingModel.crop = next(iter(feeds.values()))[0].transpose(1, 2, 0)
+            return [np.ones((1, WIDTH), dtype=np.float32)]
+
+    embedder = face_models.FaceEmbedder(EmbeddingModel(), embed_spec)
+
+    face_models.FaceModels(detector, embedder).faces(Image.fromarray(full))
+
+    assert abs(float(EmbeddingModel.crop.mean()) - 127.5) < 8
+    assert float(EmbeddingModel.crop.std()) < 16
+

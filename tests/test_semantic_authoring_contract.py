@@ -46,7 +46,7 @@ COMPILED_DESTINATIONS = {
 }
 EXPECTED_NORMATIVE_IDENTITY = (
     12,
-    "sha256:531316a2be37ad20214f80f7a0831929be57f46105228e019e292d6ac92aafd9",
+    "sha256:64a50d0c7e553902cc2175ca2220406ec463b79090ab3f2e075b06d8ac2508f6",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -108,7 +108,7 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "Parse valid compact observations anywhere outside fenced code blocks."
         ),
         "canonical_authoring": (
-            "Exomem writers use `-` under the canonical `## Observations` section."
+            "Evermatter writers use `-` under the canonical `## Observations` section."
         ),
         "parser_bullet_markers": ["-", "*", "+"],
         "canonical_bullet_marker": "-",
@@ -180,8 +180,9 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "reserved or punctuation-bearing bracket labels outside category grammar",
         ],
         "relation_rule": (
-            "Compact units do not carry typed unit relations; use a canonical note-level "
-            "relation or the rich form."
+            "Compact units do not carry typed unit relations; a provenance link, such as "
+            "the Source it came from, is recorded on the page instead, and any "
+            "other relation uses a canonical note-level relation or the rich form."
         ),
     }
     rich = dict(contract["rich"])

@@ -100,7 +100,7 @@ _REMEDIATION: dict[str, str | Callable[[], str]] = {
         "relation_review_hash. Send none when the page needs no relation review."
     ),
     "COMPACT_RELATIONS_REQUIRE_RICH_KIND": (
-        "Select an explicit governed rich kind or author a canonical note-level relation."
+        "Select an explicit governed rich kind or author a canonical note-level relation; a provenance link, such as the Source it came from, is recorded on the page."
     ),
     "DRIFT_GUARDS_REQUIRED": (
         "Re-read the parent and exact unit, then pass both expected_hash and expected_fingerprint."
@@ -214,6 +214,11 @@ _SERVICE_UNAVAILABLE_CODES = frozenset(
         # A name-linked retained input the lookup could not yet check; the refusal
         # schedules the build that settles it, so the same write succeeds on retry.
         "ORIGIN_INPUT_LOOKUP_STALE",
+        # A Records or Planning query that selects on a link field while the link index it
+        # needs is being published; the same query succeeds on retry.
+        "LINK_INDEX_WARMING",
+        # A review decision whose lookup the request's deadline stopped before it saw every queue.
+        "REVIEW_QUEUES_WARMING",
     }
 )
 _NOT_FOUND_CODES = frozenset({"NOT_FOUND", "OLD_NOT_FOUND", "SOURCES_NOT_FOUND", "NOT_IN_TRASH"})

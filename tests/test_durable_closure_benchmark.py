@@ -463,11 +463,23 @@ def test_child_hook_reports_reset_crossing_graph_work_as_pre_reset_spillover(tmp
         "def read_bytes_without_pinning(path): return b''\n",
         encoding="utf-8",
     )
+    # The drain stays open until the hook acknowledges the reset, so the reset always lands
+    # mid-drain; a fixed sleep lost that race on a loaded runner.
     (package / "epistemic_graph.py").write_text(
-        "import os, time\n"
+        "import json, os, time\n"
         "from pathlib import Path\n"
+        "def _reset_acknowledged():\n"
+        "    try:\n"
+        "        published = Path(os.environ['DURABLE_CLOSURE_INSTRUMENTATION']).read_text()\n"
+        "    except OSError:\n"
+        "        return False\n"
+        "    return json.loads(published).get('acknowledged_command') == 'reset'\n"
         "class EpistemicGraphIndex:\n"
-        " def drain_paths(self, paths): Path(os.environ['DURABLE_CLOSURE_ENTERED']).write_text('entered'); time.sleep(0.08); return {}\n"
+        " def drain_paths(self, paths):\n"
+        "  Path(os.environ['DURABLE_CLOSURE_ENTERED']).write_text('entered')\n"
+        "  deadline = time.monotonic() + 10\n"
+        "  while not _reset_acknowledged() and time.monotonic() < deadline: time.sleep(0.005)\n"
+        "  return {}\n"
         " def _rebuild_all_off_boundary(self): return None\n"
         " def _sources_linking_to(self, targets, *, resolver=None): return set()\n",
         encoding="utf-8",

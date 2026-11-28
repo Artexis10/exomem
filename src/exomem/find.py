@@ -50,6 +50,7 @@ from . import (
     semantic_units,
     source_custody,
     structured_filters,
+    unit_rows,
     view_lag,
 )
 from . import ranking_config as _ranking_config
@@ -128,6 +129,15 @@ _PENDING_VISIBILITY_COMPONENT = "pending_visibility"
 # Store-refusal disclosure. A request the collection store refused withholds its pages for the rest
 # of the command; the owner learns that under this name rather than finding them silently missing.
 _STORE_UNAVAILABLE_COMPONENT = "collection_store"
+
+# Partial-coverage disclosure. An exact dimension scan stops at a designed per-request bound, so the
+# result covers the best-ranked rows only. No lane failed: the result is cacheable and is not a
+# degradation, and the caller says more matches may exist (`partial_coverage_out`).
+PARTIAL_DIMENSION_SCAN = "dimension_scan_bound"
+# A keyword scan's stop, which the caller decides after release. Recency orders both the scan and the
+# result, so a match past the stop ranks after every active hit: it matters only when the released
+# result holds fewer active units than the caller's limit (`settle_partial_coverage`).
+KEYWORD_SCAN_BOUND = "keyword_scan_bound"
 
 
 def _record_degradation(lane: str) -> None:
@@ -231,9 +241,11 @@ def auto_rerank_allowed_by_policy() -> bool:
 # see, the embedding/CLIP sidecars when a semantic lane could contribute, and
 # today's date (temporal lanes and recency filters are date-relative). Cached
 # values are deep-copied on the way in AND out so caller mutation can never
-# poison a later response. `EXOMEM_FIND_CACHE_SIZE=0` disables it.
+# poison a later response. `EXOMEM_FIND_CACHE_SIZE=0` disables it. An entry
+# also keeps the partial-coverage markers its result carried, which a cache hit
+# reports again.
 # --------------------------------------------------------------------------- #
-_FIND_CACHE: OrderedDict[tuple, tuple[list[Hit], tuple[str, str]]] = OrderedDict()
+_FIND_CACHE: OrderedDict[tuple, tuple[list[Hit], tuple[str, str], tuple[str, ...]]] = OrderedDict()
 _FIND_CACHE_LOCK = threading.Lock()
 _FIND_CACHE_CHECKPOINTS: dict[
     tuple, tuple[tuple[str, freshness.RecallFreshnessCheckpoint], ...]
@@ -1607,6 +1619,20 @@ def caller_admission(vault_root: Path) -> Callable[[str], bool] | None:
     return egress.content_admission(vault_root, who)
 
 
+def settle_partial_coverage(partial_coverage: list[str], released: list[Any], *, limit: int) -> None:
+    """Decide a stopped keyword scan (`KEYWORD_SCAN_BOUND`) on the hits that release kept, in place.
+
+    The released hits are in their final order and cut to the caller's `limit`.
+    """
+    if KEYWORD_SCAN_BOUND not in partial_coverage:
+        return
+    partial_coverage[:] = [marker for marker in partial_coverage if marker != KEYWORD_SCAN_BOUND]
+    # An active match past the stop would rank above a demoted unit, so a demoted unit fills no place.
+    settled = sum(not (isinstance(hit, SemanticUnitHit) and hit.demoted) for hit in released[:limit])
+    if settled < limit and PARTIAL_DIMENSION_SCAN not in partial_coverage:
+        partial_coverage.append(PARTIAL_DIMENSION_SCAN)
+
+
 @governance_policy.request_policy_snapshot()
 @_with_catalog_scope
 def find(
@@ -1627,6 +1653,7 @@ def find(
     relation_of: str | None = None,
     relation_direction: str = "any",
     filters: dict[str, Any] | None = None,
+    people: list[str] | None = None,
     result_level: str = "auto",
     limit: int = 15,
     scope: str = "kb",
@@ -1656,6 +1683,7 @@ def find(
     type_basis: note_types.Basis | None = None,
     dimension_check_out: dict[str, int] | None = None,
     dimension_groups_out: list[dimension_display.GroupRequest] | None = None,
+    partial_coverage_out: list[str] | None = None,
     _catalog_admission: Any | None = None,
     _pending_coverage: Any | None = None,
     _cache_probe: bool = False,
@@ -1684,6 +1712,13 @@ def find(
     best `limit` units it checked (`checked`) and how many are in the dimension
     (`kept`), because the limit applied before the check and more units in the
     dimension may exist.
+
+    `partial_coverage_out`: optional caller-owned list. A designed bound that
+    stopped an exact dimension scan, where the result may lack matches past it,
+    appends `PARTIAL_DIMENSION_SCAN` here. No lane failed, so the result is
+    cached with the marker and a cache hit reports it again. A stopped keyword
+    scan appends `KEYWORD_SCAN_BOUND` instead, which the caller settles on its
+    released hits with `settle_partial_coverage`.
 
     `dimension_groups_out`: optional caller-owned list. When the filter asks for
     dimension groups (`structured_filters.requested_groups`) and the search
@@ -1784,7 +1819,38 @@ def find(
     `admit_path`: the caller's content floors, applied before any candidate is
     ranked, classified or counted. Omitted, it is `caller_admission`, so a
     restricted caller's find can never run unadmitted.
+
+    `people`: keep only pictures and videos where a face of each named person
+    appears (`face_search`). Owner only, decided before the face store opens; a
+    refused restriction never falls back to a search without it. An empty list
+    names no person and restricts nothing.
     """
+    face_restriction = None
+    if people:
+        from . import face_search
+
+        face_restriction = face_search.admit(vault_root, people)
+        # The outside-KB reserve ranks pages that the eligible set does not gate; `scope="vault"` reaches them.
+        widen_outside_kb = False
+        if result_level == "passage":
+            raise cli_ops.OpError(
+                "INVALID_ARGUMENT",
+                "A search by person returns pictures and videos, not passages, so nothing ran.",
+                "Remove result_level passage when you set people.",
+            )
+    person_paths_memo: list[set[str]] = []
+
+    def _person_paths() -> set[str] | None:
+        """The pages the `people` restriction keeps, resolved once on a cache miss; None without one."""
+        if face_restriction is None:
+            return None
+        if not person_paths_memo:
+            from . import face_search
+
+            with _span(timings, "face_restriction"):
+                person_paths_memo.append(face_search.pages(vault_root, face_restriction, people or ()))
+        return person_paths_memo[0]
+
     if result_level == "passage":
         from . import passage_evidence
 
@@ -2032,18 +2098,18 @@ def find(
         resolve_kind=lambda value: _resolve_language_value(value, namespace="kind"),
         resolve_dimension=_resolve_dimension_name,
     )
-    # Membership lookups are registry reads; the graph read waits until a cache miss. A managed
-    # reader rewrites an indexed dimension and checks the others on its hits, so `unit.dimension`
-    # leaves its plan before the refusal below.
+    # Membership lookups are registry reads; the graph read waits until a cache miss. Indexed
+    # proposals precede exact selected membership; file-mode edge dimensions still check the hits.
     requested_plan = filter_plan
     dimension_lookups = _dimension_lookups(vault_root, filter_plan, language=language_registry)
     dimension_check: structured_filters.FilterPlan | None = None
-    if dimension_lookups is not None and managed_runtime:
+    indexed_dimension_catalogue = managed_runtime or lexstore.store_catalogue()
+    if dimension_lookups is not None and indexed_dimension_catalogue:
         filter_plan, dimension_check = _managed_dimension_plan(
-            filter_plan, dimension_lookups, result_level=result_level
+            filter_plan, dimension_lookups, result_level=result_level, stored=lexstore.store_catalogue()
         )
     filter_plan = _withhold_positions(vault_root, filter_plan)
-    if filter_plan.root is not None and managed_runtime:
+    if filter_plan.root is not None and (managed_runtime or filter_plan.index_dimensions):
         # A managed reader refuses a field no index can evaluate, and refuses it
         # HERE — before the freshness key, the hot cache, any catalogue query or
         # any lane. The alternative is to discover it at the eligibility seam
@@ -2064,6 +2130,16 @@ def find(
         result_level,
         requested_plan,
     )
+    if lexstore.store_catalogue() and (
+        effective_result_level != "page" or requested_plan.has_unit_predicate or bool(query.strip())
+    ):
+        from .vault_store import read as store_read
+
+        # Qualify semantic inputs before even a cached miss: parser changes need no page commit.
+        with store_read.snapshot(vault_root) as view:
+            registry = store_read.derived_registry(view.connection)
+            if registry.parser_behind:
+                _raise_catalog_outcome(lexstore.CatalogReadiness("stale", False, lexstore.backend()))
     # A filter that names `unit.dimension` at its top level asks for that dimension's group. The
     # groups' display behaviours read edges from the same graph read as membership.
     group_keys: tuple[str, ...] = ()
@@ -2150,6 +2226,7 @@ def find(
     resolved_config = config if config is not None else _active_ranking()
     degraded = degraded_out if degraded_out is not None else []
     failed = failed_out if failed_out is not None else []
+    partial_coverage = partial_coverage_out if partial_coverage_out is not None else []
 
     def _note_projection_lag() -> None:
         with _span(
@@ -2229,6 +2306,7 @@ def find(
                 mode,
                 filter_key,
                 _relation_key(relations, relation_of, relation_direction),
+                face_restriction,
                 prefer_active,
                 resolved_config,
                 _origin_view(vault_root),
@@ -2241,6 +2319,7 @@ def find(
                         _FIND_CACHE.move_to_end(unit_cache_key)
             if cached_units is not None and _current(cached_units[1]):
                 cached_hits = _cached_selection_hits(vault_root, cached_units[0], pending)
+                partial_coverage.extend(cached_units[2])
                 _note_projection_lag()
                 if timings is not None:
                     timings.cache["hit"] = True
@@ -2261,7 +2340,13 @@ def find(
         # answer to `unit.dimension`, which places each unit in its groups.
         group_edges: epistemic_dimensions.DimensionEdges | None = None
         filter_dimensions: epistemic_dimensions.UnitDimensions | None = None
-        if dimension_lookups is not None and dimension_check is None:
+        if dimension_lookups is not None and dimension_check is None and lexstore.store_catalogue():
+            filter_dimensions = epistemic_dimensions.StoredUnitDimensions(
+                vault_root, dimension_lookups, keep=admit_path,
+                needs_edges=structured_filters.plan_index_eligibility(filter_plan).requires_edge_families,
+            )
+            filter_plan = filter_plan.with_dimensions(filter_dimensions)
+        elif dimension_lookups is not None and dimension_check is None:
             membership_edges = _dimension_edges(
                 vault_root, dimension_lookups, keep=admit_path, snapshot=snapshot,
                 behaviours=group_behaviours if dimension_lookups.needs_edges else (),
@@ -2288,6 +2373,7 @@ def find(
                 mode=mode,
                 degraded_out=degraded,
                 failed_out=failed,
+                partial_coverage_out=partial_coverage,
                 retrieval_trace=retrieval_trace,
                 timings=timings,
                 prepared_queries=_prepared_queries,
@@ -2303,6 +2389,9 @@ def find(
                 match = relation_provenance.get(unit.parent_path)
                 if match is not None:
                     unit.relation_match = _relation_match_dict(match, matched="parent")
+        if (person_paths := _person_paths()) is not None:
+            # A unit qualifies through its picture's page, as for a relation filter.
+            unit_hits = [u for u in unit_hits if u.parent_path in person_paths]
         if dimension_check is not None and dimension_lookups is not None:
             checked_count = len(unit_hits)
             unit_hits, group_edges, filter_dimensions = _check_dimensions_on_hits(
@@ -2329,6 +2418,7 @@ def find(
                         unit_hits, dimension_lookups, group_keys, dimensions=filter_dimensions,
                         edges=group_edges, language=language_registry,
                         instance=filter_plan.unit_instance, status_basis=status_basis,
+                        restricted=admit_path is not None,
                     )
                 )
         def finish_units():
@@ -2339,7 +2429,7 @@ def find(
             _note_projection_lag()
             if unit_cache_key is not None and not degraded and not failed and _publishable():
                 with _FIND_CACHE_LOCK:
-                    _FIND_CACHE[unit_cache_key] = (copy.deepcopy(verified), _dependency())
+                    _FIND_CACHE[unit_cache_key] = (copy.deepcopy(verified), _dependency(), tuple(partial_coverage))
                     _FIND_CACHE_CHECKPOINTS.pop(unit_cache_key, None)
                     _FIND_CACHE.move_to_end(unit_cache_key)
                     _trim_find_cache(cache_size)
@@ -2409,6 +2499,7 @@ def find(
             recency_days,
             filter_key,
             _relation_key(relations, relation_of, relation_direction),
+            face_restriction,
             effective_result_level,
             prefer_source_passages,
             prefer_compiled,
@@ -2438,6 +2529,7 @@ def find(
             and query_norm
             and filter_plan.root is None
             and not relation_active
+            and face_restriction is None
             and types is None
             and projects is None
             and tags is None
@@ -2456,7 +2548,7 @@ def find(
             )
         cache_key = (request_key, fresh)
         prior_key: tuple | None = None
-        prior_hits: tuple[list[Hit], tuple[str, str]] | None = None
+        prior_hits: tuple[list[Hit], tuple[str, str], tuple[str, ...]] | None = None
         prior_checkpoints: tuple[
             tuple[str, freshness.RecallFreshnessCheckpoint], ...
         ] | None = None
@@ -2506,6 +2598,7 @@ def find(
                         _FIND_CACHE.move_to_end(cache_key)
         if cached is not None and _current(cached[1]):
             cached_hits = _cached_selection_hits(vault_root, cached[0], pending)
+            partial_coverage.extend(cached[2])
             _note_projection_lag()
             if timings is not None:
                 timings.cache["hit"] = True
@@ -2540,6 +2633,11 @@ def find(
         return _QueryPreparation(unit=mixed, page=True)
     if dimension_lookups is not None and dimension_check is None:
         filter_plan = filter_plan.with_dimensions(
+            epistemic_dimensions.StoredUnitDimensions(
+                vault_root, dimension_lookups, keep=admit_path,
+                needs_edges=structured_filters.plan_index_eligibility(filter_plan).requires_edge_families,
+            )
+            if lexstore.store_catalogue() else
             _dimension_source(vault_root, dimension_lookups, keep=admit_path, snapshot=snapshot)
         )
     mixed_unit_hits: list[SemanticUnitHit] = []
@@ -2562,6 +2660,7 @@ def find(
                 mode=mode,
                 degraded_out=degraded,
                 failed_out=failed,
+                partial_coverage_out=partial_coverage,
                 retrieval_trace=retrieval_trace,
                 query_vector_provider=_query_vector,
                 prepared_queries=_prepared_queries,
@@ -2580,6 +2679,8 @@ def find(
                 match = relation_provenance.get(unit.parent_path)
                 if match is not None:
                     unit.relation_match = _relation_match_dict(match, matched="parent")
+        if (person_paths := _person_paths()) is not None:
+            mixed_unit_hits = [u for u in mixed_unit_hits if u.parent_path in person_paths]
 
     def select_outside(exclude_paths=None, *, defer_finish=False, stage_name="outside_kb"):
         return _find_outside_kb(
@@ -2744,14 +2845,19 @@ def find(
         eligible_paths = relation_set if eligible_paths is None else (eligible_paths & relation_set)
         if browse_window is not None:
             browse_window = replace(browse_window, keyed=True)
+    # The `people` restriction joins the eligible set the same way, so it composes AND with every filter.
+    if (person_paths := _person_paths()) is not None:
+        eligible_paths = person_paths if eligible_paths is None else (eligible_paths & person_paths)
+        if browse_window is not None:
+            browse_window = replace(browse_window, keyed=True)
 
     # Only the caller's own filters size the candidate pool. Admission narrows
     # what every lane ranks; it never deepens the pool (`collect_candidates`).
     filtered = eligible_paths is not None
-    # The caller asked for pictures only: its own filters require an image or video kind.
-    media_restricted = filtered and structured_filters.requires_one_of(
+    # The caller asked for pictures only: its own filters require an image or video kind, or it named people.
+    media_restricted = filtered and (face_restriction is not None or structured_filters.requires_one_of(
         filter_plan, "page.file_type", media_types.VISUAL_KINDS
-    )
+    ))
     if admitted_paths is not None:
         eligible_paths = admitted_paths if eligible_paths is None else eligible_paths & admitted_paths
 
@@ -3093,7 +3199,7 @@ def find(
             and _publishable()
         ):
             with _FIND_CACHE_LOCK:
-                _FIND_CACHE[cache_key] = (copy.deepcopy(hits), _dependency())
+                _FIND_CACHE[cache_key] = (copy.deepcopy(hits), _dependency(), tuple(partial_coverage))
                 if cache_checkpoints is not None:
                     _FIND_CACHE_CHECKPOINTS[cache_key] = cache_checkpoints
                 else:
@@ -3131,6 +3237,10 @@ _MIXED_UNITS_PER_PARENT_CAP = 3
 _MIXED_PAGE_WEIGHT = 1.0
 _MIXED_UNIT_WEIGHT = 1.0
 _UNIT_EXCERPT_MAX = 320
+#: Candidate windows of members that the vector lane ranks alone, and of rejected rows after which an
+#: exact dimension scan stops. Eight windows fill a window while one proposed row in nine is a member,
+#: and keep a sparse dimension's exact checks to a fixed multiple of the limit, not of the corpus.
+_DIMENSION_MEMBER_WINDOWS = 8
 
 
 def _unit_excerpt(content: str) -> str:
@@ -3273,6 +3383,7 @@ class _UnitCandidate:
     vector_score: float | None = None
     relation_match: Any = None
     mixed_units_truncated: int = 0
+    demoted: bool = False
 
     def __getattr__(self, name: str) -> Any:
         # A unit's governed rows are read from its selected interpretation, as `as_of` is.
@@ -3347,6 +3458,8 @@ def _unit_metadata_records(
         vault_root, paths, scope=scope, freshness_key=freshness_key, pending=pending,
         include_ranking=True, include_occurrences=True, recall_checkpoint=recall_checkpoint,
     )
+    if hasattr(plan.dimensions, "prepare"):
+        plan.dimensions.prepare(paths)
     unsupported_fields = _unsupported_filter_fields(plan)
     if unsupported_fields and any(
         metadata.view is not None and "frontmatter" not in metadata.view
@@ -3402,7 +3515,7 @@ def _unit_metadata_records(
                 evaluated = unit_view if plan.dimensions is None else {
                     **unit_view,
                     **structured_filters.membership_facts(
-                        candidate, occurrence=selected.occurrence_key
+                        selected, occurrence=selected.occurrence_key
                     ),
                 }
                 if structured_filters.evaluate_filter(plan, page=page_view, unit=evaluated):
@@ -3560,6 +3673,7 @@ def _finish_unit_candidates(
             )
             verified.relation_match = candidate.relation_match
             verified.mixed_units_truncated = candidate.mixed_units_truncated
+            verified.demoted = candidate.demoted
             out.append(verified)
         except (OSError, UnicodeError, ValueError, KeyError, TypeError):
             if catalog is not None:
@@ -4004,6 +4118,7 @@ def _find_semantic_units(
     mode: str,
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
+    partial_coverage_out: list[str] | None = None,
     retrieval_trace: Any | None = None,
     timings: FindTimings | None = None,
     query_vector_provider: Callable[[], Any] | None = None,
@@ -4017,11 +4132,44 @@ def _find_semantic_units(
     parent_reads: UnitParentReads | None = None,
     _defer_hydration: bool = False,
     _candidate_window: _UnitCandidateWindow | None = None,
+    _dimension_window: int | None = None,
+    _dimension_parents: set[str] | None = None,
 ) -> list[SemanticUnitHit]:
     """Rank current, exactly eligible units through lexical and vector lanes."""
     from . import lexstore
 
+    def proposed_parents() -> set[str]:
+        # One catalogue read of the parents whose units the plan can propose.
+        if _dimension_parents is not None:
+            return _dimension_parents
+        eligibility = structured_filters.plan_index_eligibility(plan)
+        if not eligibility.resolvable:
+            return set(snapshot.recall_paths(scope))
+        return _eligibility_candidate_paths(
+            vault_root, scope=scope, eligibility=eligibility, freshness=snapshot.for_scope(scope),
+        )
+
+    def widen():
+        # The windows underfilled the limit while a lane held more rows: read both twice as deep.
+        parents = proposed_parents()
+        return _find_semantic_units(
+            vault_root, query=query, limit=limit, scope=scope, plan=plan, snapshot=snapshot,
+            prefer_active=prefer_active, config=config, mode=mode, degraded_out=degraded_out,
+            failed_out=failed_out, partial_coverage_out=partial_coverage_out,
+            retrieval_trace=retrieval_trace, timings=timings,
+            query_vector_provider=query_vector_provider, allowed_parent_paths=allowed_parent_paths,
+            prepared_queries=prepared_queries, recall_checkpoint=recall_checkpoint, repair=repair,
+            max_catalog_candidates=max_catalog_candidates, truncated_out=truncated_out,
+            status_basis=status_basis, parent_reads=parent_reads, _defer_hydration=_defer_hydration,
+            _candidate_window=_candidate_window, _dimension_window=window * 2,
+            _dimension_parents=parents,
+        )
+
     def finish(hits):
+        # An exact scan stopped at its bound: no lane failed, but the result may lack matches past it.
+        marker = PARTIAL_DIMENSION_SCAN if partial else KEYWORD_SCAN_BOUND if keyword_stopped else None
+        if marker is not None and partial_coverage_out is not None and marker not in partial_coverage_out:
+            partial_coverage_out.append(marker)
         if _candidate_window is not None:
             _candidate_window.exhausted = candidate_window_exhausted
         return hits if _defer_hydration else _finish_unit_candidates(
@@ -4034,6 +4182,45 @@ def _find_semantic_units(
             stale_out=stale_out, parent_reads=parent_reads, recall_checkpoint=recall_checkpoint,
         )
 
+    def dimension_rows(
+        text: str, *, k: int, rank_query: bool = False, literal_all: bool = False, whole_pages: bool = False,
+    ):
+        # Rows the store checked exactly against the dimension filter, and whether it stopped after
+        # `bound` rejected rows (with `whole_pages`, at the first page boundary after them).
+        stopped: list[bool] = []
+        result = lexstore.search_semantic_units_result(
+            vault_root,
+            text,
+            k=k,
+            filter_plan=plan,
+            rank_query=rank_query,
+            literal_all=literal_all,
+            scope=scope,
+            freshness=snapshot.for_scope(scope),
+            recall_checkpoint=recall_checkpoint,
+            allowed_parent_paths=allowed_parent_paths,
+            admitted_parent_paths=allowed_parent_paths,
+            released_parent_paths=released_parent_paths,
+            _repair_stale=True,
+            repair=_bounded_lexical_repair_allowed(snapshot.for_scope(scope)) if repair is None else repair,
+            allow_delta=True if repair is None else repair,
+            validated=parent_reads.validated if parent_reads else None,
+            _validate_current=False,
+            scan_limit=bound,
+            scan_stopped=stopped,
+            scan_whole_pages=whole_pages,
+        )
+        _set_catalog_timing_profile(timings, result.readiness)
+        if not result.readiness.complete:
+            _raise_catalog_outcome(result.readiness)
+        return list(result.value or []), bool(stopped)
+
+    def newest_members_read():
+        # The newest members within the bound, and whether more may exist past it. The read finishes the
+        # page it is in, so one long page of nonmembers cannot hide its own members from the vector lane.
+        members, stopped = dimension_rows("", k=bound + 1, whole_pages=True)
+        return members, stopped or len(members) > bound
+
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     # Empty queries carry no vector signal. Match the page lane's contract and
     # treat them as filter-only keyword recall before deciding whether exact
@@ -4043,6 +4230,11 @@ def _find_semantic_units(
 
     indexed: list[Any] | None = None
     candidate_window_exhausted = False
+    # Set when an exact dimension scan stopped at its bound and the result may lack members past it.
+    partial = False
+    # Set when a keyword scan stopped at its bound, for the caller to decide after release.
+    keyword_stopped = False
+    lexical_capped = False
     # The unit lane consumes the same branch-preserving DNF the page lane uses:
     # an exact category/kind plan seeds candidates through `algebra.clauses`
     # (same-row `(category... AND kind...) OR ...`), never the flattened
@@ -4066,10 +4258,23 @@ def _find_semantic_units(
     released_parent_paths = (
         parents if keep is None else snapshot._published_admitted_paths(scope, keep, parents)
     )
+    indexed_dimensions = bool(plan.index_dimensions)
     dnf_clauses = algebra.clauses if algebra.status == "complete" else None
     requested_limit = 20 if limit is None else max(1, limit)
     candidate_limit = max(20, min(200, requested_limit * 8))
-    if dnf_clauses is not None:
+    # A dimension can propose most of the corpus. A query with content pushes the dimension into
+    # its ranked lexical window instead of hydrating every proposed unit; `widen` deepens it.
+    pushed_dimensions = (
+        indexed_dimensions and dnf_clauses is None and bool(query.strip())
+        and (mode == "keyword" or lexstore.fts5_available())
+    )
+    # Keyword order is the store's own recency order, so its prefix starts at the limit.
+    window = _dimension_window or (
+        max(8, requested_limit) if mode == "keyword" and limit is not None else candidate_limit
+    )
+    bound = window * _DIMENSION_MEMBER_WINDOWS
+    exact_eligibility = dnf_clauses is not None or (indexed_dimensions and not pushed_dimensions)
+    if exact_eligibility:
         # Exact eligibility is normal-table metadata only. Hybrid/vector
         # content ranking consumes this finite candidate set independently,
         # so FTS absence cannot change the catalog outcome.
@@ -4083,7 +4288,8 @@ def _find_semantic_units(
             exact_checkpoint = recall_checkpoint
             exact_allow_delta = True if repair is None else repair
             bounded_filter_only = (
-                not query.strip() and limit is not None and not algebra.post_filter_required
+                not query.strip() and limit is not None
+                and (indexed_dimensions or not algebra.post_filter_required)
             )
             if bounded_filter_only:
                 # SQL and final filter-only ordering are identical. Read a
@@ -4105,6 +4311,7 @@ def _find_semantic_units(
                         query,
                         k=prefix_size,
                         clauses=dnf_clauses,
+                        filter_plan=plan if indexed_dimensions else None,
                         scope=scope,
                         freshness=exact_freshness,
                         recall_checkpoint=exact_checkpoint,
@@ -4147,6 +4354,7 @@ def _find_semantic_units(
                     query,
                     k=exact_limit,
                     clauses=dnf_clauses,
+                    filter_plan=plan if indexed_dimensions else None,
                     scope=scope,
                     freshness=exact_freshness,
                     recall_checkpoint=exact_checkpoint,
@@ -4169,6 +4377,14 @@ def _find_semantic_units(
                     if mode == "vector"
                     else select(indexed)
                 )
+    elif pushed_dimensions:
+        # The store checks each proposed row's dimensions exactly and stops after `window + 1` members
+        # or `bound` rejected rows.
+        indexed, lexical_capped = dimension_rows(
+            query, k=window + 1, rank_query=mode != "keyword", literal_all=mode == "keyword",
+        )
+        # Keyword order is the scan's own order, so its stop matters only when it shortens the result.
+        partial = lexical_capped and mode == "hybrid"
     else:
         indexed = lexstore.search_semantic_units(
             vault_root,
@@ -4207,10 +4423,10 @@ def _find_semantic_units(
             )
         else:
             records = _eligible_unit_records(vault_root, scope=scope, plan=plan, allowed_parent_paths=allowed_parent_paths)
-    elif dnf_clauses is None:
-        if len(indexed) > candidate_limit:
+    elif not exact_eligibility:
+        if len(indexed) > window:
             candidate_window_exhausted = True
-            indexed = indexed[:candidate_limit]
+            indexed = indexed[:window]
         records = (
             {}
             if mode == "vector"
@@ -4239,7 +4455,14 @@ def _find_semantic_units(
         return finish(ordered_hits)
 
     if mode == "keyword":
+        # Only the caller knows how many hits release keeps; a request without a limit has no final cut.
+        if limit is None:
+            partial = lexical_capped
+        else:
+            keyword_stopped = lexical_capped
         if not records:
+            if candidate_window_exhausted and pushed_dimensions and limit is not None:
+                return widen()
             return finish([])
         tokens = query.lower().split()
         ordered = sorted(
@@ -4255,22 +4478,26 @@ def _find_semantic_units(
             ),
             reverse=True,
         )
+        superseded = {
+            id(record): prefer_active and status_basis.classify(
+                record[0].frontmatter.get("status"),
+                path=record[0].rel_path,
+                frontmatter=record[0].frontmatter,
+            ).require() == "superseded"
+            for record in ordered
+        }
         if prefer_active:
-            ordered.sort(
-                key=lambda record: (
-                    status_basis.classify(
-                        record[0].frontmatter.get("status"),
-                        path=record[0].rel_path,
-                        frontmatter=record[0].frontmatter,
-                    ).require()
-                    == "superseded"
-                )
-            )
+            ordered.sort(key=lambda record: superseded[id(record)])
+        short = limit is None or sum(not superseded[id(record)] for record in ordered[:limit]) < limit
+        if candidate_window_exhausted and pushed_dimensions and limit is not None and short:
+            # Recency is the final order, so only a short or superseded prefix needs more rows.
+            return widen()
         selected = ordered if limit is None else ordered[:limit]
-        hits = [
-            _semantic_unit_hit(page, unit, bm25_rank=None, bm25_score=None)
-            for page, unit, _source_order in selected
-        ]
+        hits = []
+        for record in selected:
+            hit = _semantic_unit_hit(record[0], record[1], bm25_rank=None, bm25_score=None)
+            hit.demoted = superseded[id(record)]
+            hits.append(hit)
         if retrieval_trace is not None:
             retrieval_trace.record_unit_keyword(
                 selected, status_basis=status_basis, prefer_active=prefer_active
@@ -4278,40 +4505,84 @@ def _find_semantic_units(
         return finish(hits)
 
     vector_hits: list[Any] = []
+    # Vector hits already selected while a dimension deepened the vector window.
+    vector_records: dict[str, tuple[Any, Any, int]] = {}
+    vector_selected: set[str] = set()
+    vector_stale: list[str] = []
     vector_profile: dict[str, Any] = {
         "status": "non_applicable",
         "reason": "requested_mode_keyword",
     }
     if mode in {"hybrid", "vector"}:
         vector_allowed_refs: set[str] | None = None
-        if dnf_clauses is not None:
+        if exact_eligibility:
             # The allow-set is branch-correlated and bounded: it pushes the same
             # DNF clauses down so only rows satisfying a real `(category AND
             # kind)` branch are admitted — never the giant all-unit query under a
             # flattened cross-product filter.
             vector_allowed_refs = {row.unit_ref for row in indexed or ()}
         vector_candidate_limit = (
-            len(vector_allowed_refs) if vector_allowed_refs is not None else candidate_limit + 1
+            len(vector_allowed_refs) if vector_allowed_refs is not None else window + 1
         )
         vector_parent_paths = snapshot.recall_paths(scope)
         if allowed_parent_paths is not None:
             vector_parent_paths = vector_parent_paths & allowed_parent_paths
+        # A dimension's members when the vector lane ranks them alone, else its newest members.
+        member_refs: set[str] | None = None
+        newest_members: list[Any] | None = None
+        members_capped = False
+        if pushed_dimensions:
+            _dimension_parents = proposed_parents()
+            vector_parent_paths = vector_parent_paths & _dimension_parents
+            # With more proposed parents than the bound, an exact member read would follow the dimension's
+            # size, so the lane ranks the parents' units first and reads members only if those fall short.
+            if len(vector_parent_paths) <= bound:
+                # The store checks each proposed unit exactly, so the vector lane can rank the members alone.
+                members, members_capped = newest_members_read()
+                if not members_capped:
+                    member_refs = {row.unit_ref for row in members}
+                    vector_parent_paths = vector_parent_paths & {row.parent_path for row in members}
+                else:
+                    newest_members = members
         if vector_allowed_refs is not None:
             # Public refs are per-reader meanings; their parents bound the rows read.
             vector_parent_paths = vector_parent_paths & {row.parent_path for row in indexed or ()}
-        vector_hits, vector_profile, _indexed_scope = _vector_unit_candidates(
-            vault_root,
-            query=query,
-            candidate_limit=vector_candidate_limit,
-            allowed_unit_refs=vector_allowed_refs,
-            allowed_parent_paths=vector_parent_paths,
-            released_parent_paths=released_parent_paths,
-            degraded_out=degraded_out,
-            failed_out=failed_out,
-            timings=timings,
-            query_vector_provider=query_vector_provider,
-            prepared_queries=prepared_queries,
+
+        def vector_read(allowed_refs: set[str] | None):
+            return _vector_unit_candidates(
+                vault_root,
+                query=query,
+                candidate_limit=vector_candidate_limit,
+                allowed_unit_refs=allowed_refs,
+                allowed_parent_paths=vector_parent_paths,
+                released_parent_paths=released_parent_paths,
+                degraded_out=degraded_out,
+                failed_out=failed_out,
+                timings=timings,
+                query_vector_provider=query_vector_provider,
+                prepared_queries=prepared_queries,
+            )
+
+        vector_hits, vector_profile, _indexed_scope = vector_read(
+            vector_allowed_refs if member_refs is None else member_refs
         )
+        vector_capped = False
+        if pushed_dimensions and member_refs is None and len(vector_hits) > window:
+            fresh = [hit for hit in vector_hits[:window] if hit.unit_ref not in vector_selected]
+            vector_records.update(select(fresh, stale_out=vector_stale))
+            vector_selected.update(hit.unit_ref for hit in fresh)
+            if len(records.keys() | vector_records.keys()) < requested_limit and not vector_stale:
+                # Other units of the proposed parents crowd out the members: rank the newest members.
+                vector_capped = True
+                if newest_members is None:
+                    newest_members, members_capped = newest_members_read()
+                crowded = vector_hits[:window]
+                vector_parent_paths = vector_parent_paths & {row.parent_path for row in newest_members}
+                vector_hits, vector_profile, _indexed_scope = vector_read({row.unit_ref for row in newest_members})
+                seen = {hit.unit_ref for hit in vector_hits[:window]}
+                vector_hits = [*vector_hits[:window], *(hit for hit in crowded if hit.unit_ref not in seen)]
+                # The lane ranked only the members among the newest proposed rows.
+                partial = partial or members_capped
         if (
             vector_allowed_refs is not None
             and {hit.unit_ref for hit in vector_hits} != vector_allowed_refs
@@ -4328,14 +4599,15 @@ def _find_semantic_units(
             _record_degradation("vector")
             if failed_out is not None and "vector" not in failed_out:
                 failed_out.append("vector")
-        elif vector_allowed_refs is None and len(vector_hits) > candidate_limit:
+        elif vector_allowed_refs is None and not vector_capped and len(vector_hits) > window:
             candidate_window_exhausted = True
-            vector_hits = vector_hits[:candidate_limit]
+            vector_hits = vector_hits[:window]
     if vector_hits:
-        stale_vector_refs: list[str] = []
-        records.update(
-            select(vector_hits, stale_out=stale_vector_refs)
-        )
+        stale_vector_refs = list(vector_stale)
+        vector_records.update(select(
+            [hit for hit in vector_hits if hit.unit_ref not in vector_selected], stale_out=stale_vector_refs,
+        ))
+        records.update(vector_records)
         if stale_vector_refs:
             vector_hits = []
             vector_profile = {
@@ -4346,16 +4618,22 @@ def _find_semantic_units(
             _record_degradation("vector")
             if failed_out is not None and "vector" not in failed_out:
                 failed_out.append("vector")
+        if member_refs is not None and member_refs <= {hit.unit_ref for hit in vector_hits}:
+            # The vector lane returned every member, so the lexical scan's stop left none out.
+            partial = False
 
     # Pure vector mode keeps lexical rows cold unless the vector lane could not
     # produce a trustworthy ranking. This avoids reparsing the same candidate
     # parents twice while preserving the deterministic lexical fallback.
-    if mode == "vector" and not vector_hits and indexed:
-        records.update(
-            select(indexed)
-        )
+    if mode == "vector" and not vector_hits:
+        # The lexical rows stand in for the vector lane, with their scan's bound.
+        partial = partial or lexical_capped
+        if indexed:
+            records.update(select(indexed))
 
     if not records:
+        if candidate_window_exhausted and pushed_dimensions and limit is not None:
+            return widen()
         if candidate_window_exhausted and _candidate_window is None and failed_out is not None:
             failed_out.append("semantic_units_candidate_window")
             _record_degradation("semantic_units_candidate_window")
@@ -4484,6 +4762,8 @@ def _find_semantic_units(
 
     if limit is not None:
         final_ranking = final_ranking[:limit]
+    if candidate_window_exhausted and pushed_dimensions and limit is not None and len(final_ranking) < limit:
+        return widen()
     if (candidate_window_exhausted and _candidate_window is None
             and (limit is None or len(final_ranking) < limit)):
         if failed_out is not None:
@@ -5137,7 +5417,26 @@ def _dimension_edges(
     A restricted caller's re-derived links resolve with the request's resolver
     (`_request_resolver`).
     """
-    from . import epistemic_graph
+    from . import call_spans, epistemic_graph, lexstore
+
+    if lexstore.store_catalogue() and pages is not None:
+        import sqlite3
+
+        from .vault_store import read as store_read
+        from .vocabulary.registry import RegistryError
+
+        conn = store_read.lend(vault_root)
+        try:
+            with call_spans.span("dimension.display", {"pages": len(pages)}):
+                return epistemic_dimensions.DimensionEdges("available", tuple(epistemic_graph.stored_family_edges(
+                    vault_root, conn, pages, lookups, keep=keep, behaviours=behaviours,
+                )))
+        except (RetrievalIndexWarming, RegistryError, sqlite3.Error, TimeoutError):
+            # Stored eligibility already checked its required edges; optional display keeps an unknown outcome.
+            return epistemic_dimensions.DimensionEdges("temporarily_unavailable")
+        finally:
+            if conn is not None:
+                conn.close()
 
     edges = epistemic_dimensions.read_edges(
         vault_root,
@@ -5169,31 +5468,31 @@ def _managed_dimension_plan(
     lookups: epistemic_dimensions.DimensionMembership,
     *,
     result_level: str,
+    stored: bool = False,
 ) -> tuple[structured_filters.FilterPlan, structured_filters.FilterPlan | None]:
     """A managed reader's `unit.dimension`: the plan its index answers, and the predicates it
     checks on its hits.
 
-    A dimension whose members the index can answer is rewritten into indexed fields, anywhere in
-    the plan. Every other dimension is checked on the hits, which needs its predicate at the top
-    level of the plan and unit results; anything else is refused by field, never scanned.
+    Stored dimensions keep indexed proposals and exact selected predicates anywhere in the plan.
+    File-mode edge dimensions retain their check on unit hits, with only top-level predicates supported.
     """
     from . import semantic_labels
 
     expressions = {}
     for key, members in lookups.members.items():
-        if members.get("families"):
+        if members.get("families") and not stored:
             continue
         kinds = members.get("kinds", ())
         expression = structured_filters.membership_expression(
             kinds=[kind for kind in kinds if kind != semantic_labels.ALL_KINDS],
             every_kind=semantic_labels.ALL_KINDS in kinds,
             keys=members.get("keys", ()),
+            families=members.get("families", ()) if stored else (),
         )
         if expression is not None:
             expressions[key] = expression
-    split = structured_filters.split_checked_dimensions(
-        structured_filters.rewrite_dimensions(plan, expressions)
-    )
+    edge_dimensions = set(lookups.members) - set(expressions)
+    split = structured_filters.split_checked_dimensions(plan, only=edge_dimensions)
     if split.nested:
         raise structured_filters.FilterError(
             "UNSUPPORTED_FILTER_FIELD",
@@ -5216,7 +5515,13 @@ def _managed_dimension_plan(
             expected='result_level "unit" or "auto"',
             remediation='Search with result_level "unit" or "auto" to filter units by this dimension.',
         )
-    return split.index, split.checked
+    selected = split.index
+    if structured_filters.named_dimensions(selected):
+        selected = selected.with_dimensions(
+            epistemic_dimensions.UnitDimensions.from_edges(lookups, ()),
+            index_expressions=expressions,
+        )
+    return selected, split.checked
 
 
 def _check_dimensions_on_hits(
@@ -5282,6 +5587,7 @@ def _group_request(
     language: Any,
     instance: str,
     status_basis: lifecycle_statuses.Basis,
+    restricted: bool = False,
 ) -> dimension_display.GroupRequest:
     """What `dimension_display.group_hits` reads of a search's selected units: for each unit, by
     its ref, what its display reads and which requested `groups` it belongs to.
@@ -5299,6 +5605,12 @@ def _group_request(
         own_kind = not structured_filters.foreign_entry("unit.kind", view.get("kind"), view, instance)
         frontmatter = hit.frontmatter if isinstance(hit, _UnitCandidate) else None
         status = frontmatter.get("status") if frontmatter is not None else hit.parent_status
+        holder = getattr(hit, "asserted_by", None) or getattr(hit, "credence_holder", None)
+        if restricted and holder:
+            from .governance import egress
+
+            # Optional metadata never makes unit selection depend on a linked page's existence or release.
+            holder = egress.project_holder(holder, restricted=True)
         unit = dimension_display.DisplayUnit(
             ref=hit.unit_ref,
             path=path,
@@ -5308,7 +5620,7 @@ def _group_request(
             historical=dimension_display.page_is_history(
                 status_basis, status, path=path, frontmatter=frontmatter
             ),
-            holder=getattr(hit, "asserted_by", None) or getattr(hit, "credence_holder", None),
+            holder=holder,
             occurred_at=getattr(hit, "occurred_at", None),
         )
         units[hit.unit_ref] = (unit, dimensions({"path": path}, view, own_kind=own_kind) & wanted)
@@ -5598,11 +5910,13 @@ def _reusable_eligible_filter_paths(
     admission after this, so a set computed for one caller never widens another's. A reused set is
     the cached frozenset itself, so callers read it and never change it. A plan with a
     unit predicate is resolved every time, because its units follow a selected interpretation that
-    no identity in the proof names.
+    no identity in the proof names. So is a plan that carries a dimension source: the source is not
+    part of the plan's identity (`FilterPlan.to_dict`), and the values it serves follow inputs the
+    proof does not name.
     """
     # A plan gated for a caller who may not see positions answers differently from the same plan ungated, and the
     # cache key does not carry the gate, so a gated plan neither reads nor fills the cache.
-    if plan.has_unit_predicate or plan.position_withheld:
+    if plan.has_unit_predicate or plan.position_withheld or plan.dimensions is not None:
         return _managed_eligible_filter_paths(vault_root, scope=scope, plan=plan, snapshot=snapshot)
     proof = _eligibility_proof(vault_root, scope, snapshot)
     if proof is None:
@@ -5750,16 +6064,17 @@ def _managed_page_metadata(
                         if include_occurrences:
                             selected_by_key = {unit.occurrence_key: unit for unit in parent.structure.units}
                             values = []
-                            for order, raw in enumerate(semantic_units.candidate_units(state.candidates)):
-                                key = semantic_units.occurrence_key(raw.form, raw.span, raw.source_hash)
+                            candidates = semantic_units.candidate_units(state.candidates)
+                            for raw, built in zip(candidates, unit_rows.build(rel, state, candidates=candidates), strict=True):
+                                key = built.occurrence_key
                                 selected_unit = selected_by_key.get(key)
                                 if selected_unit is None or selected_unit.unit_ref is None:
                                     continue
                                 row = (
-                                    key, rel, state.parent_ref, state.parent_generation, state.parent_source_hash,
-                                    state.parser_version, raw.form, raw.category_raw, raw.category_key, raw.content,
-                                    json.dumps(raw.tags), raw.context, raw.source_hash, raw.anchor,
-                                    raw.line, raw.end_line, order,
+                                    key, built.path, built.parent_ref, built.parent_generation, built.parent_source_hash,
+                                    built.parser_version, built.form, built.category_raw, built.category_key, built.content,
+                                    built.tags_json, built.context, built.unit_source_hash, built.anchor,
+                                    built.line, built.end_line, built.ordinal,
                                     # `lexstore._OCCURRENCE_COLUMNS` order; the stored page date the index keeps.
                                     page.updated or lexstore.UNDATED,
                                 )
@@ -5839,6 +6154,8 @@ def _metadata_eligible_filter_paths(
     `emitted_as` is the caller's `_emission_rule` over the same `metadata`, so a caller that also
     groups rows by it admits each row once.
     """
+    if hasattr(plan.dimensions, "prepare"):
+        plan.dimensions.prepare({*candidate_parent_paths, *(row.parent for row in metadata.values() if row.parent)})
     eligible: set[str] = set()
     matches: dict[str, bool] = {}
     for rel in candidate_parent_paths:
@@ -8679,6 +8996,8 @@ _QUERY_RESOLVER_REBUILDS: set[Path] = set()
 #: Vaults with an inbound-index background build running; same lock as above.
 _INBOUND_INDEX_REBUILDS: set[Path] = set()
 _TOMBSTONE_PROOF_REBUILDS: set[Path] = set()
+#: Vaults with a background corpus warm running for a Records query's link index; same lock as above.
+_LINK_INDEX_WARMS: set[Path] = set()
 
 
 def _follower_wait_seconds(*, allow_fallback: bool) -> float:
@@ -8793,6 +9112,20 @@ def schedule_tombstone_proof_warm(vault_root: Path, *, stop: threading.Event) ->
     )
 
 
+def schedule_link_index_warm(vault_root: Path) -> bool:
+    """Warm the corpus whose published generation a Records query borrows for its links.
+
+    The owner that publishes the link index a query found absent or behind
+    (`semantic_contract.link_corpus_coming`). The query never waits for this build. Returns whether a
+    warm now runs, started here or already running; with warms turned off, none ever will.
+    """
+    from . import semantic_contract
+
+    return _schedule_resolver_warm(
+        vault_root, _LINK_INDEX_WARMS, semantic_contract.warm_corpus_context, "exomem-link-index-warm",
+    )
+
+
 def _schedule_resolver_warm(
     root: Path,
     inflight: set[Path],
@@ -8800,14 +9133,17 @@ def _schedule_resolver_warm(
     thread_name: str,
     *,
     stop: threading.Event | None = None,
-) -> None:
-    """Run `build(root)` once on a daemon thread, unless one already runs in `inflight`."""
+) -> bool:
+    """Run `build(root)` once on a daemon thread, unless one already runs in `inflight`.
+
+    Returns whether a build now runs for `root`.
+    """
     if os.environ.get("EXOMEM_DISABLE_RESOLVER_WARM"):
-        return
+        return False
     key = Path(root)
     with _RECALL_REBUILD_LOCK:
         if key in inflight:
-            return
+            return True
         inflight.add(key)
 
     def _run() -> None:
@@ -8832,6 +9168,8 @@ def _schedule_resolver_warm(
     except RuntimeError:
         with _RECALL_REBUILD_LOCK:
             inflight.discard(key)
+        return False
+    return True
 
 
 def await_recall_resolver_warm(timeout: float = 30.0) -> bool:
@@ -8851,6 +9189,7 @@ def await_recall_resolver_warm(timeout: float = 30.0) -> bool:
                 _RECALL_RESOLVER_REBUILDS
                 or _QUERY_RESOLVER_REBUILDS
                 or _INBOUND_INDEX_REBUILDS
+                or _LINK_INDEX_WARMS
             ):
                 return True
         if time.monotonic() >= deadline:

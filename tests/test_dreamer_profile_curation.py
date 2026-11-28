@@ -34,6 +34,7 @@ from exomem.writer_lease import invoke_command
 KB = fx.KB
 PROFILE = f"{KB}/Notes/Profiles/games.md"
 GLOBAL_PROFILE = f"{KB}/Notes/Profiles/global.md"
+BOARD_PROFILE = f"{KB}/Notes/Profiles/board-games.md"
 SESSIONS = f"{KB}/Notes/Insights/games-sessions.md"
 DETAIL = f"{KB}/Notes/Insights/games-detail.md"
 ELSEWHERE = f"{KB}/Notes/Insights/travel-habits.md"
@@ -142,6 +143,15 @@ def test_a_new_preference_on_a_page_of_a_descendant_domain_raises_one_item(tmp_p
         "tool": "edit_note",
         "args": {"path": PROFILE, "operation": {"kind": "replace_string", "validate_only": True}},
     }
+
+
+def test_a_narrower_profile_saved_after_its_ancestor_raises_nothing_for_the_ancestor(tmp_path: Path) -> None:
+    vault = _vault(tmp_path, links=f"[[{Path(BOARD_PROFILE).stem}]]")
+
+    fx.edit(vault, BOARD_PROFILE, _profile(topics="board-games", lines="- [preference] Prefer co-op games. ^coop\n", updated="2026-07-01"))
+    _quiet(vault)
+
+    assert _open(vault) is None
 
 
 def _served(vault: Path, keep=None) -> dict | None:
@@ -339,6 +349,20 @@ def test_a_preference_saved_later_on_the_profiles_own_day_raises_the_item(tmp_pa
     assert _open(vault) is None
 
     fx.edit(vault, SESSIONS, _note("Games sessions", "- [preference] Prefer short sessions. ^brief\n", updated="2026-06-01T15:00:00Z", topics="games"))
+    _quiet(vault)
+
+    row = _open(vault)
+    assert row is not None
+    assert {item["path"] for item in row["evidence"] if item["role"] == "unit"} == {SESSIONS}
+
+
+def test_a_preference_on_a_page_dated_only_by_the_profiles_day_raises_the_item(tmp_path: Path) -> None:
+    vault = fx.build(tmp_path)
+    fx.write(vault, f"{KB}/_Schema/source-taxonomy.yaml", TAXONOMY)
+    fx.edit(vault, PROFILE, _profile(topics="games", updated="2026-06-01T09:00:00Z"))
+    _quiet(vault)
+
+    fx.edit(vault, SESSIONS, _note("Games sessions", "- [preference] Prefer short sessions. ^brief\n", updated="2026-06-01", topics="games"))
     _quiet(vault)
 
     row = _open(vault)

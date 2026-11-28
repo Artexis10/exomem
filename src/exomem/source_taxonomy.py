@@ -187,6 +187,10 @@ class Definition:
     replaced_by: str | None = None
     builtin: bool = False
     requires_url: bool = False
+    #: Sensitivity class keys (kinds only) that a Source or Evidence capture of this kind takes when
+    #: it declares none. A vault declares them; the shipped kinds declare none. A capture applies
+    #: only the keys that the `sensitivity-classes` registry holds, and skips the rest.
+    sensitivity: tuple[str, ...] = ()
     #: The domain this one sits under (domains only): its profile is served after this domain's own.
     parent: str | None = None
 
@@ -209,6 +213,8 @@ class Definition:
             out["builtin"] = True
         if self.requires_url:
             out["requires_url"] = True
+        if self.sensitivity:
+            out["sensitivity"] = list(self.sensitivity)
         return out
 
 
@@ -237,6 +243,11 @@ class Resolution:
     @property
     def requires_url(self) -> bool:
         return bool(self.definition and self.definition.requires_url)
+
+    @property
+    def sensitivity(self) -> tuple[str, ...]:
+        """The sensitivity class keys this kind gives a capture that declares none."""
+        return self.definition.sensitivity if self.definition else ()
 
     def as_dict(self) -> dict[str, object]:
         out: dict[str, object] = {
@@ -741,6 +752,10 @@ def _definition_from_entry(
     requires_url = entry.get("requires_url")
     if requires_url is None:
         requires_url = bool(existing.requires_url) if existing else False
+    sensitivity = existing.sensitivity if existing else ()
+    if axis == "source_kind" and "sensitivity" in entry:
+        declared = _string_list(entry["sensitivity"])
+        sensitivity = tuple(dict.fromkeys(item.strip() for item in declared))
     parent = existing.parent if existing else None
     if axis == "domain" and entry.get("parent"):
         try:
@@ -759,6 +774,7 @@ def _definition_from_entry(
         else (existing.replaced_by if existing else None),
         builtin=bool(existing.builtin) if existing else False,
         requires_url=bool(requires_url),
+        sensitivity=sensitivity,
         parent=parent,
     )
 
@@ -875,7 +891,8 @@ _BOOTSTRAP_HEADER = f"""\
 # displayed or where it is filed.
 #
 # Per entry: label (display), path_label (the Sources/ directory segment),
-# description, aliases, status (active|deprecated), replaced_by, requires_url.
+# description, aliases, status (active|deprecated), replaced_by, requires_url, and for a kind
+# `sensitivity`: the sensitivity class keys a capture of that kind takes when it declares none.
 schema_version: {SCHEMA_VERSION}
 {_KIND_SECTION}: {{}}
 {_DOMAIN_SECTION}: {{}}
@@ -1105,7 +1122,7 @@ def _insert_in_section(text: str, section: str, entry: Sequence[str]) -> str:
         return text[:line_start] + block(first.column) + text[line_start:]
     raise vocabulary_registry.RegistryError(
         f"INVALID_REGISTRY_OVERLAY: `{section}` in {_REGISTRY_FILENAME} is not a block "
-        f"mapping; write `{section}:` followed by indented entries so exomem can add to "
+        f"mapping; write `{section}:` followed by indented entries so Evermatter can add to "
         "it and keep your comments"
     )
 
@@ -1162,6 +1179,8 @@ class _Adapter:
             attributes: dict[str, Any] = {"path_label": definition.path_label}
             if definition.requires_url:
                 attributes["requires_url"] = True
+            if definition.sensitivity:
+                attributes["sensitivity"] = list(definition.sensitivity)
             out[key] = vocabulary_registry.Entry(
                 key=key,
                 label=definition.label,
@@ -1229,6 +1248,8 @@ class _Adapter:
             row["parent"] = entry.parent
         if entry.attributes.get("requires_url"):
             row["requires_url"] = True
+        if entry.attributes.get("sensitivity"):
+            row["sensitivity"] = list(entry.attributes["sensitivity"])
         document[self.section][key] = row
 
     def remove(self, document: dict[str, Any], key: str) -> None:
@@ -1279,8 +1300,9 @@ KIND_SPEC = vocabulary_registry.RegistrySpec(
     overlay=registry_path,
     adapter=_Adapter("source_kind", _KIND_SECTION),
     fields=_LABEL_FIELDS,
-    attributes=frozenset({"path_label", "requires_url"}),
-    # Captured sources keep their path; moving a kind's folder is not a relabel.
+    attributes=frozenset({"path_label", "requires_url", "sensitivity"}),
+    # Captured sources keep their path; moving a kind's folder is not a relabel. A kind's default
+    # sensitivity stays editable: it applies to later captures only.
     immutable=frozenset({"attributes.path_label", "attributes.requires_url"}),
     promotion="auto-register",
     cap=512,

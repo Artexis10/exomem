@@ -9,6 +9,7 @@ from exomem import (
     activation_manifest,
     capabilities,
     commands,
+    freshness,
     index_paths,
     index_sync,
     lexstore,
@@ -16,6 +17,7 @@ from exomem import (
     observe_memory,
     provenance,
     reconcile,
+    semantic_contract,
     semantic_index,
     semantic_language_registry,
     vault,
@@ -86,6 +88,216 @@ def _page_hash(page: Path) -> str:
     with this one on an LF page.
     """
     return vault.content_hash(page.read_bytes().decode("utf-8"))
+
+
+def test_dated_and_compact_observations_share_a_section_before_references(tmp_path: Path) -> None:
+    page = _write_page(tmp_path, source=_page_source(
+        "# Observe\n\n## Observations\n\n- [rule] Earlier fact ^earlier\n\n"
+        "## References\n\nRead the log."
+    ))
+    commands.op_observe_memory(
+        tmp_path, path=PAGE, category="rule",
+        content="The service settled.\n\n```md\n### Example\n```",
+        as_of="2026-11-25",
+    )
+    commands.op_observe_memory(tmp_path, path=PAGE, category="rule", content="Later fact")
+    units = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    dated = next(unit for unit in units if unit.as_of)
+
+    commands.op_observe_memory(
+        tmp_path, path=PAGE, operation="assess", unit_ref=dated.unit_ref,
+        expected_fingerprint=dated.fingerprint, expected_hash=_page_hash(page),
+        relations=[{"kind": "supports", "target": "#earlier"}],
+    )
+
+    source = page.read_text(encoding="utf-8")
+    assert source.index("Earlier fact") < source.index("Later fact")
+    assert source.index("Later fact") < source.index("\n### Record\n")
+    assert source.endswith("## References\n\nRead the log.\n")
+    units = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    assert [unit.form for unit in units] == ["compact", "compact", "rich"]
+    assert (units[-1].anchor, units[-1].level, units[-1].as_of) == (dated.anchor, 3, "2026-11-25")
+    assert any(edge.kind == "supports" for edge in units[-1].relations)
+
+
+@pytest.mark.parametrize("following", [
+    "An introduction.\n\n  ## References\n\nRead the log.",
+    "References\n----------\n\nRead the log.",
+    "## Observations\n\n- [rule] Second copy ^second",
+])
+def test_an_ambiguous_observation_boundary_uses_the_end_of_the_note(
+    tmp_path: Path, following: str,
+) -> None:
+    page = _write_page(tmp_path, source=_page_source(
+        f"# Observe\n\n## Observations\n\n- [rule] Earlier fact ^earlier\n\n{following}"
+    ))
+    before = page.read_text(encoding="utf-8").split("# Observe", 1)[1]
+
+    result = commands.op_observe_memory(
+        tmp_path, path=PAGE, category="rule", content="Dated fact", as_of="2026-11-25",
+    )
+
+    after = page.read_text(encoding="utf-8").split("# Observe", 1)[1]
+    assert after.startswith(before + "\n## Record\n")
+    assert result["outcome"] == "Saved with its date. The observation is at the end of the note."
+
+
+def test_a_rich_kind_with_the_observations_heading_keeps_its_own_body(tmp_path: Path) -> None:
+    page = _write_page(
+        tmp_path, source=_page_source("# Observe\n\n## Observations\n\nAuthored report."),
+    )
+    overlay = semantic_language_registry.registry_path(tmp_path)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(
+        "schema_version: 1\nkinds:\n  observations:\n"
+        "    description: A custom report.\n    labels: {en: Observations}\n",
+        encoding="utf-8",
+    )
+
+    result = commands.op_observe_memory(
+        tmp_path, path=PAGE, category="rule", content="Dated fact", as_of="2026-11-25",
+    )
+
+    source = page.read_text(encoding="utf-8")
+    units = semantic_index.selected_parent_index_state(tmp_path, PAGE, source=source).document.units
+    assert [(unit.kind, unit.content) for unit in units] == [
+        ("observations", "Authored report."), ("record", "Dated fact"),
+    ]
+    assert "Authored report.\n\n## Record\n" in source
+    assert "The observation is at the end of the note." in result["outcome"]
+
+
+def test_edit_moves_a_nested_record_to_keep_its_markdown_and_anchor(tmp_path: Path) -> None:
+    page = _write_page(tmp_path, source=_page_source(
+        "# Observe\n\n## Observations\n\n### Record\n- id: dated\n- category: rule\n"
+        "- as_of: 2026-11-25\n\nFirst account.\n\n## References\n\nRead the log."
+    ))
+    unit, = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    content = "Updated account.\n\n### Supporting detail\n\nThe log agrees."
+
+    result = commands.op_observe_memory(
+        tmp_path, path=PAGE, operation="update", category="rule", content=content,
+        unit_ref=unit.unit_ref,
+        expected_fingerprint=unit.fingerprint, expected_hash=_page_hash(page),
+    )
+
+    updated, = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    assert (updated.anchor, updated.level, updated.content) == ("dated", 2, content)
+    assert "Read the log.\n\n## Record\n" in page.read_text(encoding="utf-8")
+    assert result["outcome"] == "The observation is at the end of the note."
+
+
+def test_converting_a_dated_record_to_compact_keeps_it_above_child_headings(tmp_path: Path) -> None:
+    page = _write_page(tmp_path, source=_page_source(
+        "# Observe\n\n## Observations\n\n- [rule] Earlier fact ^earlier\n\n"
+        "### Record\n- id: dated\n- category: rule\n- as_of: 2026-11-25\n\nAccount.\n\n"
+        "### Background\n\nFrom the log.\n\n## References\n\nRead the log."
+    ))
+    units = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    dated = next(unit for unit in units if unit.anchor == "dated")
+
+    commands.op_observe_memory(
+        tmp_path, path=PAGE, operation="update", kind="observation", category="rule",
+        content="Account.", as_of="", unit_ref=dated.unit_ref,
+        expected_fingerprint=dated.fingerprint, expected_hash=_page_hash(page),
+    )
+
+    assert "- [rule] Account. ^dated\n\n### Background\n" in page.read_text(encoding="utf-8")
+    units = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    assert [(unit.form, unit.anchor) for unit in units] == [
+        ("compact", "earlier"), ("compact", "dated"),
+    ]
+
+
+@pytest.mark.parametrize(("operation", "heading", "changes"), [
+    ("update", "  ## References", {"category": "rule", "content": "Updated account."}),
+    ("remove", "References\n----------", {}),
+    (
+        "assess", "References\n----------",
+        {"relations": [{"kind": "supports", "target": "#earlier"}]},
+    ),
+])
+def test_edit_cannot_touch_a_following_section_that_the_reader_included_in_a_record(
+    tmp_path: Path, operation: str, heading: str, changes: dict,
+) -> None:
+    page = _write_page(tmp_path, source=_page_source(
+        "# Observe\n\n## Observations\n\n- [rule] Earlier fact ^earlier\n\n"
+        "### Record\n- id: dated\n- category: rule\n- as_of: 2026-11-25\n\n"
+        f"Account.\n\n{heading}\n\nMust remain."
+    ))
+    units = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    dated = next(unit for unit in units if unit.anchor == "dated")
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="AMBIGUOUS_SEMANTIC_UNIT_CONTENT.*section boundary"):
+        commands.op_observe_memory(
+            tmp_path, path=PAGE, operation=operation, unit_ref=dated.unit_ref,
+            expected_fingerprint=dated.fingerprint, expected_hash=_page_hash(page), **changes,
+        )
+
+    assert page.read_bytes() == before
+
+
+@pytest.mark.parametrize(("body", "content", "error"), [
+    (
+        "# Observe\n\n## Observations", "Account.\n\n## Details\n\nKeep this.",
+        "AMBIGUOUS_SEMANTIC_UNIT_CONTENT",
+    ),
+    ("# Observe\n\n## Observations\n\n```md\nOpen example.", "Account.", "INVALID_SEMANTIC_UNIT"),
+    ("# Observe\n\n## Observations\n\n<!-- Open comment.", "Account.", "INVALID_SEMANTIC_UNIT"),
+])
+def test_no_dated_placement_writes_a_partial_record(
+    tmp_path: Path, body: str, content: str, error: str,
+) -> None:
+    page = _write_page(tmp_path, source=_page_source(body))
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match=error):
+        commands.op_observe_memory(
+            tmp_path, path=PAGE, category="rule", content=content, as_of="2026-11-25",
+        )
+
+    assert page.read_bytes() == before
+
+
+def test_edit_refuses_if_an_unfinished_comment_hides_the_existing_record(tmp_path: Path) -> None:
+    page = _write_page(tmp_path, source=_page_source(
+        "# Observe\n\n## Observations\n\n<!-- Open comment.\n\n"
+        "### Record\n- id: dated\n- category: rule\n- as_of: 2026-11-25\n\nAccount."
+    ))
+    dated, = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="INVALID_SEMANTIC_UNIT.*hides the record heading"):
+        commands.op_observe_memory(
+            tmp_path, path=PAGE, operation="update", category="rule", content="Updated account.",
+            unit_ref=dated.unit_ref, expected_fingerprint=dated.fingerprint,
+            expected_hash=_page_hash(page),
+        )
+
+    assert page.read_bytes() == before
+
+
+def test_an_old_dated_preview_cannot_write_the_new_structure(tmp_path: Path, monkeypatch) -> None:
+    page = _write_page(tmp_path)
+    before = page.read_bytes()
+    proposal = {"path": PAGE, "category": "rule", "content": "Dated fact", "as_of": "2026-11-25"}
+    with monkeypatch.context() as old_placement:
+        old_placement.setattr(observe_memory, "_place_dated_block", lambda *_: None)
+        preview = commands.op_observe_memory(tmp_path, **proposal, operation="validate")
+
+    with pytest.raises(ValueError, match="LIFECYCLE_TRANSITION_MISMATCH"):
+        commands.op_observe_memory(
+            tmp_path, **proposal, transition_token=preview["semantic"]["transition_token"],
+        )
+    assert page.read_bytes() == before
+
+    fresh = commands.op_observe_memory(tmp_path, **proposal, operation="validate")
+    committed = commands.op_observe_memory(
+        tmp_path, **proposal, transition_token=fresh["semantic"]["transition_token"],
+    )
+    assert committed["after_hash"] == fresh["after_hash"] == _page_hash(page)
+    assert "\n## Observations\n\n### Record\n" in page.read_text(encoding="utf-8")
 
 
 def _origin_block(root: Path, scope: dict) -> str:
@@ -529,6 +741,255 @@ def test_anonymous_duplicate_selection_is_occurrence_exact(tmp_path: Path) -> No
     assert source.count("- [rule] Same") == 1
     assert source.count("- [rule] Second only") == 1
     assert "- [rule] Tail" in source
+
+
+def _write_source_page(
+    root: Path, rel: str = "Knowledge Base/Sources/applied-export.md",
+) -> Path:
+    stem = Path(rel).stem
+    return _write_page(
+        root,
+        rel=rel,
+        source=(
+            "---\n"
+            "type: source\n"
+            f"exomem_id: {uuid.uuid4()}\n"
+            "---\n\n"
+            f"# {stem.replace('-', ' ').title()}\n\nFinal numbers.\n"
+        ),
+    )
+
+
+def test_a_compact_observation_lifts_a_provenance_relation_to_the_page(
+    tmp_path: Path,
+) -> None:
+    _write_source_page(tmp_path)
+    page = _write_page(tmp_path)
+    unwritten = page.read_bytes()
+
+    preview = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="validate",
+        category="config",
+        content="The applied export holds the five-minute value.",
+        relations=[{"kind": "derived_from", "target": "applied-export"}],
+    )
+
+    assert page.read_bytes() == unwritten
+    assert preview["mutated"] is False
+    assert "Cited" not in preview["outcome"]
+
+    result = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="add",
+        category="config",
+        content="The applied export holds the five-minute value.",
+        relations=[{"kind": "derived_from", "target": "applied-export"}],
+    )
+
+    text = page.read_text(encoding="utf-8")
+    assert "- [config] The applied export holds the five-minute value." in text
+    frontmatter, _, _ = vault.parse_frontmatter(text)
+    assert frontmatter["sources"] == ["[[Knowledge Base/Sources/applied-export]]"]
+    assert result["relations_cited"] == ["Knowledge Base/Sources/applied-export"]
+    assert "applied-export" in result["outcome"]
+
+    again = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="add",
+        category="config",
+        content="A second reading of the same export.",
+        relations=[{"kind": "derived_from", "target": "applied-export"}],
+    )
+    assert "applied-export" in again["outcome"]
+    frontmatter, _, _ = vault.parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert frontmatter["sources"] == ["[[Knowledge Base/Sources/applied-export]]"]
+
+
+def test_a_compact_observation_keeps_existing_page_sources(tmp_path: Path) -> None:
+    _write_source_page(tmp_path)
+    _write_source_page(tmp_path, rel="Knowledge Base/Sources/earlier-brief.md")
+    page = _write_page(
+        tmp_path,
+        source=_page_source("# Observe\n\nExisting prose.\n").replace(
+            "updated: 2026-07-15\n",
+            'updated: 2026-07-15\nsources:\n  - "[[Knowledge Base/Sources/earlier-brief]]"\n',
+        ),
+    )
+
+    commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="add",
+        category="config",
+        content="The export applies on top of the brief.",
+        relations=[{"kind": "derived_from", "target": "applied-export"}],
+    )
+
+    frontmatter, _, _ = vault.parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert frontmatter["sources"] == [
+        "[[Knowledge Base/Sources/earlier-brief]]",
+        "[[Knowledge Base/Sources/applied-export]]",
+    ]
+
+
+@pytest.mark.parametrize("kind", ["supersedes", "cites", "evidenced_by"])
+def test_a_compact_observation_refuses_a_relation_that_is_no_page_source_field(
+    tmp_path: Path, kind: str,
+) -> None:
+    """`supersedes` is no citation; `cites` has no page field.
+
+    `evidenced_by` binds another field.
+    """
+    _write_source_page(tmp_path)
+    page = _write_page(tmp_path)
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="COMPACT_RELATIONS_REQUIRE_RICH_KIND"):
+        commands.op_observe_memory(
+            tmp_path,
+            path=PAGE,
+            operation="add",
+            category="config",
+            content="Typed relation needs rich form",
+            relations=[{"kind": kind, "target": "applied-export"}],
+        )
+
+    assert page.read_bytes() == before
+
+
+def test_a_compact_observation_refuses_a_mixed_call_whole(tmp_path: Path) -> None:
+    _write_source_page(tmp_path)
+    page = _write_page(tmp_path)
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="COMPACT_RELATIONS_REQUIRE_RICH_KIND"):
+        commands.op_observe_memory(
+            tmp_path,
+            path=PAGE,
+            operation="add",
+            category="config",
+            content="One liftable, one not",
+            relations=[
+                {"kind": "derived_from", "target": "applied-export"},
+                {"kind": "supersedes", "target": "applied-export"},
+            ],
+        )
+
+    assert page.read_bytes() == before
+    frontmatter, _, _ = vault.parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert frontmatter.get("sources") is None
+
+
+def test_a_compact_source_link_to_a_note_that_is_no_captured_material_asks_for_the_rich_form(
+    tmp_path: Path,
+) -> None:
+    """Catches a refusal that tells the agent to drop a link the rich form would accept."""
+    page = _write_page(tmp_path)
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="COMPACT_RELATIONS_REQUIRE_RICH_KIND"):
+        commands.op_observe_memory(
+            tmp_path,
+            path=PAGE,
+            operation="add",
+            category="config",
+            content="Derived from another note",
+            relations=[{"kind": "derived_from", "target": "[[Observe]]"}],
+        )
+
+    assert page.read_bytes() == before
+
+
+def test_a_rich_unit_edited_without_its_kind_keeps_its_source_relation_on_the_unit(
+    tmp_path: Path,
+) -> None:
+    """Catches an edit that omits `kind` lifting a rich unit's relation off the unit."""
+    _write_source_page(tmp_path)
+    page = _write_page(
+        tmp_path,
+        source=_page_source(
+            "## Claim\n- category: rule\n- id: claim-one\n"
+            "- relations: derived_from: [[Knowledge Base/Sources/applied-export]]\n\n"
+            "Current claim.\n"
+        ),
+    )
+    unit = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units[0]
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="COMPACT_RELATIONS_REQUIRE_RICH_KIND"):
+        commands.op_observe_memory(
+            tmp_path,
+            path=PAGE,
+            operation="update",
+            unit_ref=unit.unit_ref,
+            expected_fingerprint=unit.fingerprint,
+            expected_hash=_page_hash(page),
+            category="rule",
+            content="Changed claim.",
+            relations=[{"kind": "derived_from", "target": "applied-export"}],
+        )
+
+    assert page.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        "[[applied-export]]",
+        "[[Knowledge Base/Sources/applied-export|the export]]",
+        "{ref}",
+    ],
+)
+def test_a_compact_observation_does_not_cite_a_source_the_page_already_cites_in_another_form(
+    tmp_path: Path, existing: str,
+) -> None:
+    source_page = _write_source_page(tmp_path)
+    existing = existing.format(
+        ref=memory_refs.ref_from_markdown(source_page.read_text(encoding="utf-8"))
+    )
+    page = _write_page(
+        tmp_path,
+        source=_page_source("# Observe\n\nExisting prose.\n").replace(
+            "updated: 2026-07-15\n", f'updated: 2026-07-15\nsources:\n  - "{existing}"\n',
+        ),
+    )
+
+    commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="add",
+        category="config",
+        content="Another reading of the same export.",
+        relations=[{"kind": "derived_from", "target": "applied-export"}],
+    )
+
+    frontmatter, _, _ = vault.parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert frontmatter["sources"] == [existing]
+
+
+def test_the_hosted_add_summary_says_which_source_the_page_now_cites(tmp_path: Path) -> None:
+    """Catches the cited-Source sentence living in the raw result.
+
+    The agent's reply must carry it too.
+    """
+    from exomem import writer_lease
+
+    _write_source_page(tmp_path)
+    _write_page(tmp_path)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "observe_memory")
+
+    with request_scope(owner_principal(surface="cli")):
+        result = writer_lease.invoke_command(
+            command, tmp_path, path=PAGE, operation="add", category="config",
+            content="The applied export holds the five-minute value.",
+            relations=[{"kind": "derived_from", "target": "applied-export"}],
+        )
+
+    assert "Knowledge Base/Sources/applied-export" in result["user_summary"]
 
 
 def test_rich_authoring_and_compact_relation_rejection(tmp_path: Path) -> None:
@@ -998,6 +1459,183 @@ def test_observe_accepts_parent_memory_reference(tmp_path: Path) -> None:
 
     assert result["path"] == PAGE
     assert result["unit_ref"].startswith(f"exomem://memory/{PAGE_ID}#")
+
+
+def test_a_ref_addressed_add_with_compact_metadata_is_refused_without_a_vault_walk(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A starved serving host spent minutes finding the page of a write its arguments refuse.
+
+    The arguments alone decide this refusal, so the call refuses before it looks the page up.
+    A current identity projection still names the page, so the reply keeps the page's kinds.
+    """
+    _write_page(tmp_path)
+    ref = f"exomem://memory/{uuid.UUID(PAGE_ID)}"
+    arguments = {
+        "operation": "add",
+        "category": "rule",
+        "content": "A rule to revisit",
+        "check_by": "2026-07-01",
+    }
+    # The refusal as `observe_memory` words it once it has read the page.
+    with pytest.raises(observe_memory.ObserveMemoryError) as after_page_read:
+        observe_memory.observe_memory(tmp_path, path=PAGE, **arguments)
+    expected = str(after_page_read.value.leaf_error())
+    assert expected.startswith("COMPACT_METADATA_REQUIRES_RICH_KIND: ")
+
+    def no_walk(*_args: object) -> list:
+        raise AssertionError("a refusal its arguments decide must not walk the vault")
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", no_walk)
+    monkeypatch.setattr(memory_refs.ReferenceIndex, "_scan_paths_for_id", no_walk)
+
+    # No identity projection is current: the reply names the core kinds instead of the page's.
+    with pytest.raises(ValueError) as without_projection:
+        commands.op_observe_memory(tmp_path, path=ref, **arguments)
+    refusal, _, remediation = str(without_projection.value).partition(" Remediation: ")
+    assert refusal == expected.partition(" Remediation: ")[0]
+    assert "omit check_by" in remediation
+    assert "Pass `kind` with a core rich kind" in remediation
+
+    freshness.rebaseline(tmp_path)
+    semantic_contract.build_corpus_context(tmp_path)
+    with pytest.raises(ValueError) as with_projection:
+        commands.op_observe_memory(tmp_path, path=ref, **arguments)
+    assert str(with_projection.value) == expected
+
+
+def test_a_dated_add_that_also_sends_a_revisit_date_and_no_kind_is_never_told_to_drop_the_date(
+    tmp_path: Path,
+) -> None:
+    """Catches the exit "omit check_by, as_of": the caller sent the start date to keep it."""
+    page = _write_page(tmp_path)
+    before = page.read_bytes()
+    arguments = {
+        "operation": "add", "category": "rule", "content": "A rule to revisit",
+        "check_by": "2026-09-01", "as_of": "2026-07-01",
+    }
+
+    with pytest.raises(observe_memory.ObserveMemoryError) as from_the_page_path:
+        observe_memory.observe_memory(tmp_path, path=PAGE, **arguments)
+    from_the_busy_intake = observe_memory.argument_refusal(arguments)
+
+    for refusal in (from_the_page_path.value, from_the_busy_intake):
+        message = str(refusal.leaf_error())
+        assert "pass a rich kind to keep check_by, as_of" in message, message
+        assert "omit check_by to save as_of in a dated block" in message, message
+        assert "omit check_by, as_of" not in message and "omit as_of" not in message, message
+    assert page.read_bytes() == before
+
+
+def test_a_dated_add_that_names_the_compact_kind_is_told_to_leave_the_kind_out_not_the_date(
+    tmp_path: Path,
+) -> None:
+    page = _write_page(tmp_path)
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError) as refused:
+        commands.op_observe_memory(
+            tmp_path, path=PAGE, operation="add", kind="observation", category="rule",
+            content="A rule", until="2026-12-31",
+        )
+
+    message = str(refused.value)
+    assert "pass a rich kind to keep until" in message, message
+    assert "omit kind to save until in a dated block" in message, message
+    assert "omit until" not in message
+    assert page.read_bytes() == before
+
+
+def test_naming_the_compact_kind_with_a_date_on_a_rich_unit_does_not_offer_to_convert_it(
+    tmp_path: Path,
+) -> None:
+    """Converting to compact clears dates, so a call that sends a date is not offered that."""
+    page = _write_page(tmp_path, source=_page_source(
+        "# Observe\n\n## Claim\n- as_of: 2026-01-01\n\nThe release slips.\n"
+    ))
+    state = semantic_index.current_parent_index_state(tmp_path, PAGE)
+    unit = next(unit for unit in state.document.units if unit.kind == "claim")
+
+    with request_scope(owner_principal(surface="cli")):
+        with pytest.raises(ValueError) as refused:
+            commands.op_observe_memory(
+                tmp_path, path=PAGE, operation="update", unit_ref=unit.unit_ref,
+                expected_fingerprint=unit.fingerprint, expected_hash=_page_hash(page),
+                kind="observation", category="finding", content="The release slips.",
+                as_of="2026-02-01",
+            )
+
+    message = str(refused.value)
+    assert "COMPACT_METADATA_REQUIRES_RICH_KIND" in message, message
+    assert "convert this unit to compact form" not in message, message
+
+
+def test_a_revisit_date_add_whose_relations_need_a_rich_kind_gets_the_relations_refusal(
+    tmp_path: Path,
+) -> None:
+    """The early compact refusal must not answer for relations that only the page can judge.
+
+    A relation that cannot move to a page field is refused before the revisit date is read, so the
+    reply names the relations; advice to drop the date would lead straight into that refusal.
+    """
+    _write_source_page(tmp_path)
+    page = _write_page(tmp_path)
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="^COMPACT_RELATIONS_REQUIRE_RICH_KIND"):
+        commands.op_observe_memory(
+            tmp_path,
+            path=PAGE,
+            operation="add",
+            category="config",
+            content="Typed relation needs rich form",
+            relations=[{"kind": "supersedes", "target": "applied-export"}],
+            check_by="2026-07-01",
+        )
+
+    assert page.read_bytes() == before
+
+
+def test_a_dated_add_with_a_relation_and_no_kind_saves_a_rich_unit_that_carries_the_relation(
+    tmp_path: Path,
+) -> None:
+    """The default dated kind is chosen before the relations: a rich unit keeps its own relations.
+
+    Without that order, this call would be refused for its relation even though the dates already
+    move the unit to a rich kind that can hold it.
+    """
+    _write_source_page(tmp_path)
+    page = _write_page(tmp_path)
+
+    result = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="add",
+        category="config",
+        content="Typed relation on a dated unit",
+        relations=[{"kind": "supersedes", "target": "applied-export"}],
+        as_of="2026-07-01",
+    )
+
+    assert result["kind_defaulted"]
+    text = page.read_text(encoding="utf-8")
+    assert "Typed relation on a dated unit" in text
+    assert "supersedes" in text and "2026-07-01" in text
+
+
+def test_an_early_compact_refusal_still_lets_a_malformed_date_win(tmp_path: Path) -> None:
+    """Refusing compact metadata before the page read must not hide an argument error made first."""
+    _write_page(tmp_path)
+    arguments = {"path": PAGE, "operation": "add", "category": "rule", "content": "A dated rule"}
+    with pytest.raises(ValueError) as malformed:
+        commands.op_observe_memory(tmp_path, as_of="July", **arguments)
+    assert str(malformed.value).startswith("INVALID_SEMANTIC_AS_OF")
+    with pytest.raises(ValueError) as reversed_dates:
+        commands.op_observe_memory(tmp_path, as_of="2026-07-02", until="2026-07-01", **arguments)
+    assert str(reversed_dates.value).startswith("INVALID_SEMANTIC_DATE_ORDER")
+    with pytest.raises(ValueError) as bad_tag:
+        commands.op_observe_memory(tmp_path, as_of="2026-07-01", tags=["bad tag!"], **arguments)
+    assert str(bad_tag.value).startswith("INVALID_SEMANTIC_TAG")
 
 
 def test_observe_accepts_legacy_vault_reference_inside_governed_kb(

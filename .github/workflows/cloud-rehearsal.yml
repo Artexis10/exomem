@@ -17,16 +17,16 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "full: P3. full-coexistence: P3 with TopoLVM. owner-export: C6 after steps 1-2. operator-restore-abort: interrupted recovery. local-storage-drill: node-loss recovery. large-import: a large agent-led import into a local-storage cell that cannot hold two copies. raw-import: messy generated notes into a new and an existing vault, compared item by item with the same journey run locally. original-fixity: time the fixity pass on a cell after steps 1-2, then restore one damaged original by the restore runbook. catalogue-prewarm: after steps 1-2, three upgrade scenarios for the staged catalogue build (adopted, cancelled unfinished, yielded for capacity). release: the cloud-release rollout on three local-storage cells (the deploy token sets the image, upgrade windows and idle rules order the rolls, a failed canary pauses the rollout and is restored, only the admin token clears the pause); a partial proof that never gates a node."
+        description: "full: P3. full-coexistence: P3 with TopoLVM. owner-export: C6 after steps 1-2. operator-restore-abort: interrupted recovery. local-storage-drill: node-loss recovery. large-import: a large agent-led import into a local-storage cell whose volume is below twice the data and below what staged copies left behind would need. raw-import: messy generated notes into a new and an existing vault, compared item by item with the same journey run locally. home-import: a fixture tree sent through the real import Job and filed by the cell alone, with one cell restart during filing, checked against the fixture's manifest. original-fixity: time the fixity pass on a cell after steps 1-2, then restore one damaged original by the restore runbook. catalogue-prewarm: after steps 1-2, three upgrade scenarios for the staged catalogue build (adopted, cancelled unfinished, yielded for capacity). release: the cloud-release rollout on three local-storage cells (the deploy token sets the image, upgrade windows and idle rules order the rolls, a failed canary pauses the rollout and is restored, only the admin token clears the pause); a partial proof that never gates a node."
         type: choice
-        options: [full, full-coexistence, owner-export, operator-restore-abort, local-storage-drill, large-import, raw-import, original-fixity, catalogue-prewarm, release]
+        options: [full, full-coexistence, owner-export, operator-restore-abort, local-storage-drill, large-import, raw-import, home-import, original-fixity, catalogue-prewarm, release]
         default: full
       large_import_files:
         description: "large-import only: files in both folders (default 70000). The byte total shrinks before the count does."
         type: string
         default: ""
       large_import_gb:
-        description: "large-import only: target size of both folders in GB (default 6), scaled down to the runner's free disk."
+        description: "large-import only: target size of both folders in GB (default 10), scaled down to the runner's free disk."
         type: string
         default: ""
       large_import_smoke:
@@ -108,7 +108,7 @@ jobs:
   rehearsal:
     name: P3 local rehearsal on disposable K3s
     needs: checks
-    if: needs.checks.outputs.p3 == 'true' && (github.event_name != 'workflow_dispatch' || (inputs.mode != 'local-storage-drill' && inputs.mode != 'large-import' && inputs.mode != 'raw-import'))
+    if: needs.checks.outputs.p3 == 'true' && (github.event_name != 'workflow_dispatch' || (inputs.mode != 'local-storage-drill' && inputs.mode != 'large-import' && inputs.mode != 'raw-import' && inputs.mode != 'home-import'))
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
@@ -294,6 +294,60 @@ jobs:
           path: |
             ${{ runner.temp }}/raw-import-report.json
             ${{ runner.temp }}/raw-import-diagnostics
+          if-no-files-found: error
+          retention-days: 30
+
+  home-import:
+    name: Home import filed by the cell, with one restart during filing
+    needs: checks
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'home-import'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Load the pinned tool versions
+        run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      # The rehearsal builds three multi-GB cell images and imports each into K3s.
+      - name: Free runner disk
+        uses: ./.github/actions/free-runner-disk
+      # Substrate's gateway image pins Node 24; its web app builds with the same.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+      # Exit 0 is a pass; 1 is a wrong answer or a restart that did not land in filing; 2 is a harness failure.
+      - name: Run the Home import
+        working-directory: infra/cloud-rehearsal
+        timeout-minutes: 110
+        env:
+          PYTHONUNBUFFERED: "1"
+          REHEARSAL_DIAGNOSTICS_DIR: ${{ runner.temp }}/home-import-diagnostics
+        run: |
+          uv run --frozen exomem-cloud-rehearsal run --home-import --report "${RUNNER_TEMP}/home-import-report.json"
+      - name: Summarize the report
+        if: always()
+        run: |
+          report="${RUNNER_TEMP}/home-import-report.json"
+          if test -f "$report"; then
+            python3 infra/cloud-rehearsal/summarize.py "$report" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No report was written." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+      - name: Upload the report and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: home-import-report
+          path: |
+            ${{ runner.temp }}/home-import-report.json
+            ${{ runner.temp }}/home-import-diagnostics
           if-no-files-found: error
           retention-days: 30
 

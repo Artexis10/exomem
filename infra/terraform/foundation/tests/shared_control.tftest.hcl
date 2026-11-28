@@ -4,6 +4,13 @@ mock_provider "cloudflare" {}
 mock_provider "random" {}
 mock_provider "local" {}
 
+# A mock provider cannot import; the override stands in for the adopted sign-in widget.
+override_resource {
+  target          = cloudflare_turnstile_widget.signin
+  override_during = plan
+  values          = { sitekey = "mock-sitekey" }
+}
+
 variables {
   hcloud_token          = "synthetic-provider-token"
   cloudflare_api_token  = "synthetic-provider-token"

@@ -5,11 +5,17 @@ registry: page-fields
 # append-only tree. Every other field there keeps its captured bytes. A field with a
 # `writer` changes on such a page only through that operation: `reclassify` relocates the
 # source and records its classification history, `custody` checks the raw file's identity,
-# and `closure` writes the back-reference when a compiled page cites the source. A field
+# `closure` writes the back-reference when a compiled page cites the source, and `classify`
+# records the page's sensitivity classes after checking them against the `sensitivity-classes`
+# registry. A field
 # that `carries: project-key` holds project keys, so a value it gains registers that key and
 # a relocation rewrites it. A field with `shape: list` holds a list of values; any other
-# field holds one. This pack is the only source of a role: a vault overlay may retire an
-# entry and nothing else.
+# field holds one. A `provenance` field records where an imported file came from: filing
+# writes it onto each Source of a stage that states an origin, and `item-time` onto a Source
+# derived from an app export's item. Its `source` is `envelope` (the value is the named
+# `envelope` key of the stage's series file), `member-time` (the staged member's modification
+# time) or `item-time` (the created time that the item states for itself). This pack is the
+# only source of a role: a vault overlay may retire an entry and nothing else.
 entries:
   project:
     label: Project
@@ -35,3 +41,21 @@ entries:
   artifact-path:
     label: Artifact path
     attributes: {field: artifact_path, role: pointer, writer: custody}
+  origin-label:
+    label: Origin label
+    attributes: {field: origin_label, role: provenance, source: envelope, envelope: label}
+  upload-device:
+    label: Upload device
+    attributes: {field: upload_device, role: provenance, source: envelope, envelope: device_family}
+  upload-browser:
+    label: Upload browser
+    attributes: {field: upload_browser, role: provenance, source: envelope, envelope: browser_family}
+  file-modified:
+    label: File modified
+    attributes: {field: file_modified, role: provenance, source: member-time}
+  item-created:
+    label: Item created
+    attributes: {field: item_created, role: provenance, source: item-time}
+  sensitivity:
+    label: Sensitivity
+    attributes: {field: sensitivity, role: pointer, writer: classify, shape: list}

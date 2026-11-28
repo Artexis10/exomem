@@ -39,6 +39,7 @@ from .vault import (
     PathIdentity,
     PlannedWrite,
     content_hash,
+    document_newline,
     markdown_lf,
     parse_frontmatter,
     read_frontmatter_header,
@@ -188,6 +189,19 @@ def text_of_part(content: str) -> str:
     if start == -1:
         return ""
     return content[start + len(marker) :].removesuffix("\n")
+
+
+def map_part_text(content: str, rewrite: Callable[[str], str]) -> str:
+    """`content` with `rewrite` applied to the raw text of a part page, and every other byte unchanged."""
+    newline = document_newline(content)
+    logical = with_newline(content, "\n")
+    marker = f"\n{preserve._EXTRACTED_HEADING}\n\n"
+    start = logical.find(marker)
+    if start == -1:
+        return content
+    start += len(marker)
+    updated = logical[:start] + rewrite(logical[start:])
+    return content if updated == logical else with_newline(updated, newline)
 
 
 def part_document(content: str) -> tuple[dict, str] | None:

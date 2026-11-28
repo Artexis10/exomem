@@ -689,7 +689,10 @@ def image_digest(reference: str) -> str | None:
         headers={"Authorization": f"Basic {credentials}"},
     )
     with urllib.request.urlopen(request, timeout=30) as response:
-        token = json.load(response)["token"]
+        answer = json.load(response)
+    token = answer.get("token") if isinstance(answer, dict) else None
+    if not isinstance(token, str) or not token:
+        raise ValueError("registry token answer has no token")
     # OCI and Docker define this closed set of manifest media types.
     media_types = (
         "application/vnd.oci.image.index.v1+json",
@@ -1076,6 +1079,7 @@ def main() -> None:
             "distributions",
             "cloud",
             "upload",
+            "upload-file",
             "pypi",
             "qualify-python",
             "images",
@@ -1087,6 +1091,7 @@ def main() -> None:
     )
     parser.add_argument("--tag", required=True)
     parser.add_argument("--directory", type=Path, default=Path("dist"))
+    parser.add_argument("--file", type=Path, help="The one built file that upload-file publishes")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--image", help="Image role from the publication plan to join")
     parser.add_argument("--source", help="Exact release source commit for Python qualification")
@@ -1143,6 +1148,12 @@ def main() -> None:
                 or path.name in cloud
             ),
         )
+    elif args.command == "upload-file":
+        # The release notes job's own step (scripts/release_notes_asset.py): one file, with no read of the tag's
+        # distributions or Cloud archives, so a tag cut under an older layout can still be given its file.
+        if args.file is None or not args.file.is_file():
+            parser.error("upload-file requires --file to name a file that exists")
+        upload_missing(args.tag, [args.file])
     elif args.command == "pypi":
         package = project(args.tag)
         files = list(args.directory.iterdir())

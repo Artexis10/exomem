@@ -1449,6 +1449,18 @@ def test_an_additional_hostname_is_routed_certified_solved_and_accepted_after_th
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_site_origin_reaches_the_gateway_only_when_set_and_must_be_an_https_origin() -> None:
+    # A gateway serving an additional host under the site needs this value, or it refuses to start.
+    assert "EVERMATTER_SITE_ORIGIN" not in _container_env(_helm_template(*EVERY_ROUTE_ARGS), "exomem-cloud-gateway")
+    documents = _helm_template(*EVERY_ROUTE_ARGS, "--set-string", "cloudGateway.siteOrigin=https://new.example.test")
+    env = _container_env(documents, "exomem-cloud-gateway")
+    assert env["EVERMATTER_SITE_ORIGIN"]["value"] == "https://new.example.test"
+    result = _helm_template_result("--set-string", "cloudGateway.siteOrigin=https://new.example.test/")
+    assert result.returncode != 0
+    assert "siteOrigin" in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_the_additional_hostnames_refuse_the_primary_hostname() -> None:
     result = _helm_template_result("--set-json", f'cloudGateway.additionalHostnames=["{OLD_HOST}"]')
     assert result.returncode != 0
@@ -1543,6 +1555,20 @@ def test_the_source_erasure_selection_is_validated_and_delivered_to_cellctl() ->
     for bad in ({"records": ["not-a-cell"]}, ["aaaaaaaaaaaaaaaa"]):
         result = _helm_render("--set-json", "cellctl.sourceErasureCellIds=" + json.dumps(bad))
         assert result.returncode != 0 and "sourceErasureCellIds" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_face_search_cell_list_is_validated_and_delivered_to_cellctl() -> None:
+    """Catches a chart value that never reaches cellctl, or a malformed one that enables no cell silently."""
+    selection = ["aaaaaaaaaaaaaaaa"]
+    deployment = _find(_helm_template("--set-json", "cellctl.facesHostedCellIds=" + json.dumps(selection)),
+                       "Deployment", "cellctl")
+    env = {entry["name"]: entry.get("value")
+           for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert json.loads(env["CELLCTL_FACES_HOSTED_CELL_IDS"]) == selection
+    for bad in (["not-a-cell"], {"records": ["aaaaaaaaaaaaaaaa"]}):
+        result = _helm_render("--set-json", "cellctl.facesHostedCellIds=" + json.dumps(bad))
+        assert result.returncode != 0 and "facesHostedCellIds" in result.stderr
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")

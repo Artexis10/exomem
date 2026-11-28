@@ -257,8 +257,8 @@ def _allowance(root: Path, config: dict, *, may_count: bool) -> dict:
     counts afresh and records the result when nothing is recorded, or the record is older than the demand lease.
     A census that could not count, or none at all, is unknown, never 0.
     """
-    allowance = config.get("allowance_bytes")
-    if type(allowance) is not int or allowance < 0:
+    allowance = media_allowance.configured(config.get("allowance_bytes"))
+    if allowance is None:
         return {"unknown": "the media store policy sets no allowance"}
     try:
         counted = media_store.recorded_census(root)
@@ -351,6 +351,16 @@ def _storage_figures(root: Path, volume: _Reading, allowance: dict) -> dict:
     # The figure and its limit only: `media_allowance` keeps the census's time and the notes behind an unknown one.
     media = {key: allowance[key] for key in ("used_bytes", "allowance_bytes", "unknown") if key in allowance}
     return {"vault_storage": vault, "media_storage": media}
+
+
+def storage_figures(root: Path, config: dict) -> tuple[dict, str | None]:
+    """`vault_storage` and `media_storage` as the window budget reports them, read now, with the time of the census
+    behind `media_storage` (the status shows it as `media_allowance.observed_at`); None when no census is recorded.
+
+    The owner census is the one that offload recorded, never a fresh walk, so a caller on a timer adds no census.
+    """
+    allowance = _allowance(root, config, may_count=False)
+    return _storage_figures(root, _read(lambda: _volume(root)), allowance), allowance.get("observed_at")
 
 
 def _volume_section(volume: _Reading) -> dict:

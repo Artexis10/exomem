@@ -127,7 +127,7 @@ def test_startup_on_a_build_with_store_mode_disabled_names_the_rollback(store_mo
     with pytest.raises(CollectionStoreError) as refused:
         server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
     assert refused.value.code == availability.NOT_SERVED
-    assert "exomem store-mode rollback" in refused.value.reason
+    assert "evermatter store-mode rollback" in refused.value.reason
 
 
 @pytest.mark.parametrize("entry", ["cli", "terminal_ui"])
@@ -335,11 +335,11 @@ def test_a_recorded_id_with_no_store_mode_warns_and_names_the_rollback_without_r
     # Creating the store runs Alembic, which logs at INFO whenever an earlier test left the root logger there.
     warnings = [record.getMessage() for record in caplog.records if record.name == availability.log.name]
     assert warnings == [availability.marker_inconsistency(vault)]
-    assert "exomem store-mode rollback" in caplog.text
+    assert "evermatter store-mode rollback" in caplog.text
     assert availability.page_writer(vault) is None
     check = doctor._check_vault_store_records(vault)
     assert (check.status, check.message) == ("warn", availability.marker_inconsistency(vault))
-    assert "exomem store-mode rollback" in check.remediation
+    assert "evermatter store-mode rollback" in check.remediation
 
 
 def test_every_dispatched_subcommand_declares_what_it_touches_in_the_vault():
@@ -392,6 +392,7 @@ def _entry_arguments(name, vault, scratch):
         "cell-init": ["cell-init", "--vault", where],
         "media-replicas": ["media-replicas", "list", "--vault", where],
         "cell-media-census": ["cell-media-census", "--vault", where],
+        "cell-media-storage": ["cell-media-storage", "--vault", where],
         "cell-media-manifest": ["cell-media-manifest", "--vault", where],
     }[name]
 

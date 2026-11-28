@@ -771,8 +771,8 @@ def test_find_hot_cache_stays_principal_free(vault: Path, monkeypatch: pytest.Mo
     assert RESTRICTED_PATH not in [hit["path"] for hit in restricted_hits]
 
     # Every Hit sitting in the shared hot cache is principal-free.
-    # Each entry is (hits, status dependency); the hits are what must stay principal-free.
-    cached_hits = [hit for cached, _dependency in find_module._FIND_CACHE.values() for hit in cached]
+    # Each entry is (hits, status dependency, partial coverage); the hits must stay principal-free.
+    cached_hits = [hit for cached, *_entry in find_module._FIND_CACHE.values() for hit in cached]
     assert cached_hits, "expected the hot cache to be populated"
     assert all(getattr(hit, "decision", None) is None for hit in cached_hits)
     assert all("referents" not in hit.as_dict() for hit in cached_hits)
@@ -3097,6 +3097,8 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "retry": False,
             "reprocess": False,
             "replicate": False,
+            "attach-speech": False,
+            "rename-speakers": False,
         },
         ("observe_memory", "operation"): {
             "add": False,
@@ -3126,6 +3128,7 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "curation": False,
             # Preview unless `apply=true`, like structured-files.
             "tag-variants": True,
+            "path-variants": True,
             # The migration preflight is read-only and takes no fields.
             "collections-store": True,
             "collections-store-adopt-local": True,
@@ -3168,6 +3171,7 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "reclassify": "mutation",
         "propose-reclassification": "structure",
         "revert-reclassification": "mutation",
+        "classify": "validation",
     }
     manage = product["manage_memory_file"]
     assert commands.invocation_is_read_only(manage, {"operation": "list"})
@@ -3180,6 +3184,8 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         manage, {"operation": "create", "validate_only": False}
     )
     assert commands.invocation_is_read_only(manage, {"operation": "move", "validate_only": True})
+    assert commands.invocation_is_read_only(manage, {"operation": "classify", "validate_only": True})
+    assert not commands.invocation_is_read_only(manage, {"operation": "classify", "validate_only": False})
     assert not commands.invocation_is_read_only(manage, {"operation": "move"})
     assert commands.invocation_is_read_only(
         product["observe_memory"], {"operation": "supersede", "validate_only": True}

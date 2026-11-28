@@ -94,6 +94,35 @@ def test_a_cold_matrix_in_a_running_service_is_reported_and_reloaded_in_the_back
     assert started  # the lane asked for the matrix, which starts the one background load
 
 
+def test_a_page_both_readings_rank_leads_when_more_keyword_matches_than_leads_crowd_it(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A word the turn shares with a busier subject must not fill every lead before the dense reading counts.
+
+    Thirteen pages repeat the turn's word in another sense, so the keyword reading ranks each of them above
+    the page the turn is about, which names the word once. The dense reading places only that page at the turn.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    crowd = {
+        f"Ledger export {n}": (f"Ledger ledger ledger export run {n}: the ledger totals and ledger columns.",
+                               _random_unit(f"crowd {n}"))
+        for n in range(13)
+    }
+    answer = (
+        "Notes from the Thursday walkthrough with the reviewer. She explained how the opening balances were "
+        "carried over, why two suppliers were merged, and what the ledger should show after the merge.",
+        _toward_turn(0.95),
+    )
+    paths = _planted_vault(vault, monkeypatch, {**crowd, "Thursday walkthrough": answer})
+    _built(vault).close()
+
+    block, _refs = _task(vault, "what did the auditor say about the ledger?")
+
+    assert len(block["candidates"]) > 1
+    assert block["candidates"][0]["source_ref"] == paths["Thursday walkthrough"]
+
+
 def test_the_agents_focus_reaches_discovery(vault: Path, planted: str, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     _block, refs = _task(

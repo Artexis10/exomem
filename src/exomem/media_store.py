@@ -1247,7 +1247,9 @@ def enqueue_offload(vault: Path, path: Path) -> int:
     return _enqueue_offload(vault, path)
 
 
-def _enqueue_offload(vault: Path, path: Path, *, usage: media_allowance.ReferenceUsage | None = None) -> int:
+def _enqueue_offload(
+    vault: Path, path: Path, *, usage: media_allowance.ReferenceUsage | None = None, census: bool = True,
+) -> int:
     config = originals.configuration(vault)
     if config is None:
         return 0
@@ -1255,7 +1257,7 @@ def _enqueue_offload(vault: Path, path: Path, *, usage: media_allowance.Referenc
     if snapshot.state != "local" or snapshot.binary_sha256 is None or not snapshot.offloadable:
         return 0
     store = MediaJobStore(vault)
-    if _refused(store, snapshot, config, usage=usage) or _resident(vault, snapshot, config):
+    if _refused(store, snapshot, config, usage=usage, census=census) or _resident(vault, snapshot, config):
         return 0
     current = store.get_by_binary(snapshot.path, media_type=OFFLOAD_MEDIA_TYPE)
     if current is not None and current.do_offload:
@@ -1270,7 +1272,7 @@ def _enqueue_offload(vault: Path, path: Path, *, usage: media_allowance.Referenc
 
 
 def enqueue_offloads(vault: Path) -> int:
-    from . import media_bindings, original_pool
+    from . import foreground_priority, media_bindings, original_pool
     from .writer_lease import get_manager
 
     if originals.binding_for(vault) is None:
@@ -1282,8 +1284,20 @@ def enqueue_offloads(vault: Path) -> int:
         rows, _coverage = _status_candidates(vault, "media_offload_refusals",
             f"SELECT binary_rel FROM media_offload_refusals WHERE code IN ({placeholders}) LIMIT ?",
             media_allowance.ALLOWANCE_REFUSAL_CODES)
-        usage = media_allowance.reference_usage(vault) if rows else None
-        return sum(_enqueue_offload(vault, path, usage=usage) for path in _offload_candidates(vault))
+        # With no allowance each refusal stays unknown whatever the census counts (`_refusal_code`).
+        allowance = media_allowance.configured((originals.configuration(vault) or {}).get("allowance_bytes"))
+        usage = media_allowance.reference_usage(vault) if rows and allowance is not None else None
+    # The walk reads every companion page, so it holds no boundary: one hold around it kept every save
+    # waiting for minutes on a large vault. Each enqueue re-reads its original under a brief hold, and a
+    # census older than the walk only decides what is queued: offload admission takes its own census.
+    # With no census taken above, an allowance refusal recorded during the walk stays refused until the
+    # next scan, instead of taking a whole-vault census inside an enqueue's hold.
+    queued = 0
+    with foreground_priority.bulk():  # the progress floor keeps a busy foreground from parking every item
+        for path in foreground_priority.yielding(_offload_candidates(vault)):
+            with get_manager().consistency_guard(vault, operation="media_offload_scan", holder_kind="background"):
+                queued += _enqueue_offload(vault, path, usage=usage, census=usage is not None)
+    return queued
 
 
 def _offload_candidates(vault: Path) -> Iterator[Path]:
@@ -1601,7 +1615,12 @@ def _offload_admission(
     binary = _binding_of(vault, snapshot)
     with get_manager().consistency_guard(vault, operation="media_offload_admission", holder_kind="background"):
         config = originals.configuration(vault) or {}
-        # A caller shares one census while its enclosing consistency guard holds, or as an `OffloadBatch`.
+        if usage is None and media_allowance.configured(config.get("allowance_bytes")) is None:
+            # No allowance admits no new version, whatever the census counts, so the reuse it would select
+            # serves no offload: a whole-vault census here would only hold the boundary.
+            return media_allowance.unset_decision(), None
+        # A caller shares one census while its enclosing consistency guard holds, as an `OffloadBatch`, or
+        # across the offload scan's per-item holds, where admission re-checks with its own census.
         if usage is None:
             usage = media_allowance.reference_usage(vault)
         reuse = None
@@ -2075,7 +2094,7 @@ def _refuse(store: MediaJobStore, snapshot: OriginalSnapshot, refusal: MediaStor
 
 def _refused(
     store: MediaJobStore, snapshot: OriginalSnapshot, config: dict[str, object], *,
-    usage: media_allowance.ReferenceUsage | None = None, recheck_allowance: bool = True,
+    usage: media_allowance.ReferenceUsage | None = None, recheck_allowance: bool = True, census: bool = True,
 ) -> str | None:
     conn = store._connect(readonly=True)
     try:
@@ -2086,12 +2105,12 @@ def _refused(
         conn.close()
     if row is None or (not recheck_allowance and row["code"] in media_allowance.ALLOWANCE_REFUSAL_CODES):
         return None
-    return _refusal_code(store.vault_root, row, snapshot, config, usage=usage)
+    return _refusal_code(store.vault_root, row, snapshot, config, usage=usage, census=census)
 
 
 def _refusal_code(
     vault: Path, row, snapshot: OriginalSnapshot, config: dict[str, object], *,
-    usage: media_allowance.ReferenceUsage | None = None,
+    usage: media_allowance.ReferenceUsage | None = None, census: bool = True,
 ) -> str | None:
     if row["sha256"] != snapshot.binary_sha256:
         return None
@@ -2105,6 +2124,9 @@ def _refusal_code(
     if row["code"] in media_allowance.ALLOWANCE_REFUSAL_CODES:
         if snapshot.reference is not None:
             return None
+        if usage is None and not census and media_allowance.configured(config.get("allowance_bytes")) is not None:
+            return row["code"]  # the caller may not take a census: the refusal stands until one is taken
+        # With no allowance the admission below reads no census and the code is the current unknown one.
         decision, _reuse = _offload_admission(vault, snapshot, usage=usage)
         return decision.code
     return row["code"]
@@ -2160,8 +2182,11 @@ def offload_refusals(vault: Path, *, path: str | None = None) -> tuple[list[dict
     config = originals.configuration(vault) or {}
     result = []
     with get_manager().consistency_guard(vault, operation="media_refusal_status", holder_kind="background"):
+        # With no allowance a refusal is unknown for that reason alone, so no census names notes behind it.
+        counted = media_allowance.configured(config.get("allowance_bytes")) is not None
         usage = (media_allowance.reference_usage(vault)
-                 if any(row["code"] in media_allowance.ALLOWANCE_REFUSAL_CODES for row in rows) else None)
+                 if counted and any(row["code"] in media_allowance.ALLOWANCE_REFUSAL_CODES for row in rows)
+                 else None)
         for row in rows:
             try:
                 snapshot = original_state(vault, row["binary_rel"])
@@ -2327,6 +2352,10 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch, *,
             _refuse(ledger, snapshot, MediaStoreError(RESIDENT_CODE, "the original stays on the volume"),
                     media_capacity.age_ciphertext_size(snapshot.binary_size))
             return None
+        if media_allowance.configured(config.get("allowance_bytes")) is None:
+            # No allowance refuses a fresh copy and a reused version alike, so no census or reuse probe is read.
+            decision, _none = _offload_admission(vault, snapshot, select_reuse=False)
+            _require_allowance(ledger, snapshot, decision.code)
         # One bounded slice from the current census. A fresh copy still needs room under the allowance.
         usage, candidates, damaged = _reuse_walk_inputs(vault, snapshot, census, str(config["key_version"]))
         reuse = None

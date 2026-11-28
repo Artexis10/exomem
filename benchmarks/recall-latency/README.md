@@ -19,6 +19,8 @@ Preparation stays outside request timers. Cleanup resumes owned workers before r
 Each case runs three times per arm, with the first arm alternating between cases.
 The paired run samples only the principals that the contract's `paired.principals`
 lists, today the owner. CI resolves the release tag and its peeled commit once.
+On a branch, CI uses the branch's merge base with the default branch instead.
+That commit has no tag, so CI passes it as both `--base-tag` and `--base-commit`.
 Every sampler archives that pinned commit. `profile.json` sets four case shards
 per series. Each shard prepares the full corpus and warms the full selected
 series before sampling its contiguous subset. Original series indices keep
@@ -85,6 +87,10 @@ The comparison applies no absolute ceiling on a shared runner.
 source provenance. `cases.json` fixes source offsets, query lengths and requests.
 Queries are explicit requests or literal passages from the public prose.
 The temporal series requests recent material.
+The dimension_filter series repeats the unit queries with a top-level `unit.dimension` filter.
+Its even cases use `$eq` and its odd cases use `$in`. Each filter includes `kind`, which every unit
+kind belongs to, so every case returns units on both arms. Its dimensions have no relation
+families, so membership never waits for the graph and the SQL calibration can project it to pages.
 Each series has 40 distinct queries in the contract's three word bands.
 The keyword series includes the short-token query `is`.
 Every keyword query has a co-occurrence witness in an emitted paragraph.

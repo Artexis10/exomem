@@ -1,8 +1,9 @@
 """Move a file-mode vault into store mode (OpenSpec make-vault-store-canonical D8, tasks 1.1, 1.3 and 1.4).
 
-Migration runs offline, as the owner. It stages the vault's exact bytes and the sidecars' current rows in a private
-database, proves that those rows equal what the owners derive from the files, and only then installs everything in one
-writer transaction. A refusal or a kill leaves file mode as it was.
+Migration runs offline, as the owner. It stages the vault's exact bytes, the lexical and reference
+sidecars' current rows and the graph rows that the owners derive from the files in a private
+database, proves that the staged rows equal what the owners derive, and only then installs
+everything in one writer transaction. A refusal or a kill leaves file mode as it was.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import sqlite3
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -36,19 +37,20 @@ from .. import (
 from ..cli_ops import OpError
 from ..collection_store import admission, authority, capability, connection
 from ..governance import page_admission
-from . import availability, graph_state, marker, mode, ownership, rederive, verify
+from . import availability, dependency_pass, graph_state, marker, mode, ownership, rederive, verify
 from .write import Origin, frontmatter_json
 
 #: A migration's private directory beside the live store; a run that died leaves one, and the next migrate or rollback removes it.
 STAGING_PREFIX = ".exomem-vault-store-migration-"
 _COPY_BATCH = 5000
-#: The longest that apply spends catching the graph up to the files, checked between passes. A pass clears at most
-#: `graph_drain.DRAIN_LIMIT` receipts and a whole-vault marker is one long pass, so a deep queue takes many.
-#: Past it, `exomem maintain --reconcile --rebuild-graph` (no ceiling) is the remedy.
+#: The longest that apply spends draining queued graph repair, checked between passes. A pass
+#: clears at most `graph_drain.DRAIN_LIMIT` receipts and a whole-vault marker is one long pass,
+#: so a deep queue takes many. Past it the apply goes on: the staged graph rows come from the
+#: files, and the result counts what is left.
 CATCH_UP_SECONDS = 600.0
 #: Consecutive passes that clear nothing end the catch-up. What is left is receipts the drain declines; each pass
 #: rotates declined ones behind the rest, so the stall rule steps past at most this many times `DRAIN_LIMIT` of them.
-#: A deeper residue ends the catch-up early, which refuses only if the graph is still behind (nothing is staged).
+#: A deeper residue ends the catch-up early; the apply goes on and names what is left.
 CATCH_UP_STALLED_PASSES = 3
 CATCH_UP_RETRY_SECONDS = 1.0
 
@@ -76,6 +78,8 @@ class Staged:
     refs_tables: list[str] = field(default_factory=list)
     #: The tables that no sidecar holds, so staging derives their rows from the files.
     link_tables: list[str] = field(default_factory=list)
+    #: How the graph sidecar's rows differed from the files' derivation, which staging took instead.
+    graph_sidecar: tuple[verify.Difference, ...] = ()
     timings: dict[str, float] = field(default_factory=dict)
 
 
@@ -127,6 +131,7 @@ def create_owner_schema(
     refs_done = schema_objects(conn)
     vault.create_inbound_schema(conn)
     page_admission.create_schema(conn)
+    dependency_pass.create_schema(conn)
     after = schema_objects(conn)
     return (
         {n: t for n, t in middle.items() if n not in before},
@@ -136,8 +141,15 @@ def create_owner_schema(
     )
 
 
-def stage(vault_root: Path, conn: sqlite3.Connection, *, revision: int = 1) -> Staged:
-    """Load the exact bytes of every owned file and copy the sidecars' rows into ``conn``, a staged store."""
+def stage(
+    vault_root: Path, conn: sqlite3.Connection, expected: Path, *, revision: int = 1
+) -> Staged:
+    """Load the exact bytes of every owned file into ``conn``, a staged store, and fill its tables.
+
+    The one derivation of the files goes to a new database at ``expected``, which `verify_staged`
+    compares with next. The graph tables are that derivation's rows; the lexical and reference
+    tables are the sidecars' rows, which `verify_staged` proves against it.
+    """
     staged = Staged()
     started = time.perf_counter()
     lexical, graph, refs, links = create_owner_schema(conn)
@@ -149,7 +161,13 @@ def stage(vault_root: Path, conn: sqlite3.Connection, *, revision: int = 1) -> S
     _load_files(vault_root, conn, staged, revision)
     staged.timings["load_files_s"] = time.perf_counter() - started
     started = time.perf_counter()
-    _copy_sidecars(vault_root, conn, staged)
+    verify.derive_expected(vault_root, expected)
+    staged.timings["derive_expected_s"] = time.perf_counter() - started
+    started = time.perf_counter()
+    staged.graph_sidecar = _graph_sidecar_differences(vault_root, expected, staged)
+    staged.timings["graph_sidecar_s"] = time.perf_counter() - started
+    started = time.perf_counter()
+    _copy_sidecars(vault_root, conn, staged, expected)
     staged.timings["copy_sidecars_s"] = time.perf_counter() - started
     started = time.perf_counter()
     _derive_links(vault_root, conn)
@@ -200,11 +218,42 @@ def _load_files(vault_root: Path, conn: sqlite3.Connection, staged: Staged, revi
         raise
 
 
-def _copy_sidecars(vault_root: Path, conn: sqlite3.Connection, staged: Staged) -> None:
-    """Copy each sidecar table, rows and row ids as they are, into the staged database."""
+def _graph_row_tables(staged: Staged) -> list[str]:
+    """The graph tables whose rows derive from the files; the owner names the stamp table."""
+    return [name for name in staged.graph_tables if name not in epistemic_graph.BUILD_STAMP_TABLES]
+
+
+def _graph_sidecar_differences(
+    vault_root: Path, expected: Path, staged: Staged
+) -> tuple[verify.Difference, ...]:
+    """How the graph sidecar's rows differ from the derivation in ``expected``, taken instead."""
+    path = epistemic_graph.sidecar_path(vault_root)
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as sidecar:
+        tables = _graph_row_tables(staged)
+        # An older file-mode sidecar has no unit-link projection. Stage that table
+        # from the fresh derivation and compare the graph rows the old sidecar holds.
+        if "graph_unit_links" not in schema_objects(sidecar):
+            tables.remove("graph_unit_links")
+        return verify.compare_tables(sidecar, expected, only=tables).differences
+
+
+def _copy_sidecars(
+    vault_root: Path, conn: sqlite3.Connection, staged: Staged, expected: Path
+) -> None:
+    """Copy each table's rows and row ids as they are into the staged database.
+
+    The graph row tables come from the derivation, not the graph sidecar: the sidecar can keep an
+    unchanged page's edges to a target that has since left the catalogue, when the path that removed
+    the target did not derive its linkers again, and a copy would carry them into the store. The
+    derivation's row ids keep a page's edges in the order of one write.
+    """
     sources = (
         (lexstore.lexical_path(vault_root), staged.lexical_tables),
-        (epistemic_graph.sidecar_path(vault_root), staged.graph_tables),
+        (expected, _graph_row_tables(staged)),
+        (
+            epistemic_graph.sidecar_path(vault_root),
+            [name for name in staged.graph_tables if name in epistemic_graph.BUILD_STAMP_TABLES],
+        ),
         (memory_refs.sidecar_path(vault_root), staged.refs_tables),
     )
 
@@ -217,6 +266,12 @@ def _copy_sidecars(vault_root: Path, conn: sqlite3.Connection, staged: Staged) -
                 with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as source:
                     for table in tables:
                         _copy_table(conn, source, table)
+            # The stamp table stays the sidecar's: the schema stamp and instance that readers key on
+            # are no derivation's. Only the registry stamps move to the derivation of the rows.
+            for key, value in epistemic_graph.graph_registry_stamps(vault_root):
+                conn.execute(
+                    "INSERT OR REPLACE INTO main.graph_meta(key, value) VALUES (?, ?)", (key, value)
+                )
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
@@ -253,11 +308,9 @@ def _copy_table(conn: sqlite3.Connection, source: sqlite3.Connection, table: str
 
 
 def verify_staged(
-    vault_root: Path, conn: sqlite3.Connection, work: Path
+    conn: sqlite3.Connection, expected: Path, work: Path
 ) -> tuple[verify.Comparison, list[str]]:
-    """Derive the rows afresh from the files and compare them, then project the stored pages and compare bytes."""
-    expected = work / "expected.sqlite"
-    verify.derive_expected(vault_root, expected)
+    """Compare each staged table with the derivation in ``expected``, then project the pages."""
     comparison = verify.compare_tables(conn, expected)
     expected.unlink()
     return comparison, verify.projection_differences(conn, work / "projection")
@@ -291,7 +344,7 @@ def preflight(vault_root: Path) -> dict:
         raise OpError(
             "VAULT_STORE_NEEDS_COLLECTION_STORE",
             "this vault has no collection store, and store mode never creates one",
-            "Run `exomem collections migrate` or create a summary collection first.",
+            "Run `evermatter collections migrate` or create a summary collection first.",
         )
     if mode.store_mode_active(vault_root):
         raise OpError("VAULT_STORE_ALREADY_ACTIVE", "this vault is already in store mode")
@@ -307,11 +360,18 @@ def preflight(vault_root: Path) -> dict:
         "binaries": owned[ownership.Ownership.BINARY],
         "skipped": _skipped_report(skipped),
     }
+    # The dry run derives nothing, so it cannot say how far the graph sidecar trails the files.
+    report["graph_sidecar"] = {
+        "checked": False,
+        "apply": "stages the graph tables from the files, so a stale graph index does not refuse "
+        "it, and reports how many rows the graph index differed by",
+    }
     if queued := queued_graph_work(vault_root):
         # Not a refusal: apply drains this queue before it stages, so the dry run only says so.
         report["queued_graph_work"] = {
             **queued,
-            "apply": "catches the graph index up to the files before it stages",
+            "apply": "drains this queue for a bounded time before it stages, "
+            "and goes on if it stops early",
         }
     return report
 
@@ -334,59 +394,62 @@ def queued_graph_work(vault_root: Path) -> dict | None:
 
 
 def catch_up_graph_work(vault_root: Path) -> dict | None:
-    """Drain the queued graph repair into the sidecar before staging copies it; refuse if the graph stays behind.
+    """Drain the queued graph repair into the sidecar before staging, as far as it goes in time.
 
-    The offline owner holds the writer lease and this process never set the service's startup gate,
-    so the drain publishes. Passes repeat while any clears a receipt. The queue need not empty: a page
-    that the graph holds no rows for keeps its receipt, so the verdict is the graph's own status.
-    The staged proof still compares every row, so a pass that this misses costs a refusal after staging.
+    Staging takes the graph rows from the files and a rollback rebuilds the graph, so nothing the
+    drain misses reaches the store or the file mode a rollback restores. It never refuses: it only
+    keeps queued work out of the graph sidecar drift that the apply reports, so that count names
+    sync defects. The offline owner holds the writer lease and this process never set the service's
+    startup gate, so the drain publishes. Passes repeat while any clears a receipt.
     """
     queued = queued_graph_work(vault_root)
     if queued is None:
         return None
     started = time.monotonic()
+    passes: int | str
+    try:
+        passes, stopped = _drain_graph_work(vault_root, started)
+    except Exception as error:  # noqa: BLE001 - the catch-up never refuses; the result names why it stopped, not a traceback
+        passes, stopped = "unknown", f"the catch-up failed with {type(error).__name__}: {error}"
+    return {
+        **queued,
+        "passes": passes,
+        "left": _or_unknown(lambda: deferred_index.graph_queue_age(vault_root)[0]),
+        "stopped": stopped,
+        "graph_current": _or_unknown(lambda: graph_state.is_current(vault_root)),
+        "seconds": round(time.monotonic() - started, 2),
+    }
+
+
+def _drain_graph_work(vault_root: Path, started: float) -> tuple[int, str]:
+    """Drain passes until the queue empties, the time runs out or passes stop clearing receipts."""
     if not freshness.recall_is_live(vault_root, "vault"):
         # A fresh process has no live recall projection, and the drain declines every receipt
         # without one; a service's watcher is what makes it live, and this process runs none.
         epistemic_graph.EpistemicGraphIndex(vault_root).publish_recall_projection()
     passes = stalled = 0
-    stopped = "the queue drained"
     while deferred_index.graph_queue_pending(vault_root):
         if time.monotonic() - started >= CATCH_UP_SECONDS:
-            stopped = f"{CATCH_UP_SECONDS:.0f} seconds passed"
-            break
+            return passes, f"{CATCH_UP_SECONDS:.0f} seconds passed"
         try:
             cleared = index_sync.drain_graph_work(vault_root)
-        except Exception as error:  # noqa: BLE001 - a failed pass ends the catch-up; the result or the refusal names its cause, not a traceback
-            stopped = f"a pass failed with {type(error).__name__}: {error}"
-            break
+        except Exception as error:  # noqa: BLE001 - a failed pass ends the catch-up; the result names its cause, not a traceback
+            return passes, f"a pass failed with {type(error).__name__}: {error}"
         passes += 1
         stalled = 0 if cleared else stalled + 1
         if stalled >= CATCH_UP_STALLED_PASSES:
-            stopped = f"{stalled} passes in a row cleared nothing"
-            break
+            return passes, f"{stalled} passes in a row cleared nothing"
         if stalled:
             time.sleep(CATCH_UP_RETRY_SECONDS)
-    left, _ = deferred_index.graph_queue_age(vault_root)
-    if not graph_state.is_current(vault_root):
-        raise OpError(
-            "VAULT_STORE_GRAPH_NOT_CAUGHT_UP",
-            f"the graph index is not current after {passes} catch-up pass(es), with {left} of "
-            f"{queued['receipts']} queued receipt(s) left ({stopped}), so nothing was staged",
-            "Run `exomem maintain --reconcile --rebuild-graph` to bring the graph index up to date, then run this command again.",
-            details={
-                "before": queued,
-                "left": left,
-                "recall_live": freshness.recall_is_live(vault_root, "vault"),
-            },
-        )
-    return {
-        **queued,
-        "passes": passes,
-        "left": left,
-        "stopped": stopped,
-        "seconds": round(time.monotonic() - started, 2),
-    }
+    return passes, "the queue drained"
+
+
+def _or_unknown(read: Callable[[], object]) -> object:
+    """A report field that a failed read shows as "unknown", never as a value it did not read."""
+    try:
+        return read()
+    except Exception:  # noqa: BLE001 - the field reports the failure as unknown; the catch-up never refuses
+        return "unknown"
 
 
 def _skipped_report(skipped: list[ownership.Skipped]) -> dict[str, int]:
@@ -430,6 +493,18 @@ def _stamped_version(path: Path, table: str) -> str | None:
 def dry_run(vault_root: Path) -> dict:
     """What a migration would do, from the preflight alone: no lease, no staging and nothing written."""
     return {"status": "dry-run", **preflight(Path(vault_root).resolve())}
+
+
+def _graph_sidecar_report(differences: tuple[verify.Difference, ...]) -> dict:
+    """What the apply says of the graph sidecar: the rows that differed, and the first keys."""
+    return {
+        "checked": True,
+        "differing_rows": sum(difference.rows for difference in differences),
+        "tables": {
+            difference.table: {"rows": difference.rows, "keys": list(difference.keys)}
+            for difference in differences
+        },
+    }
 
 
 def apply_route(vault_root: Path, *, why: str) -> dict:
@@ -482,7 +557,8 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
             "a collection store operation is still pending; finish it before entering store mode",
         )
     _require_no_other_claim(root, writer)
-    # Staging copies the sidecars, so what the service left queued goes in first.
+    # The report compares the graph sidecar with the files, so the repair that a stopped service
+    # left queued goes in first, and the count names only what the sync missed.
     caught_up = catch_up_graph_work(root)
     revision = _next_revision(writer.connection)
     # An activation that died before its commit left the id and no mode row; this run records the id again and goes on.
@@ -492,12 +568,13 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
     timings: dict[str, float] = {}
     with tempfile.TemporaryDirectory(prefix=STAGING_PREFIX, dir=state_dir) as scratch:
         work = Path(scratch)
+        expected = work / "expected.sqlite"
         with connection.staging_store(work / "staged.sqlite") as conn:
-            staged = stage(root, conn, revision=revision)
+            staged = stage(root, conn, expected, revision=revision)
             timings.update(staged.timings)
             _refuse_partial_walk(staged)
             started = time.perf_counter()
-            comparison, unprojected = verify_staged(root, conn, work)
+            comparison, unprojected = verify_staged(conn, expected, work)
             timings["verify_s"] = time.perf_counter() - started
         if comparison.differences or unprojected:
             raise OpError(
@@ -510,9 +587,9 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
                     else ""
                 ),
                 (
-                    "The search or graph index is behind the files, as a service that stopped "
-                    "early leaves it. Run `exomem maintain --reconcile --rebuild-graph` to bring "
-                    "both up to date, then run this command again."
+                    "The search or reference index is behind the files, as a service that "
+                    "stopped early leaves it. Run `evermatter maintain --reconcile` to bring them up "
+                    "to date, then run this command again."
                     if comparison.differences
                     else "The store cannot reproduce the named pages' bytes, so keep this vault "
                     "in file mode and report those pages."
@@ -535,6 +612,7 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
         "binaries": staged.binaries,
         "skipped": _skipped_report(staged.skipped),
         "verified_tables": len(comparison.tables),
+        "graph_sidecar": _graph_sidecar_report(staged.graph_sidecar),
         **({"graph_catch_up": caught_up} if caught_up else {}),
         "timings": {name: round(seconds, 2) for name, seconds in timings.items()},
     }

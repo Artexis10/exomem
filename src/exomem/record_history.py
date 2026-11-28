@@ -212,20 +212,46 @@ def project_revision(root, policy, principal, revision):
     return revision
 
 
+def natural_key_text(manifest: collections.CollectionManifest, natural_key: Any) -> str:
+    """The serialized natural key that `natural_key` states, exactly as a writer stores it.
+
+    A caller states one value for each natural-key field of the collection and no other field. Anything
+    else names no row, and the refusal says which fields to give. A caller to whom the store withholds a
+    natural-key field is refused before this runs, so the fields named here are never a hidden one.
+    """
+    declared = manifest.schema.natural_key
+    serialized = (
+        collections.complete_natural_key(manifest, natural_key)
+        if declared and isinstance(natural_key, Mapping) and set(natural_key) == set(declared)
+        else None
+    )
+    if serialized is None:
+        from .record_memory import refuse_arguments
+
+        refuse_arguments(
+            ("natural_key must give a value for each natural-key field of the collection and no other: "
+             + ", ".join(declared))
+            if declared
+            else "this collection declares no natural key, so read its history by item_key or item_id"
+        )
+    return serialized
+
+
 @canonical_read(receipt_boundary="record_history")
 def read(
     vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
     *,
-    item_key: str,
     semantic_profile: str,
+    item_key: str | None = None,
+    natural_key: Mapping[str, Any] | None = None,
     limit: int | None = None,
     continuation: str | None = None,
 ) -> dict[str, Any]:
     """One bounded page of a released row's kept corrections, newest first.
 
-    The row is released first, through the same collection and item
-    authorization a query uses; an unreleased or absent row is
+    The row is selected by its `item_key` or by its `natural_key`. It is released first, through the
+    same collection and item authorization a query uses; an unreleased or absent row is
     `RECORD_NOT_FOUND` either way. Only the page's entries are opened.
     `status` is `complete` when every correction in the row's verified audit
     chain has a kept entry, `unavailable_legacy` when some predate retention
@@ -242,7 +268,9 @@ def read(
         from .collection_store.history import row_history
 
         with writer.read_collection(collection, facade_profile=semantic_profile) as manifest:
-            return row_history(writer, manifest, item_key=item_key, limit=limit, continuation=continuation)
+            return row_history(
+                writer, manifest, item_key=item_key, natural_key=natural_key, limit=limit, continuation=continuation
+            )
     page_size, after = _page_bounds(limit, continuation)
     policy = egress.policy_module.load(root)
     manifest = record_governance._resolve_released_collection(
@@ -262,6 +290,16 @@ def read(
     if not authorize(manifest.storage.source):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     snapshot = record_formats.load_adapter(root, manifest, authorize_path=authorize).read()
+    if natural_key is not None:
+        # A file collection retracts no row, so only a current row can hold the key. Two rows that
+        # hold it make the key ambiguous, which reads as no row, as an ambiguous item key does.
+        serialized = natural_key_text(manifest, natural_key)
+        holders = [
+            record.identity.key
+            for record in snapshot.records
+            if records._same_natural_key(manifest, record.values, serialized)
+        ]
+        item_key = holders[0] if len(holders) == 1 else None
     matches = [record for record in snapshot.records if record.identity.key == item_key]
     if len(matches) != 1 or matches[0].ambiguous or not authorize(matches[0].source.path):
         raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")

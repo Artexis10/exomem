@@ -47,6 +47,7 @@ from .decide import (
     claim_missing,
     decide,
     hourly_backup_due,
+    media_usage_updates,
     nightly_backup_due,
     planned_move_volume,
     relocation_volume,
@@ -98,6 +99,7 @@ from .manifests import (
     UPGRADE_WINDOW_AT_ANNOTATION,
     CellManifestSpec,
     ResourceSettings,
+    backup_store,
     check_artifact_broker_url,
     check_grant_public_key,
     check_media_slot_url,
@@ -581,11 +583,17 @@ class ClusterConfig:
     # erase-captured-source: identity system -> the cells whose owner enabled erasure for it.
     # A selection with no fleet default, because each cell's enablement is its owner's decision.
     source_erasure_cell_ids: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # add-face-search D9a: the cells where the operator enabled face search. No fleet default: a
+    # cell not named here refuses faces whatever its owner chooses.
+    faces_hosted_cell_ids: tuple[str, ...] = ()
     # add-cloud-media-store D4-D6: the media edge's settings; None leaves every cell as before.
     media_edge: MediaEdgeConfig | None = None
     # Whether the schema has the media key columns. run_loop observes it on each connect; it is
     # never configured.
     media_key_columns: bool = False
+    # Whether the schema has the media usage columns (task 4.9). run_loop observes it on each connect; without
+    # them a backup report leaves the cell's storage figures unpublished.
+    media_usage_columns: bool = False
     # automate-cell-storage-deletion D1: whether the schema has Substrate's `deletion_grant` column. run_loop
     # observes it on each connect; without it the relay leaves the grants' ConfigMap as it stands.
     deletion_grant_column: bool = False
@@ -668,6 +676,14 @@ class ClusterConfig:
                 or len(set(cell_ids)) != len(cell_ids)
             ):
                 raise ValueError("a Source erasure selection maps identity systems to unique base32 cell IDs")
+        faces = self.faces_hosted_cell_ids
+        if (
+            not isinstance(faces, tuple)
+            or len(faces) > 1024
+            or any(not isinstance(cell_id, str) or not db.CELL_ID_RE.fullmatch(cell_id) for cell_id in faces)
+            or len(set(faces)) != len(faces)
+        ):
+            raise ValueError("a face search selection is a list of unique base32 cell IDs")
 
     @property
     def reads_media_keys(self) -> bool:
@@ -712,6 +728,10 @@ class ClusterConfig:
         """The cell's Source erasure policy as the runtime reads it; "" keeps erasure off."""
         systems = sorted(system for system, ids in self.source_erasure_cell_ids.items() if cell_id in ids)
         return json.dumps({"enabled_systems": systems}, separators=(",", ":")) if systems else ""
+
+    def faces_hosted_for_cell(self, cell_id: str) -> bool:
+        """Whether the operator enabled face search for this cell."""
+        return cell_id in self.faces_hosted_cell_ids
 
 
 class ClusterGateway:
@@ -1066,6 +1086,9 @@ def _compute_render_digest(
     if erasure:
         # Enabling erasure restarts only that cell; every other cell keeps its digest.
         material["source_erasure_policy"] = erasure
+    if cluster_config.faces_hosted_for_cell(row.cell_id):
+        # Enabling faces restarts only that cell; every other cell keeps its digest.
+        material["faces_hosted"] = "1"
     edge = cluster_config.media_edge
     media_mode = _media_mode(cluster_config, row)
     if edge is not None and media_credential_version is not None:
@@ -3594,6 +3617,7 @@ async def _reconcile_row(
             grant_public_key=cluster_config.grant_public_key,
             media_engines=cluster_config.media_engines_for_cell(row.cell_id),
             source_erasure_policy=cluster_config.source_erasure_policy_for_cell(row.cell_id),
+            faces_hosted=cluster_config.faces_hosted_for_cell(row.cell_id),
             b2_key_id=key_id,
             b2_key_secret=key_secret,
             **secret_material,
@@ -3740,7 +3764,7 @@ async def _reconcile_row(
                     row.cell_id,
                     render_backup_job(
                         spec,
-                        **_backup_store(cluster_config, stored_key=bool(spec.b2_key_id)),
+                        **backup_store(cluster_config, stored_key=bool(spec.b2_key_id)),
                         **_backup_source(decision, spec),
                     ),
                     job_refused,
@@ -3751,7 +3775,7 @@ async def _reconcile_row(
                     row.cell_id,
                     render_restore_job(
                         spec,
-                        **_backup_store(cluster_config, stored_key=bool(spec.b2_key_id)),
+                        **backup_store(cluster_config, stored_key=bool(spec.b2_key_id)),
                         snapshot_id=decision.run_restore_job_snapshot,
                     ),
                     job_refused,
@@ -3799,6 +3823,25 @@ async def _reconcile_row(
     # Bounded writes: a column whose value is unchanged is not written again.
     row_updates = {column: value for column, value in row_updates.items() if getattr(row, column) != value}
     changed = await _write_observed(connection, row, row_updates, now)
+    if cluster_config.media_usage_columns and "last_backup_snapshot" in decision.row_updates:
+        # Every recorded backup also publishes the storage figures its Job copied from the cell. They are written
+        # apart from the observed columns: the row type does not carry them and nothing reads them back.
+        edge = cluster_config.media_edge
+        served = _media_mode(cluster_config, row) == MEDIA_SERVED
+        media_usage = media_usage_updates(
+            served=served, allowance_bytes=edge.store_policy.get("allowance_bytes") if served and edge else None,
+            report=observation.backup_job_media_storage, backup_at=decision.row_updates.get("last_backup_at"),
+            now=now, max_age=config.media_storage_max_age)
+        if media_usage:
+            try:
+                await db.write_observed(connection, row.cell_id, media_usage)
+            except asyncpg.PostgresConnectionError:
+                raise  # A lost session is reopened by the loop, as for every other write.
+            except asyncpg.PostgresError as error:
+                # The figures are advisory and the backup is already recorded: a refusal (a constraint that differs
+                # from the column contract, a missing grant) must not skip the rollout write below.
+                logger.warning("cellctl: cell %s: the media usage figures were not written: %s",
+                               row.cell_id, _describe_error(error))
     if decision.rollout_updates and not pause_first:
         await db.write_rollout(connection, decision.rollout_updates)
     return changed or decision.apply_manifests
@@ -3835,17 +3878,6 @@ def _staged_objects(cluster_config: ClusterConfig, secrets_config: SecretsConfig
     return StagedObjects(_staging_client(cluster_config, secrets_config), cluster_config.cell_data_staging_bucket)
 
 
-def _backup_store(cluster_config: ClusterConfig, *, stored_key: bool) -> dict[str, str]:
-    """The bucket and S3 endpoint a cell's backup and restore Jobs reach. An old cell keeps the
-    founder-account bucket its stored key was minted for; a new cell reads the custodian's key,
-    which only the locked cell-data bucket accepts (D9)."""
-
-    if stored_key:
-        return {"bucket_name": cluster_config.object_storage_bucket,
-                "endpoint": cluster_config.object_storage_endpoint}
-    return {"bucket_name": cluster_config.cell_data_backup_bucket, "endpoint": cluster_config.cell_data_endpoint}
-
-
 async def _sync_restic_work(
     cluster: ClusterGateway, config: ClusterConfig, rows: list[CellRow], observations: dict[str, ClusterObservation],
     now: datetime, *, conflicts: set[str], allow_start: bool, runtime: VerificationRuntime,
@@ -3862,7 +3894,7 @@ async def _sync_restic_work(
         if observation.namespace_cell_label != row.cell_id or not observation.statefulset_uid:
             continue
         namespace = namespace_name(row.cell_id)
-        location = _backup_store(config, stored_key=bool(row.b2_key_id and row.has_stored_object_store_key))
+        location = backup_store(config, stored_key=bool(row.b2_key_id and row.has_stored_object_store_key))
         repository = restic_verification_repository(row.cell_id, **location)
         eligible = bool(
             row.cell_id in selected and row.cell_id not in conflicts and all(location.values())
@@ -4121,6 +4153,14 @@ async def _observe_media_key_columns(connection: asyncpg.Connection, cluster_con
     return dataclass_replace(cluster_config, media_key_columns=present)
 
 
+async def _observe_media_usage_columns(connection: asyncpg.Connection, cluster_config: ClusterConfig) -> ClusterConfig:
+    present = await db.has_media_usage_columns(connection)
+    if not present:
+        logger.warning("cellctl: exomem_cloud_cells has no media usage columns: a backup report leaves a cell's "
+                       "vault and media storage figures unpublished until the Substrate migration and its grants apply")
+    return dataclass_replace(cluster_config, media_usage_columns=present)
+
+
 async def run_loop(
     dsn: str,
     cluster: ClusterGateway,
@@ -4172,6 +4212,7 @@ async def run_loop(
                     if gaps:
                         raise SchemaGap("cellctl refuses to start; the schema is missing: " + "; ".join(gaps))
                     cluster_config = await _observe_media_key_columns(connection, cluster_config)
+                    cluster_config = await _observe_media_usage_columns(connection, cluster_config)
                     cluster_config = dataclass_replace(
                         cluster_config, deletion_grant_column=await db.has_deletion_grant_column(connection))
                     backoff = RECONNECT_BACKOFF_INITIAL_SECONDS

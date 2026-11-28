@@ -10,6 +10,8 @@ reach the store thread for each command of a caller's workflow. Invented names o
 from __future__ import annotations
 
 import datetime as dt
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -39,6 +41,7 @@ SHARED = "Knowledge Base/Notes/Shared/quorvel-tansid-survey.md"
 PAGE_COUNT = 12
 LINKED = (3, 7, 11)
 READ_ONLY_NO_WAKE = {"read_only": True, "wake_maintenance": False}
+BESIDE = {"beside": True}
 UNRESOLVED = "Tell me about zzxq plorv?"
 PHRASE = "What did the quorvel tansid survey conclude?"
 TITLES = "Open Quorvel tansid ledger 03 and Quorvel tansid ledger 07"
@@ -57,16 +60,38 @@ class StoreRequests:
 
 @pytest.fixture
 def store_requests(monkeypatch: pytest.MonkeyPatch) -> StoreRequests:
-    requests = StoreRequests()
-    real = runtime.StoreServer.call
+    """Counts requests at both doors: the store thread's queue (`call`) and the read beside it (`read_beside`).
 
-    def counting(self, work, **kwargs):
+    A read beside that falls back onto the queue counts once, as the read beside it. A background read
+    beside that never queues (``queue=False``) is not a request the command makes, so it is not counted.
+    """
+    requests = StoreRequests()
+    real_call, real_beside = runtime.StoreServer.call, runtime.StoreServer.read_beside
+    beside = threading.local()
+
+    def counted(kwargs):
         requests.kwargs.append(kwargs)
         if requests.refuse_nth == len(requests.kwargs):
             raise connection.busy("the collection store did not take this request within the mutation timeout")
-        return real(self, work, **kwargs)
+
+    def counting(self, work, **kwargs):
+        if not getattr(beside, "active", False):
+            counted(kwargs)
+        return real_call(self, work, **kwargs)
+
+    def counting_beside(self, work, **kwargs):
+        if not kwargs.get("queue", True):
+            # A background read that never queues was never a request the store thread served.
+            return real_beside(self, work, **kwargs)
+        counted(BESIDE)
+        beside.active = True
+        try:
+            return real_beside(self, work, **kwargs)
+        finally:
+            beside.active = False
 
     monkeypatch.setattr(runtime.StoreServer, "call", counting)
+    monkeypatch.setattr(runtime.StoreServer, "read_beside", counting_beside)
     return requests
 
 
@@ -150,12 +175,12 @@ def _refs(packet: dict) -> list[str]:
 
 
 #: Store requests per command, the same at every page count. An activation now offers the store's collections, and
-#: each of its components that decides them (body, terminal pass, slice leads, task candidates, skills) asks once.
+#: the components that decide them ask once each, except where a component decides pages an earlier one announced.
 #: A policy that withholds the store's pages leaves the map's one batched decision. Sharing one decision among the
 #: components is the store's own follow-up; until then, more requests here mean a new component or a per-page one.
 STORE_REQUESTS = {
-    "owner": {"unresolved turn": 2, "phrase turn": 7, "title turn": 7, "follow-up": 6, "ask_memory": 2},
-    "owner_with_policy": {"unresolved turn": 2, "phrase turn": 6, "title turn": 6, "follow-up": 5, "ask_memory": 2},
+    "owner": {"unresolved turn": 2, "phrase turn": 4, "title turn": 4, "follow-up": 4, "ask_memory": 2},
+    "owner_with_policy": {"unresolved turn": 2, "phrase turn": 3, "title turn": 3, "follow-up": 3, "ask_memory": 2},
     "external": {"unresolved turn": 1, "phrase turn": 1, "title turn": 1, "follow-up": 1, "ask_memory": 1},
 }
 
@@ -176,7 +201,7 @@ def test_a_command_asks_the_store_once_for_all_its_pages(
         store_requests.kwargs.clear()
         result = command()
         counts[label] = len(store_requests.kwargs)
-        unexpected.extend(kwargs for kwargs in store_requests.kwargs if kwargs != READ_ONLY_NO_WAKE)
+        unexpected.extend(kwargs for kwargs in store_requests.kwargs if kwargs not in (READ_ONLY_NO_WAKE, BESIDE))
         return result
 
     unresolved = run("unresolved turn", lambda: _activate(root, who, turn=UNRESOLVED))
@@ -200,14 +225,14 @@ def test_a_command_asks_the_store_once_for_all_its_pages(
     else:
         # The turn's words title the store's collections, which recall now offers.
         assert _refs(phrase) and set(_refs(phrase)) <= {_store_ref(index) for index in range(count)}
-    store_spans = [span for span in spans if span["name"].startswith("store.call@")]
+    store_spans = [span for span in spans if span["name"].startswith(("store.call@", "store.read_beside@"))]
     # The body and the terminal pass each decide every page; policy withholds an external caller's
     # store pages before the terminal pass, so only its body asks.
     passes = 1 if caller == "external" else 2
     assert [(span["count"], span["fields"]["pages"], span["fields"]["refused"], span["fields"]["wake"])
             for span in store_spans] == [(passes, passes * count, 0, 0)]
     # The site is the code that asked, not the plumbing between it and the store.
-    assert not store_spans[0]["name"].removeprefix("store.call@").startswith(
+    assert not store_spans[0]["name"].split("@", 1)[1].startswith(
         ("collection_store.", "published_admission", "functools", "contextlib", "unknown")
     )
     assert SHARED in found and "collection_store" not in warming
@@ -216,6 +241,63 @@ def test_a_command_asks_the_store_once_for_all_its_pages(
     else:
         assert set(pages) <= found
     assert all("collection_store" not in packet["generation"] for packet in (unresolved, phrase, titles, follow_up))
+
+
+def test_a_slow_store_decision_stops_at_the_request_deadline_and_withholds_the_store_pages(
+    service, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """On a starved host each store-owned page's decision took seconds, and the decisions read beside
+    the store thread ran on past the request's deadline. They stop where a queued read would, and
+    the pages they had yet to decide are withheld together."""
+    from exomem import request_budget
+    from exomem.collection_store import preview
+
+    root = service.root
+    _seed(root, "owner_with_policy")
+    real_init = preview._Decide.__init__
+
+    def slow_decisions(self, read, vault_root, calls):  # noqa: ANN001, ANN202
+        def slow_read(*args, **kwargs):  # noqa: ANN202
+            time.sleep(1.0)
+            return read(*args, **kwargs)
+
+        real_init(self, slow_read, vault_root, calls)
+
+    monkeypatch.setattr(preview._Decide, "__init__", slow_decisions)
+    # The slice's stages end a second before this 9 s budget, so the stop falls inside a batch.
+    budget = request_budget.RequestBudget(seconds=9)
+    token = request_budget.set_current(budget)
+    started = time.monotonic()
+    try:
+        packet = _activate(root, OWNER, turn=PHRASE + " " + TITLES)
+    finally:
+        request_budget.reset_current(token)
+    elapsed = time.monotonic() - started
+
+    # The contract: a call ends within its budget plus the delivery reserve. Without the stop, the twelve
+    # slow decisions alone run past it.
+    limit = budget.seconds + request_budget.DELIVERY_RESERVE_SECONDS
+    assert elapsed < limit, f"the activation ran {elapsed:.1f} s on a 9 s budget"
+    assert not set(_refs(packet)) & {_store_ref(index) for index in range(PAGE_COUNT)}
+    assert packet["generation"]["collection_store"] == "unavailable"
+
+
+def test_the_activation_door_serves_store_pages_its_short_budget_has_time_for(
+    service, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """The service's activation door runs on a few seconds. Store pages decided well inside that budget are
+    served; the stop at the deadline never withholds them early."""
+    from exomem import readiness
+
+    root = service.root
+    _seed(root, "owner")
+    _activate(root, OWNER, turn=PHRASE + " " + TITLES)
+    monkeypatch.setattr(readiness, "_runtime_managed", True)
+
+    packet = _activate(root, OWNER, turn=PHRASE + " " + TITLES)
+
+    assert set(_refs(packet)) & {_store_ref(index) for index in range(PAGE_COUNT)}
+    assert "collection_store" not in packet["generation"]
 
 
 @pytest.mark.timeout(180)
@@ -335,7 +417,7 @@ def test_an_mcp_call_asks_the_store_once_for_the_body_and_once_for_the_terminal_
     # The policy withholds every store page from the external caller before the terminal pass sees one.
     assert len(asked) == (1 if caller == "external" else 2), "the body and the terminal pass each ask once"
     assert len(activated) == (1 if caller == "external" else 2)
-    assert all(kwargs == READ_ONLY_NO_WAKE for kwargs in asked + activated)
+    assert all(kwargs in (READ_ONLY_NO_WAKE, BESIDE) for kwargs in asked + activated)
     assert SHARED in found and "collection_store" not in warming
     assert "collection_store" not in activation["generation"]
     if caller == "external":
@@ -346,6 +428,63 @@ def test_an_mcp_call_asks_the_store_once_for_the_body_and_once_for_the_terminal_
         assert not found & set(pages), "the policy withholds the Records pages from this caller"
     else:
         assert set(pages) <= found
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("caller", ["owner_with_policy", "external"])
+def test_bounding_the_text_of_many_store_pages_asks_the_store_once(
+    service, store_requests: StoreRequests, caller: str  # noqa: F811
+) -> None:
+    """A turn's positions bound the text of every page they cite. Each page went to the store on a request of
+    its own, so a turn citing a few hundred pages queued a few hundred store requests. The pages go together."""
+    root, who = service.root, _who(caller)
+    pages = _seed(root, caller)
+    with request_scope(who):
+        alone = {page: egress.page_text_bounds(root, [page])[page] for page in pages}
+
+        store_requests.kwargs.clear()
+        together = egress.page_text_bounds(root, pages)
+
+    assert len(store_requests.kwargs) == 1, "a page asked the store on a request of its own"
+    assert together == alone
+
+
+@pytest.mark.timeout(180)
+def test_pages_decided_before_the_deadline_keep_their_text_when_the_rest_are_withheld(
+    service, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """On a starved host one store request decides many pages, and the deadline can fall inside it. The pages it
+    decided in time keep their text; only the pages it had not reached are withheld."""
+    from exomem import request_budget
+    from exomem.collection_store import preview
+
+    root = service.root
+    pages = _seed(root, "owner_with_policy")
+    real_init = preview._Decide.__init__
+
+    def slow_decisions(self, read, vault_root, calls):  # noqa: ANN001, ANN202
+        def slow_read(*args, **kwargs):  # noqa: ANN202
+            time.sleep(0.5)
+            return read(*args, **kwargs)
+
+        real_init(self, slow_read, vault_root, calls)
+
+    monkeypatch.setattr(preview._Decide, "__init__", slow_decisions)
+    budget = request_budget.RequestBudget(seconds=3)
+    token = request_budget.set_current(budget)
+    started = time.monotonic()
+    try:
+        with request_scope(OWNER):
+            bounds = egress.page_text_bounds(root, pages)
+    finally:
+        request_budget.reset_current(token)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < budget.seconds + request_budget.DELIVERY_RESERVE_SECONDS
+    full = [page for page in pages if bounds[page] is None]
+    assert full, "a page decided before the deadline lost its text"
+    assert len(full) < len(pages), "the deadline fell inside the request, so some pages were not reached"
+    assert all(bounds[page] == 0 for page in pages if page not in full)
 
 
 @pytest.mark.timeout(180)
@@ -367,3 +506,72 @@ def test_a_store_that_refuses_the_terminal_pass_withholds_the_store_pages_once_a
     store_requests.kwargs.clear()
     found, warming = _hits(_mcp(root, OWNER, "ask_memory", query=QUERY, limit=20, detail="full"))
     assert set(pages) <= found and "collection_store" not in warming, "a refusal outlived the call it refused"
+
+
+@pytest.mark.timeout(180)
+def test_a_write_that_holds_the_store_thread_does_not_withhold_the_owners_store_pages(
+    service,  # noqa: F811
+) -> None:
+    """Work that holds the store thread past the mutation timeout leaves the owner's recall whole.
+
+    The release decisions read the store's last commit beside the thread. When they queued behind
+    the work instead, the queue refused them after the mutation timeout, and recall withheld every
+    store page and said the store was unavailable.
+    """
+    root = service.root
+    pages = _seed(root, "owner")
+    server = runtime._server(root.resolve())
+    entered, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        entered.set()
+        release.wait(60)
+
+    holder = threading.Thread(target=lambda: server.call(hold, wake_maintenance=False))
+    holder.start()
+    try:
+        assert entered.wait(30), "the store thread never took the holding work"
+        served = _activate(root, OWNER, turn=PHRASE + " " + TITLES)
+        found, warming = _ask(root, OWNER)
+        assert holder.is_alive() and not release.is_set(), "the store thread was free while recall ran"
+    finally:
+        release.set()
+        holder.join(60)
+
+    assert "collection_store" not in served["generation"], "recall reported the store unavailable"
+    assert set(_refs(served)) & {_store_ref(index) for index in range(PAGE_COUNT)}, "recall withheld the store pages"
+    assert set(pages) <= found and "collection_store" not in warming
+
+
+@pytest.mark.timeout(180)
+def test_a_store_handoff_delays_the_owners_recall_instead_of_withholding_it(
+    service, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """A portability-export flush hands the store off for a moment; recall waits it out and stays whole.
+
+    A handoff refuses every store checkout until it ends. A release decision that met that refusal
+    withheld every store page and reported the store unavailable, although the store was back a
+    second later.
+    """
+    root, manager = service.root, service.manager
+    pages = _seed(root, "owner")
+    flushing = threading.Event()
+    real_flush = runtime.CollectionStoreRuntime.flush
+
+    def slow_flush(self, *args, **kwargs):
+        flushing.set()
+        time.sleep(1.5)
+        return real_flush(self, *args, **kwargs)
+
+    monkeypatch.setattr(runtime.CollectionStoreRuntime, "flush", slow_flush)
+    exporter = threading.Thread(target=lambda: manager._release_collection_store(
+        manager._fencing_token, deadline=time.monotonic() + 30, release=False))
+    exporter.start()
+    try:
+        assert flushing.wait(30), "the export flush never started"
+        found, warming = _ask(root, OWNER)
+    finally:
+        exporter.join(60)
+
+    assert set(pages) <= found, "recall withheld the store pages during the handoff"
+    assert "collection_store" not in warming

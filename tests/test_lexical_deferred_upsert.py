@@ -368,6 +368,56 @@ def test_a_page_saved_between_a_catch_up_and_its_admission_proof_costs_no_whole_
     assert lexstore.search_bm25(tmp_path, "firstsave", k=3, scope="kb")
 
 
+def test_a_current_catalogue_is_not_rebuilt_when_another_proof_publishes_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
+) -> None:
+    from exomem import readiness
+
+    store, changed, _removed = live_catalogue
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path))
+    changed.write_text("# After\n\nfirstsave\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[changed])
+    prove = lexstore.runtime_retrieval_catalog_proof
+    repair_proved = threading.Event()
+    other_proof_finished = threading.Event()
+    admitted = []
+    rebuilt = []
+
+    def prove_with_competing_admission(root, **kwargs):
+        proof = prove(root, **kwargs)
+        if not repair_proved.is_set():
+            repair_proved.set()
+            assert other_proof_finished.wait(10)
+        return proof
+
+    def admit_current_catalogue():
+        try:
+            assert repair_proved.wait(10)
+            admitted.append(lexstore._mark_runtime_retrieval_ready_if_current(tmp_path))
+        finally:
+            other_proof_finished.set()
+
+    def rebuild():
+        rebuilt.append(True)
+        return False
+
+    monkeypatch.setattr(lexstore, "runtime_retrieval_catalog_proof", prove_with_competing_admission)
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+    readiness.reset()
+    readiness.manage_runtime()
+    other_proof = threading.Thread(target=admit_current_catalogue)
+    other_proof.start()
+    try:
+        lexstore.request_lag_repair(tmp_path)
+        assert _wait_for_flight_end(tmp_path)
+        assert admitted == [True]
+        assert rebuilt == []
+        assert lexstore.search_bm25(tmp_path, "firstsave", k=3, scope="kb")
+    finally:
+        other_proof.join(10)
+        readiness.reset()
+
+
 def test_a_caught_up_catalogue_that_still_fails_its_proof_without_lag_is_rebuilt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
 ) -> None:
@@ -843,6 +893,66 @@ def test_a_catch_up_outpaced_by_sustained_writes_still_advances_without_a_full_p
     assert lexstore.search_bm25(tmp_path, "streamtoken4", k=3, scope="kb")
 
 
+def test_an_import_that_adds_more_pages_per_step_than_a_step_replays_costs_no_full_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    live_catalogue,
+) -> None:
+    """A round that cannot finish inside the step budget is not started.
+
+    An import registers more new pages during each step than one step can
+    replay, so every round leaves a longer lag than it replayed. A round that
+    began with too few steps left would stop partway: its steps hold rows for
+    pages that did not exist at the checkpoint the completed rounds reached, so
+    nothing could be recorded and the worker paid a full pass. The catch-up
+    records the checkpoint of its last complete round before it starts a round
+    that does not fit, and a lag-only catch-up carries on from there.
+    """
+    store, changed, _removed = live_catalogue
+    cap = lexstore.CATALOG_FOREGROUND_DELTA_CAP
+    per_step = cap + 8
+    bulk = []
+    for index in range(cap + 5):
+        page = changed.parent / f"bulk-{index}.md"
+        page.write_text(f"# Bulk {index}\n\nbulkcontent\n", encoding="utf-8")
+        bulk.append(page)
+    freshness.on_files_changed(tmp_path, changed=bulk)
+    steps = []
+    rebuilds = []
+    real_retry = store.retry_deferred_upsert
+    real_rebuild = store.rebuild_atomic
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    def retry(paths, **kwargs):
+        steps.append(list(paths))
+        if len(steps) <= 4:
+            arrived = []
+            for index in range(per_step):
+                page = changed.parent / f"import-{len(steps)}-{index}.md"
+                page.write_text(
+                    f"# Import\n\nimporttoken{len(steps)}x{index}\n", encoding="utf-8"
+                )
+                arrived.append(page)
+            freshness.on_files_changed(tmp_path, changed=arrived)
+        return real_retry(paths, **kwargs)
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+    monkeypatch.setattr(store, "retry_deferred_upsert", retry)
+
+    assert lexstore.runtime_retrieval_catalog_proof(tmp_path) is None
+    assert _wait_for_flight_end(tmp_path)
+
+    assert rebuilds == [], "pages that outran the steps escalated to a full pass"
+    assert lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is not None
+    assert lexstore.search_bm25(tmp_path, "importtoken1x0", k=3, scope="kb")
+    assert lexstore.search_bm25(tmp_path, f"importtoken4x{per_step - 1}", k=3, scope="kb")
+
+
 def test_a_round_never_records_a_checkpoint_newer_than_the_step_that_read_a_page(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
 ) -> None:
@@ -1083,22 +1193,29 @@ def test_a_page_created_after_the_stamped_checkpoint_is_never_served_after_its_d
 ) -> None:
     """A page that did not exist at a checkpoint cannot leave a row behind it.
 
-    The round starts at a checkpoint where `ghost-new.md` is absent. The first
-    step meets three pages created after it, and the second step, capped at
-    two pages, writes the ghost's row and leaves one page unapplied. So the
-    only checkpoint the round fully applied is the one it started at. The
-    pages are then deleted, and the registry state matches that checkpoint
-    again. Readiness must not report current while a search still returns the
+    The first round starts at a checkpoint where `ghost-new.md` is absent and
+    meets four pages created after it. The second round's first step rolls back
+    because a page in it is saved mid-step, and its second step writes the
+    ghost's row. That round cannot be recorded: a page it did not apply is
+    still in the lag. So the only checkpoint the catch-up fully applied is the
+    one it started at, and the ghost's row is newer than that. The pages are
+    then deleted, and the registry state matches that checkpoint again.
+    Readiness must not report current while a search still returns the
     deleted page.
     """
     monkeypatch.setattr(lexstore, "CATALOG_FOREGROUND_DELTA_CAP", 2)
-    monkeypatch.setattr(lexstore, "_CATCH_UP_SLACK_STEPS", 1)
+    monkeypatch.setattr(lexstore, "_CATCH_UP_SLACK_STEPS", 2)
     store, changed, _removed = live_catalogue
-    created = [changed.parent / name for name in ("ghost-new.md", "late-0.md", "late-1.md")]
+    created = [
+        changed.parent / name
+        for name in ("a-moved.md", "b-moved.md", "ghost-new.md", "late-0.md")
+    ]
     changed.write_text("# After\n\nfirstedit\n", encoding="utf-8")
     freshness.on_files_changed(tmp_path, changed=[changed])
     steps = 0
+    moved = []
     real_retry = store.retry_deferred_upsert
+    real_insert = store._insert_page
 
     def retry(paths, **kwargs):
         nonlocal steps
@@ -1109,14 +1226,21 @@ def test_a_page_created_after_the_stamped_checkpoint_is_never_served_after_its_d
             freshness.on_files_changed(tmp_path, changed=created)
         return real_retry(paths, **kwargs)
 
+    def insert_while_the_editor_saves(conn, path, *args, **kwargs):
+        real_insert(conn, path, *args, **kwargs)
+        if path == created[0] and not moved:
+            moved.append(path)
+            path.write_text("# Saved\n\nsavedmidstep\n", encoding="utf-8")
+
     monkeypatch.setattr(store, "retry_deferred_upsert", retry)
+    monkeypatch.setattr(store, "_insert_page", insert_while_the_editor_saves)
 
     store.catch_up_lagging_delta()
     for page in created:
         page.unlink()
     freshness.on_files_changed(tmp_path, deleted=created)
 
-    assert steps == 2, "the round did not run out of steps at the second one"
+    assert moved and steps == 3, "the second round did not roll back one step and apply one"
     current = lexstore.runtime_retrieval_catalog_proof(
         tmp_path, require_live_projection=True, schedule_repair=False
     ) is not None

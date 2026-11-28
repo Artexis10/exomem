@@ -82,7 +82,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 #: the diagnosis was wrong. Every remediation that asks for repair routes
 #: through this constant so no site can drift back to the audit. A remote
 #: owner reconciles through a governed job instead (`repair_memory`, vault care).
-_REBUILD_VECTORS_CMD = "exomem maintain --reconcile"
+_REBUILD_VECTORS_CMD = "evermatter maintain --reconcile"
 
 #: Absolute deferred-queue FAIL threshold (total semantic_upserts + full_upserts
 #: items), independent of vault size. The existing WARN tier is a 10% fraction
@@ -302,7 +302,7 @@ def check_graph_recovery_age(vault_root: Path | None) -> DoctorCheck:
             "Graph synchronization recorded a recovery condition but its "
             "durable clock is unreadable, so how long recovery has been "
             "required cannot be measured and the age bound cannot fire.",
-            "Run `exomem index --scope vault` during a stop window; the next "
+            "Run `evermatter index --scope vault` during a stop window; the next "
             "observation republishes the clock atomically.",
             details=details,
         )
@@ -314,7 +314,7 @@ def check_graph_recovery_age(vault_root: Path | None) -> DoctorCheck:
             f"{age / 3600.0:.1f}h, beyond the "
             f"{RECOVERY_AGE_FAIL_SECONDS / 3600.0:.0f}h bound. Recovery is "
             "minutes of work; this long means it is blocked.",
-            "Run `exomem index --scope vault` during a stop window, then confirm "
+            "Run `evermatter index --scope vault` during a stop window, then confirm "
             "graph_sync status returns to current.",
             details=details,
         )
@@ -479,7 +479,7 @@ def _resolve_vault(vault: str | None) -> tuple[Path | None, DoctorCheck]:
         return path, _check(
             "vault.path",
             "fail",
-            f"{path} contains no exomem schema contract "
+            f"{path} contains no Evermatter schema contract "
             f"(looked in .exomem/schema/ and {managed_join('_Schema/')}).",
             f"Pass the vault root, not the {managed_root_rel()} folder. For a new vault, run "
             "`uv run python -m exomem init --vault <path>`.",
@@ -495,7 +495,7 @@ def _check_python() -> DoctorCheck:
         return _check(
             "python.version",
             "fail",
-            f"Python {version} is too old; exomem requires Python 3.11+.",
+            f"Python {version} is too old; Evermatter requires Python 3.11+.",
             "Install Python 3.11+ or let uv provision it with `uv sync`.",
         )
     return _check("python.version", "pass", f"Python {version} satisfies >=3.11.")
@@ -522,7 +522,7 @@ def _check_held_filesystem_platform() -> DoctorCheck:
         "platform.held_filesystem",
         "fail",
         f"{support.reason}.",
-        "Run exomem on Linux or Windows. Nothing about this vault can repair it: "
+        "Run Evermatter on Linux or Windows. Nothing about this vault can repair it: "
         "the substrate has no implementation for this platform, so every governed "
         "write would refuse.",
     )
@@ -560,10 +560,10 @@ def _check_package_import() -> DoctorCheck:
         return _check(
             "package.import",
             "fail",
-            f"Could not import exomem: {e}",
+            f"Could not import Evermatter: {e}",
             "Run `uv sync` from the repo root, then retry with `uv run python -m exomem doctor`.",
         )
-    return _check("package.import", "pass", "exomem imports successfully.")
+    return _check("package.import", "pass", "Evermatter imports successfully.")
 
 
 def _check_registry() -> DoctorCheck:
@@ -590,7 +590,7 @@ def _check_repo_env() -> DoctorCheck:
         "warn",
         "No .env file found in the current directory or repo root.",
         "This is fine for stdio if env vars are passed by the client. For service/remote use, "
-        "copy env.example to .env and fill it in (or run `exomem setup --remote`).",
+        "copy env.example to .env and fill it in (or run `evermatter setup --remote`).",
     )
 
 
@@ -794,7 +794,7 @@ def _check_resource_posture(profile: Profile) -> DoctorCheck:
             status,
             f"Runtime is {runtime_label}; resource mode is {mode_name}; CPU is the "
             f"supported baseline. ASR policy is {asr['effective_policy']}. {reason}.",
-            "Use `exomem mode quiet` before foreground GPU work, or `exomem mode "
+            "Use `evermatter mode quiet` before foreground GPU work, or `evermatter mode "
             "performance` only when enough free VRAM is available.",
             details=posture,
         )
@@ -1022,7 +1022,7 @@ def _check_deferred_index_backlog(vault_root: Path | None) -> DoctorCheck:
     semantic = int(details["semantic_upserts"])
     full = int(details["full_upserts"])
     total = semantic + full
-    command = f'exomem index --vault "{vault_root}" --scope vault'
+    command = f'evermatter index --vault "{vault_root}" --scope vault'
 
     if total >= _DEFERRED_BACKLOG_FAIL_TOTAL:
         return _check(
@@ -1107,7 +1107,7 @@ def _check_fast_ack_custody(vault_root: Path | None) -> DoctorCheck:
             "fast_ack_custody",
             "fail",
             message,
-            "Run `exomem maintain --reconcile` on the host, or start a remote reconcile job "
+            "Run `evermatter maintain --reconcile` on the host, or start a remote reconcile job "
             "(`repair_memory` with the preview's `plan_id`), to "
             "re-converge stranded batches from their current bytes. Setting "
             "EXOMEM_FAST_DURABLE_ACK=0 stops new ones but does not repair these.",
@@ -1119,7 +1119,7 @@ def _check_fast_ack_custody(vault_root: Path | None) -> DoctorCheck:
             "warn",
             message,
             "Managed recall answers warming until pending visibility proves. If it "
-            "persists, run `exomem maintain --reconcile` on the host or start a remote "
+            "persists, run `evermatter maintain --reconcile` on the host or start a remote "
             "reconcile job.",
             details=details,
         )
@@ -1408,7 +1408,7 @@ def _check_relation_census(vault_root: Path | None) -> DoctorCheck:
             "relations.census",
             "warn",
             relation_census.summary_line(result),
-            "Run `exomem relations census` once the graph is current.",
+            "Run `evermatter relations census` once the graph is current.",
         )
     return _check(
         "relations.census",
@@ -1446,7 +1446,7 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
             "state.placement",
             "fail",
             "The in-vault machine-local state location could not be inspected.",
-            "Restore read access to the vault and rerun `exomem doctor`; do not "
+            "Restore read access to the vault and rerun `evermatter doctor`; do not "
             "adopt or delete either state authority while the scan is unavailable.",
             details={
                 "state_root": str(state_dir),
@@ -1520,7 +1520,7 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
                     "state.placement",
                     "fail",
                     "The external machine-local state root could not be inspected.",
-                    "Restore read access and rerun `exomem doctor`; do not adopt "
+                    "Restore read access and rerun `evermatter doctor`; do not adopt "
                     "or delete either state authority while the scan is unavailable.",
                     details=details,
                 )
@@ -1533,10 +1533,10 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
                     f"({managed_root(Path(vault_root))}: {leftover_names}) and in "
                     f"the external state root ({state_dir})."
                 ),
-                "Stop every writer, then run `exomem maintain --migrate-state "
+                "Stop every writer, then run `evermatter maintain --migrate-state "
                 "--offline --adopt-state external` to keep the "
                 "external state root and remove the in-vault copies, or "
-                "`exomem maintain --migrate-state --offline --adopt-state vault` "
+                "`evermatter maintain --migrate-state --offline --adopt-state vault` "
                 "to discard the external "
                 "root and re-migrate from the vault.",
                 details=details,
@@ -1548,7 +1548,7 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
                 f"Machine-local state still lives under the vault ({leftover_names}); "
                 "ordinary startup refuses until an explicit offline migration completes."
             ),
-            "Stop every process that can write this vault, then run `exomem maintain "
+            "Stop every process that can write this vault, then run `evermatter maintain "
             "--migrate-state --offline` before restarting Evermatter.",
             details=details,
         )
@@ -1558,7 +1558,7 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
             "fail",
             "Machine-local state migration is required before startup "
             f"(manifest status: {migration_status}).",
-            "Stop every process that can write this vault, then run `exomem maintain "
+            "Stop every process that can write this vault, then run `evermatter maintain "
             "--migrate-state --offline` before restarting Evermatter.",
             details=details,
         )
@@ -1712,7 +1712,7 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
             details=details,
         )
     remediation = (
-        f"Stop the exomem service, then run `{_REBUILD_VECTORS_CMD}` "
+        f"Stop the Evermatter service, then run `{_REBUILD_VECTORS_CMD}` "
         "out-of-process (it reads the vault from EXOMEM_VAULT_PATH, not "
         "--vault) to reclaim orphaned rebuild temporaries — reclaim is only "
         "safe once no rebuild is in flight."
@@ -1796,7 +1796,7 @@ def _check_write_path_env_flags(vault_root: Path | None) -> DoctorCheck:
         details["semantic_upserts"] = semantic
         details["full_upserts"] = full
         if total > 0:
-            command = f'exomem index --vault "{vault_root}" --scope vault'
+            command = f'evermatter index --vault "{vault_root}" --scope vault'
             level: Status = "fail" if total >= _DEFERRED_BACKLOG_FAIL_TOTAL else "warn"
             return _check(
                 "write_path.env_flags",
@@ -2462,7 +2462,7 @@ def _list_exomem_processes() -> list[dict[str, object]]:
 _LOOPBACK_SERVICE_HINT = (
     "For a local-only shared service, no public hostname or GitHub OAuth app is "
     "needed (#482): leave EXOMEM_BASE_URL unset, set EXOMEM_REST_API_KEY, and run "
-    "`exomem --transport http --host 127.0.0.1 --port 8765`, then point each MCP "
+    "`evermatter --transport http --host 127.0.0.1 --port 8765`, then point each MCP "
     "client at that URL instead of launching its own stdio server."
 )
 
@@ -2527,14 +2527,14 @@ def _check_runtime_processes() -> DoctorCheck | None:
         )
     else:
         remedy = (
-            f"Compute mode is '{current_mode}'; `exomem mode quiet` drops boot preload "
+            f"Compute mode is '{current_mode}'; `evermatter mode quiet` drops boot preload "
             "and releases models when idle, and is the smaller change. One shared "
             f"service removes the per-process cost entirely. {_LOOPBACK_SERVICE_HINT}"
         )
     return _check(
         "runtime.processes",
         status,
-        f"Detected {count} other exomem server process(es) using {memory_message}. "
+        f"Detected {count} other Evermatter server process(es) using {memory_message}. "
         f"Each stdio MCP client/session launches its own process. {remedy}",
         details={"count": count, "mode": current_mode, **memory, "processes": rows[:8]},
     )
@@ -2606,7 +2606,7 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
             "warn",
             f"Embedding sidecar exists but {model} is not in the local HF "
             "cache, so the live probe was skipped (doctor never downloads).",
-            "Run `exomem warm` to fetch the model, then re-run doctor for the live probe.",
+            "Run `evermatter warm` to fetch the model, then re-run doctor for the live probe.",
         )
     try:
         with recall_space.encoding_for(index, load=True):
@@ -2811,7 +2811,7 @@ def _check_model_residency() -> DoctorCheck:
             "pass",
             f"{embeddings.MODEL_NAME} is not loaded and not cached; the next embed "
             "downloads it inline.",
-            "Run `exomem warm` to fetch it, then `exomem mode performance` to preload "
+            "Run `evermatter warm` to fetch it, then `evermatter mode performance` to preload "
             "it at startup instead of inside a request.",
             details=details,
         )
@@ -2822,7 +2822,7 @@ def _check_model_residency() -> DoctorCheck:
         f"{embeddings.MODEL_NAME} is cached but not loaded; the next embed loads it {where}.",
         None
         if preload
-        else "Run `exomem mode performance` (or set EXOMEM_PRELOAD_MODELS=1) to load it at "
+        else "Run `evermatter mode performance` (or set EXOMEM_PRELOAD_MODELS=1) to load it at "
         "startup instead of inside whichever request arrives first.",
         details=details,
     )
@@ -2880,7 +2880,7 @@ def _check_models_cache() -> DoctorCheck:
         "models.cache",
         "warn",
         f"Not yet in the local model caches: {', '.join(missing)}.{consequence}",
-        "Run `exomem warm` to pre-download them now (~1-2 GB).",
+        "Run `evermatter warm` to pre-download them now (~1-2 GB).",
     )
 
 
@@ -2972,7 +2972,11 @@ def _check_remote_env() -> list[DoctorCheck]:
     return checks
 
 
-_REMOTE_OWNER_LINE = "EXOMEM_OWNER_OAUTH_SUBJECT=github:<the value of EXOMEM_GITHUB_USER_ID>"
+_REMOTE_OWNER_LINE = (
+    "EVERMATTER_OWNER_OAUTH_SUBJECT=github:<the value of EVERMATTER_GITHUB_USER_ID>, replacing "
+    "any EXOMEM_ or KB_MCP_ line for it (in a clone, `uv run --no-sync python "
+    "scripts/set-env.py EVERMATTER_OWNER_OAUTH_SUBJECT <value>` does that)"
+)
 
 
 def _check_remote_owner_binding() -> DoctorCheck:
@@ -3512,7 +3516,7 @@ def _check_probe_local(port: int = 8765) -> DoctorCheck:
             "probe.local_mcp",
             "fail",
             f"Could not reach {url}: {e}",
-            "Start the server (`exomem --transport http`) or the installed service, then re-run.",
+            "Start the server (`evermatter --transport http`) or the installed service, then re-run.",
         )
     if status == 401:
         return _check("probe.local_mcp", "pass", "Local /mcp answers 401 — server up, auth enforced.")
@@ -3617,7 +3621,7 @@ def _check_probe_protected_resource(base_url: str) -> DoctorCheck:
             "fail",
             "The bare oauth-protected-resource path 404s — claude.ai aborts connector "
             "registration with mcp_registration_failed when this happens.",
-            "Update exomem (the server ships this route) and confirm the tunnel points at this server.",
+            "Update Evermatter (the server ships this route) and confirm the tunnel points at this server.",
         )
     if status != 200:
         return _check(
@@ -3858,6 +3862,160 @@ def _check_latency() -> DoctorCheck:
     return _check("latency", "warn" if incomplete else "pass", message, details=details)
 
 
+#: The census window, the most rows one doctor run reads for it, and the most
+#: client and revision pairs its one-line message names (the rest are counted, and
+#: all of them are in `details`).
+_CLIENT_CENSUS_WINDOW_SECONDS = 24 * 60 * 60
+_CLIENT_CENSUS_MAX_ROWS = 50_000
+_CLIENT_CENSUS_LISTED_PAIRS = 10
+
+
+def _printable(value: object) -> str:
+    """Text for one terminal line: every non-printable character shown as its escape.
+
+    A client chooses its name and extension ids, and the doctor message reaches a terminal.
+    """
+    return "".join(
+        char if char.isprintable() else char.encode("unicode_escape").decode("ascii")
+        for char in str(value)
+    )
+
+
+def _check_mcp_clients() -> DoctorCheck:
+    """Which protocol revision and extensions each client declared, per tool call, in the last 24 hours.
+
+    Reads the live ledger and its archived generations newest first and stops at the first
+    row older than the window or at the row bound, so the read does not grow with the ledger.
+    When the rows do not reach the window's start, the message says from when it counts.
+    Informational: an unreadable ledger is a warning, never a failure of the install.
+    """
+    import datetime as dt
+    import itertools
+
+    from . import activity, call_ledger, latency_watch
+
+    if not call_ledger.enabled():
+        return _check(
+            "mcp_clients", "pass",
+            "The call ledger is disabled, so declared protocol features are not recorded.",
+        )
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=_CLIENT_CENSUS_WINDOW_SECONDS)
+    calls: dict[tuple[str, str], dict[str, object]] = {}
+    read = 0
+    oldest: dt.datetime | None = None
+    reached_floor = False
+    archive_unreadable = False
+    try:
+        # A failed append left a call with no row, so the count starts after it. Only the
+        # failure marker counts: the doctor is a new process, and its own start says nothing
+        # about when the cell's writer began, which the activity feed uses for its bound.
+        failed_at = call_ledger.last_append_failure()
+        failure_in_window = failed_at is not None and failed_at > cutoff
+        floor = failed_at if failure_in_window else cutoff
+        try:
+            archives = latency_watch.archive_generations_newest_first(call_ledger.archive_dir())
+        except OSError:
+            archives, archive_unreadable = [], True
+        for line in itertools.chain.from_iterable(
+            activity.lines_newest_first(path) for path in [call_ledger.ledger_path(), *archives]
+        ):
+            if not line.strip():
+                continue
+            if read >= _CLIENT_CENSUS_MAX_ROWS:
+                break  # the row bound: the result covers only back to `oldest`
+            read += 1
+            try:
+                row = json.loads(line)
+                at = dt.datetime.fromisoformat(row["ts_utc"])
+            except (ValueError, KeyError, TypeError):
+                continue  # a damaged row names no time; the chain check reports it, not this census
+            at = at if at.tzinfo else at.replace(tzinfo=dt.UTC)
+            if at <= floor:
+                reached_floor = True
+                break
+            oldest = at
+            key = (
+                _printable(row.get("client_name") or "unknown client"),
+                _printable(row.get("protocol_version") or "unknown revision"),
+            )
+            entry = calls.setdefault(key, {
+                "calls": 0, "capabilities": None, "extensions": None, "other": 0, "cut": 0,
+            })
+            entry["calls"] += 1
+            # None is "no row said": a list, even an empty one, is what a client declared.
+            for field, name in (("capabilities", "client_capabilities"), ("extensions", "client_extensions")):
+                declared = row.get(name)
+                if isinstance(declared, list):
+                    entry[field] = (entry[field] or set()) | {_printable(item) for item in declared}
+            if isinstance(row.get("client_extensions"), list):
+                for field, name in (("other", "client_extensions_other"), ("cut", "client_extensions_truncated")):
+                    count = row.get(name)
+                    if isinstance(count, int):
+                        entry[field] = max(entry[field], count)
+    except OSError as error:
+        return _check(
+            "mcp_clients", "warn", f"The call ledger could not be read: {type(error).__name__}.",
+            "Check the call ledger directory and its permissions.",
+        )
+    # Complete only when the read reached the start of the window, or the failed append that
+    # starts it. Otherwise the history starts inside the window (a new install) or the row bound
+    # stopped the read, and the census says from when it counts instead of claiming 24 hours.
+    # The count holds only rows later than `covered_since`, so the label and the count agree.
+    covered_since: dt.datetime | None = None
+    reason: str | None = None
+    if not reached_floor:
+        covered_since = oldest
+        if read >= _CLIENT_CENSUS_MAX_ROWS:
+            reason = f"stopped at {_CLIENT_CENSUS_MAX_ROWS} rows"
+        elif archive_unreadable:
+            reason = "the archived ledger could not be listed"
+        elif oldest is not None:
+            reason = "the ledger starts there"
+    if failure_in_window and (reached_floor or oldest is None):
+        covered_since, reason = failed_at, "a call before then may have left no row"
+    if reason is None:
+        window = "in the last 24 hours"
+    elif covered_since is None:
+        window = f"in the last 24 hours (partial: {reason})"
+    else:
+        window = f"since {covered_since.strftime('%Y-%m-%d %H:%M')} UTC (partial: {reason})"
+    details_window = {
+        "window_hours": 24, "complete": reason is None,
+        "covered_since": None if covered_since is None else covered_since.isoformat(),
+    }
+    if not calls:
+        return _check(
+            "mcp_clients", "pass", f"No tool calls {window}.", details={"clients": [], **details_window}
+        )
+    clients = []
+    listed = []
+    for (client, revision), entry in sorted(calls.items(), key=lambda item: (-item[1]["calls"], item[0])):
+        capabilities = None if entry["capabilities"] is None else sorted(entry["capabilities"])
+        extensions = None if entry["extensions"] is None else sorted(entry["extensions"])
+        said = []
+        if capabilities is not None:
+            said.append(f"capabilities: {', '.join(capabilities)}" if capabilities else "no capabilities")
+        if extensions is not None:
+            named = [*extensions, *([f"+{entry['other']} other"] if entry["other"] else []),
+                     *([f"+{entry['cut']} cut"] if entry["cut"] else [])]
+            said.append(f"extensions: {', '.join(named)}" if named else "no extensions")
+        listed.append(f"{client} on {revision} ({'; '.join(said) or 'not recorded'})")
+        clients.append({
+            "client": client, "protocol_version": revision, "tool_calls": entry["calls"],
+            "client_capabilities": capabilities, "client_extensions": extensions,
+            "client_extensions_other": entry["other"] if extensions is not None else None,
+            "client_extensions_truncated": entry["cut"] if extensions is not None else None,
+        })
+    shown = listed[:_CLIENT_CENSUS_LISTED_PAIRS]
+    if len(listed) > len(shown):
+        shown.append(f"+{len(listed) - len(shown)} more")
+    total = sum(int(entry["calls"]) for entry in calls.values())
+    return _check(
+        "mcp_clients", "pass", f"{total} tool call(s) {window}: " + "; ".join(shown),
+        details={"clients": clients, "rows_read": read, **details_window},
+    )
+
+
 def _check_observability() -> DoctorCheck:
     """Log directory writability, active/rotated file sizes, JSONL
     tail-parseability, the NSSM `service.*` rotation pile, and
@@ -4025,7 +4183,7 @@ def _check_managed_hook_refresh() -> DoctorCheck:
             "upgrade.hook_refresh",
             "warn",
             f"the last managed upgrade could not refresh Claude Code hooks for: {names}",
-            "Re-run `exomem install-hook` for the listed profile(s).",
+            "Re-run `evermatter install-hook` for the listed profile(s).",
             details=report,
         )
     if report.get("success") is False:
@@ -4033,7 +4191,7 @@ def _check_managed_hook_refresh() -> DoctorCheck:
             "upgrade.hook_refresh",
             "warn",
             "the last managed upgrade could not complete the Claude Code hook refresh",
-            "Re-run `exomem install-hook` for affected profiles.",
+            "Re-run `evermatter install-hook` for affected profiles.",
             details=report,
         )
     if profiles:
@@ -4052,10 +4210,10 @@ def _check_managed_hook_refresh() -> DoctorCheck:
 def _check_legacy_tool_references() -> DoctorCheck:
     """Warn about permission rules and hooks of the user's that no server answers any more.
 
-    A rule that names `mcp__exomem__` matches while the client holds an `exomem` server, which
-    includes a URL server that `evermatter setup --migrate` keeps under that key. It is dead
-    only in a client that holds no `exomem` server. A warning, never a failure: the install
-    works either way. Read-only; setup never edits what the user wrote.
+    A rule that names `mcp__exomem__` matches while the client holds an `exomem` server, and one
+    that names the plugin's `mcp__plugin_exomem_exomem__` matches while an `exomem` plugin is
+    enabled. Each is dead once nothing answers it. A warning, never a failure: the install works
+    either way. Read-only; setup never edits what the user wrote.
     """
     from . import client_config
     from .install_skill import client_home
@@ -4072,7 +4230,8 @@ def _check_legacy_tool_references() -> DoctorCheck:
             "migration.tool_prefix",
             "warn",
             f"could not read a client's server registrations, so no rule naming "
-            f"`{client_config.LEGACY_TOOL_PREFIX}` was judged: {exc}",
+            f"`{client_config.LEGACY_TOOL_PREFIX}` or `{client_config.LEGACY_PLUGIN_TOOL_PREFIX}` "
+            f"was judged: {exc}",
         )
     if not dead:
         checked = ", ".join(str(path) for path in read) or "no Claude or Codex settings file found"
@@ -4080,20 +4239,31 @@ def _check_legacy_tool_references() -> DoctorCheck:
             "migration.tool_prefix",
             "pass",
             f"checked {checked}: no permission rule or hook there names "
-            f"`{client_config.LEGACY_TOOL_PREFIX}` in a client without an `exomem` server. "
-            "A rule that still names it matches that server. Rules kept anywhere else are not read.",
+            f"`{client_config.LEGACY_TOOL_PREFIX}` in a client without an `exomem` server, or "
+            f"`{client_config.LEGACY_PLUGIN_TOOL_PREFIX}` in a Claude Code without an `exomem` "
+            "plugin. A rule that still names one matches that server or plugin. "
+            "Rules kept anywhere else are not read.",
         )
     listed = "; ".join(f"{ref.kind} {ref.name} in {ref.path}" for ref in dead)
     return _check(
         "migration.tool_prefix",
         "warn",
-        f"{len(dead)} permission rule(s) or hook(s) of yours name `{client_config.LEGACY_TOOL_PREFIX}` "
-        f"in a client with no `exomem` server, so they match no tool: {listed}",
-        f"Change each listed rule or hook to the `{client_config.TOOL_PREFIX}` prefix. "
+        f"{len(dead)} permission rule(s) or hook(s) of yours name an old tool prefix "
+        f"(`{client_config.LEGACY_TOOL_PREFIX}` or `{client_config.LEGACY_PLUGIN_TOOL_PREFIX}`) "
+        f"that no server or plugin answers now, so they match no tool: {listed}",
+        "Change each listed rule or hook to the prefix named in its details: "
+        f"`{client_config.TOOL_PREFIX}` or `{client_config.PLUGIN_TOOL_PREFIX}`. "
         "Setup never edits what you wrote.",
         details={
             "references": [
-                {"client": ref.client, "path": str(ref.path), "kind": ref.kind, "name": ref.name}
+                {
+                    "client": ref.client,
+                    "path": str(ref.path),
+                    "kind": ref.kind,
+                    "name": ref.name,
+                    "old_prefix": ref.prefix,
+                    "new_prefix": ref.replacement,
+                }
                 for ref in dead
             ]
         },
@@ -4356,6 +4526,7 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
     checks.extend(_check_edge_ingress(probe=probe))
     checks.append(_check_observability())
     checks.append(_check_latency())
+    checks.append(_check_mcp_clients())
     checks.append(_check_recall_canary())
     checks.append(_check_idempotency_store())
     checks.append(_check_managed_hook_refresh())
@@ -4366,7 +4537,7 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
 
 def render_human(report: DoctorReport) -> str:
     lines = [
-        f"exomem doctor ({report.profile})",
+        f"evermatter doctor ({report.profile})",
         f"overall: {'PASS' if report.success else 'FAIL'}",
     ]
     by_status: dict[Status, list[DoctorCheck]] = {"fail": [], "warn": [], "pass": []}

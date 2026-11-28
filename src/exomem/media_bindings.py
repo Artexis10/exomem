@@ -11,7 +11,7 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -169,6 +169,12 @@ def _record(conn: sqlite3.Connection, state: Checkpoint) -> None:
                  (_STATE, json.dumps(asdict(state), separators=(",", ":"))))
 
 
+def _created(conn: sqlite3.Connection) -> bool:
+    # The ledger file exists before its creator commits the schema; until then it holds no bindings.
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_bindings'").fetchone() is not None
+
+
 def _ledger(vault: Path, *, create: bool = True):
     from .media_jobs import MediaJobStore
 
@@ -184,6 +190,8 @@ def withdraw(vault: Path) -> Checkpoint | None:
         conn.execute("PRAGMA synchronous=FULL")
         with conn:
             conn.execute("BEGIN IMMEDIATE")
+            if not _created(conn):
+                return None  # A ledger still being created holds no complete projection to withdraw.
             before = checkpoint(conn)
             _record(conn, replace(before, generation=before.generation + 1, complete=False))
         return before
@@ -489,7 +497,7 @@ def prepare_delta(vault: Path, paths: Iterable[str], *, images: Mapping[str, byt
     if ledger.path.exists():
         with closing(ledger._connect(readonly=True)) as conn:
             # Parameter batches bound SQL size; none enumerates the archive.
-            for start in range(0, len(paths), 256):
+            for start in range(0, len(paths), 256) if _created(conn) else ():
                 batch = paths[start:start + 256]
                 placeholders = ",".join("?" for _ in batch)
                 companions.update(row[0] for row in conn.execute(
@@ -558,8 +566,21 @@ def follow_store(vault: Path, *, batch: int = 256) -> bool:
             return applied and reached == head
 
 
-def _pages(vault: Path, *, join_request: bool = False, headers_only: bool = False):
-    """Every canonical page under the managed root. A census reads a fresh snapshot; a request may join its own."""
+def _pages(
+    vault: Path, *, join_request: bool = False, headers_only: bool = False,
+    changed: Callable[[str, str], None] | None = None,
+):
+    """Every canonical page under the managed root. A census reads a fresh snapshot; a request may join its own.
+
+    A disk walk refuses a tree that changes while it reads it, unless the caller passes `changed`: then
+    a page added or removed elsewhere is no failure, and a page that is replaced, removed or edited while
+    the walk reads it is read once more after the walk, and so is a page that a save gave a second name for a
+    moment. A page that is gone by then is no page. A page that changes again during that read, and a folder
+    that left during the walk, go to `changed` with their path and kind ("file" or "directory") instead of
+    being yielded; the folder's pages may sit under another name now. Each page it yields was
+    confirmed unchanged after its read. Either way the walk refuses a page it cannot read safely, such as a
+    linked file or folder, rather than leave it out.
+    """
     from contextlib import nullcontext
 
     from .kbdir import managed_join, managed_root_rel
@@ -576,20 +597,64 @@ def _pages(vault: Path, *, join_request: bool = False, headers_only: bool = Fals
                 "SELECT path, body FROM store_pages WHERE path >= ? AND path < ? ORDER BY path",
                 (prefix, prefix + "\U0010ffff"))
             return  # Every ordinary companion is a store-owned page; disk is only its projection.
+        flagged: dict[str, str] = {}  # each entry the walk saw change, with its kind, in walk order
+
+        def is_page(rel: str) -> bool:
+            return rel.lower().endswith(".md")
+
         with reserved_paths.open_generic_tree(
             vault, managed_root_rel(), require_complete=True,
-            select=lambda candidates: (rel for rel, kind in candidates if kind == "file" and rel.lower().endswith(".md")),
+            select=lambda candidates: (rel for rel, kind in candidates if kind == "file" and is_page(rel)),
             markdown_header_limit=SEMANTIC_SOURCE_MAX_BYTES if headers_only else None,
+            entry_changed=None if changed is None else (
+                lambda relative, kind: flagged.setdefault(managed_join(relative), kind)
+            ),
         ) as entries:
+            if changed is None:
+                for entry in entries:
+                    rel = managed_join(entry.relative_path)
+                    if not read.serves(vault, rel):
+                        if not headers_only:
+                            yield rel, reserved_paths.read_generic_bytes(vault, rel).data
+                        elif entry.markdown is None:
+                            raise ValueError("a companion header cannot be read")
+                        else:
+                            yield rel, entry.markdown
+                return
+            # Each page waits until the walk moves on, which rechecks it, so the caller never takes a stale read.
+            waiting: tuple[str, bytes] | None = None
             for entry in entries:
+                if waiting is not None and waiting[0] not in flagged:
+                    yield waiting
                 rel = managed_join(entry.relative_path)
+                waiting = None
                 if not read.serves(vault, rel):
-                    if not headers_only:
-                        yield rel, reserved_paths.read_generic_bytes(vault, rel).data
-                    elif entry.markdown is None:
-                        raise ValueError("a companion header cannot be read")
-                    else:
-                        yield rel, entry.markdown
+                    if entry.markdown is None:
+                        raise ValueError("a page cannot be read")
+                    waiting = (rel, entry.markdown)
+            if waiting is not None and waiting[0] not in flagged:
+                yield waiting
+        for rel, kind in flagged.items():
+            if kind == "directory":
+                changed(rel, kind)
+                continue
+            if read.serves(vault, rel):
+                continue
+            page = is_page(rel)
+            try:
+                with reserved_paths.open_generic_binary(vault, rel, physical=True) as source:
+                    data = source.stream.read() if page else b""
+            except reserved_paths.ReservedPathLeafError as error:
+                if error.code == "RESERVED_PATH":
+                    # It kept the second name that the walk saw: the walk's own refusal of a linked file.
+                    raise reserved_paths.ReservedPathLeafError("UNSAFE_PATH") from error
+                if error.code not in reserved_paths.CHANGE_CODES:
+                    raise
+                if error.code == "IDENTITY_CHANGED" and page:
+                    changed(rel, kind)  # it changed again while it was read
+                continue  # a page that left is no page, and a photo is counted through its page
+            if page:
+                yield rel, data
 
 
 def _store_bindings(vault: Path) -> Iterator[tuple[str | None, tuple[str, ...]]]:

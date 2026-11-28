@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+
 import pytest
 
 pytestmark = pytest.mark.reads_repository_docs
@@ -29,8 +30,8 @@ def test_dockerfile_declares_cuda_target_as_capable_not_resident() -> None:
     assert "--index-url https://download.pytorch.org/whl/cu132" in text
     assert "FROM python:3.12-slim AS cuda" in text
     assert "CUDA-capable torch, CPU-default at idle" in text
-    assert "EXOMEM_CONTAINER_VARIANT=cuda" in text
-    assert "EXOMEM_MODE=performance" not in text
+    assert "EVERMATTER_CONTAINER_VARIANT=cuda" in text
+    assert "EVERMATTER_MODE=performance" not in text
 
 
 def test_dockerfile_has_a_fixed_nonroot_immutable_cloud_target() -> None:
@@ -41,8 +42,8 @@ def test_dockerfile_has_a_fixed_nonroot_immutable_cloud_target() -> None:
 
     assert "ARG EXOMEM_RELEASE_BUILD_TIME" in cell
     assert 'test -n "$EXOMEM_RELEASE_BUILD_TIME"' in cell
-    assert "EXOMEM_RELEASE_BUILD_TIME=${EXOMEM_RELEASE_BUILD_TIME}" in cell
-    assert "EXOMEM_CONTAINER_VARIANT=cloud" in cell
+    assert "EVERMATTER_RELEASE_BUILD_TIME=${EXOMEM_RELEASE_BUILD_TIME}" in cell
+    assert "EVERMATTER_CONTAINER_VARIANT=cloud" in cell
     assert "PYTHONDONTWRITEBYTECODE=1" in cell
     assert "USER 10001:10001" in cell
     assert "ENTRYPOINT [\"exomem\"]" in cell
@@ -54,7 +55,7 @@ def test_cell_images_bake_and_serve_the_model_their_cells_encode_with() -> None:
     so the cloud image carries and names exactly the model its cells resolve:
     bge-m3, which a personal server also runs. The model's build stage fetches
     it and loads it offline at its declared width."""
-    from exomem import recall_space
+    from exomem import env_compat, recall_space
 
     cloud_model = recall_space.configured_recall_model({"EXOMEM_CLOUD_CELL": "1"})
     assert cloud_model == recall_space.PERSONAL_MODEL
@@ -66,8 +67,9 @@ def test_cell_images_bake_and_serve_the_model_their_cells_encode_with() -> None:
     cloud_builder = stage("FROM builder-hosted AS builder-cloud-model")
     cloud = stage("FROM cell-runtime AS cloud")
 
+    published_name = env_compat.emitted_name(recall_space.RECALL_MODEL_ENV)
     for part in (cloud_builder, cloud):
-        assert f"{recall_space.RECALL_MODEL_ENV}={cloud_model}" in part
+        assert f"{published_name}={cloud_model}" in part
     assert "HF_HUB_OFFLINE=1" in cloud_builder
     assert "recall_space.declared_dim(MODEL_NAME)" in cloud_builder
     # The cloud builder fetches into a root of its own, so the English model
@@ -86,16 +88,20 @@ def test_dockerfile_cloud_target_sets_pod_local_log_dir_and_disables_fastmcp_egr
         "FROM python:3.12-slim AS lean", 1
     )[0]
 
-    assert "EXOMEM_LOG_DIR=/tmp/exomem-logs" in cloud
+    assert "EVERMATTER_LOG_DIR=/tmp/exomem-logs" in cloud
     assert "FASTMCP_CHECK_FOR_UPDATES=off" in cloud
     assert "FASTMCP_SHOW_SERVER_BANNER=false" in cloud
 
 
 def test_release_workflow_publishes_cuda_tags() -> None:
-    text = _read(".github/workflows/release-please.yml")
+    import yaml
 
-    assert "target: cuda" in text
-    assert "platforms: linux/amd64" in text
+    text = _read(".github/workflows/release-please.yml")
+    legs = yaml.safe_load(text)["jobs"]["build-standard-images"]["strategy"]["matrix"]["include"]
+
+    assert {"image": "cuda", "platforms": "linux/amd64"}.items() <= next(
+        leg for leg in legs if leg["image"] == "cuda"
+    ).items()
     assert '"cuda $image_base:$version-cuda cuda"' in text
 
 
@@ -143,13 +149,40 @@ def test_release_builds_cloud_images_natively_without_discovery_tags() -> None:
     assert "github.run_attempt" not in digests["with"]["name"]
 
 
-def test_serialized_publisher_joins_and_attests_both_cloud_roles_after_recovery() -> None:
+def test_release_builds_standard_images_beside_the_cloud_images_by_digest() -> None:
+    import yaml
+
+    jobs = yaml.safe_load(_read(".github/workflows/release-please.yml"))["jobs"]
+    standard = jobs["build-standard-images"]
+    # Waiting on the cloud builds would put the standard builds back on the critical path.
+    assert standard["needs"] == ["plan", "build-artifacts"]
+    assert standard["strategy"]["fail-fast"] is False
+    assert {leg["image"] for leg in standard["strategy"]["matrix"]["include"]} == {"lean", "ml", "cuda"}
+    assert "attestations" not in standard["permissions"]
+    steps = {step["id"]: step for step in standard["steps"] if "id" in step}
+    build = steps["build"]
+    assert "steps.recover.outcome == 'success'" in build["if"]
+    assert "fromJSON(env.IMAGES)[matrix.image].publish" in build["if"]
+    assert "push-by-digest=true" in build["with"]["outputs"]
+    assert "env.DRY_RUN != 'true'" in build["with"]["outputs"]
+    assert "tags" not in build["with"]
+    # Only a digest that passed its licence check reaches the publisher.
+    assert "steps.licences.outcome == 'success'" in steps["digests"]["if"]
+    upload = next(step for step in standard["steps"] if step.get("uses", "").startswith("actions/upload-artifact"))
+    assert "steps.digests.outcome == 'success'" in upload["if"]
+    assert upload["with"]["overwrite"] is True
+    assert "github.run_id" in upload["with"]["name"]
+    assert "github.run_attempt" not in upload["with"]["name"]
+
+
+def test_serialized_publisher_attests_every_role_built_elsewhere_after_recovery() -> None:
     import yaml
 
     jobs = yaml.safe_load(_read(".github/workflows/release-please.yml"))["jobs"]
     publisher = jobs["publish-image"]
-    assert "build-cloud-images" in publisher["needs"]
-    assert "needs.build-cloud-images.result == 'success'" not in publisher["if"]
+    for builder in ("build-cloud-images", "build-standard-images"):
+        assert builder in publisher["needs"]
+        assert f"needs.{builder}.result == 'success'" not in publisher["if"]
     assert publisher["concurrency"]["cancel-in-progress"] is False
     assert "release-image-publication" in publisher["concurrency"]["group"]
     steps = {step["id"]: step for step in publisher["steps"] if "id" in step}
@@ -167,6 +200,18 @@ def test_serialized_publisher_joins_and_attests_both_cloud_roles_after_recovery(
             f"release-image-evidence-{role}-" in step.get("with", {}).get("name", "")
             for step in publisher["steps"]
         )
+    for role in ("lean", "ml", "cuda"):
+        read = steps[f"{role}-build"]
+        assert f"standard-image-digests/{role}.digest" in read["run"]
+        assert "env.DRY_RUN != 'true'" in read["if"]
+        attestation = steps[f"{role}-attestation"]
+        assert f"steps.{role}-build.outcome == 'success'" in attestation["if"]
+        assert (
+            attestation["with"]["subject-digest"] == f"${{{{ steps.{role}-build.outputs.digest }}}}"
+        )
+    assert not any(
+        step.get("uses", "").startswith("docker/build-push-action") for step in publisher["steps"]
+    )
     finalizer = publisher["steps"][-1]
     assert "always()" in finalizer["if"] and "!cancelled()" in finalizer["if"]
     assert "env.DRY_RUN != 'true'" in finalizer["if"]
@@ -214,7 +259,29 @@ def test_compose_overrides_select_cpu_ml_and_cuda() -> None:
     assert "image: ghcr.io/substrate-systems/evermatter:ml" in ml
     assert "image: ghcr.io/substrate-systems/evermatter:cuda" in cuda
     assert "gpus: all" in cuda
-    assert "EXOMEM_MODE=performance" in cuda
+    assert "EVERMATTER_MODE=performance" in cuda
+
+
+def test_compose_pins_the_container_vault_path_whichever_name_the_env_file_uses() -> None:
+    """`env_file` brings the operator's `.env` in, and a value under `environment` replaces
+    only the same name. Two names that set the vault differently are refused at boot, so
+    compose pins every spelling to /vault."""
+    import yaml
+
+    from exomem import env_compat
+
+    service = yaml.safe_load(_read("compose.yaml"))["services"]["exomem"]
+    pinned = service["environment"]
+    for dotenv in (
+        {"EXOMEM_VAULT_PATH": "/srv/notes-on-the-host"},
+        {"EVERMATTER_VAULT_PATH": "/srv/notes-on-the-host"},
+        {"KB_MCP_VAULT_PATH": "/srv/notes-on-the-host"},
+    ):
+        container_env = {**dotenv, **pinned}
+        renamed, conflicts = env_compat.rename_settings(container_env)
+        assert renamed["EXOMEM_VAULT_PATH"] == "/vault", dotenv
+        assert conflicts == [], dotenv
+    assert env_compat.emitted_name("EXOMEM_VAULT_PATH") in pinned
 
 
 def test_docker_docs_explain_cuda_capability_and_os_tradeoffs() -> None:

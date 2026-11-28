@@ -16,6 +16,7 @@ import logging
 import re
 import shlex
 from dataclasses import dataclass, field
+from typing import Protocol
 from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives import serialization
@@ -28,6 +29,7 @@ from .backup_source import (
     media_census_command,
     media_collect_command,
     media_manifest_command,
+    media_storage_command,
 )
 from .cell_readiness import CELL_HEALTH_PORT, CELL_HEALTH_PORT_ENV, CELL_READINESS_PATH
 from .export_layout import (
@@ -42,6 +44,7 @@ from .export_layout import (
     staging_claim_name,
     verification_secret_name,
 )
+from .setting_alias import canonical_name
 from .storage.topolvm import FamilyRequest
 from .storage_config import GROWTH_THRESHOLD_PERCENT, LEGACY_CLASS
 
@@ -393,6 +396,8 @@ class CellManifestSpec:
     media_engines: str = ""
     # erase-captured-source: the cell's Source erasure policy JSON, or "" to keep erasure off.
     source_erasure_policy: str = ""
+    # add-face-search D9a: whether the operator enabled face search for this cell.
+    faces_hosted: bool = False
     # add-cloud-media-store D4-D6: a cell the media edge serves. The URL selects the
     # cell; the rest is its standard-mode key bundle and edge credential, all or none.
     media_edge_url: str = ""
@@ -839,6 +844,8 @@ def _container_security_context() -> dict:
 MEDIA_ENGINES_ENV = "EXOMEM_MEDIA_ENGINES"
 # The per-cell Source erasure policy, the variable the runtime's source_erasure module reads.
 SOURCE_ERASURE_POLICY_ENV = "EXOMEM_SOURCE_ERASURE_POLICY"
+# The per-cell face search switch, the variable the runtime's face_store module reads.
+FACES_HOSTED_ENV = "EXOMEM_FACES_HOSTED"
 # The resident passage matrix ceiling, the variable the runtime's passage_matrix module
 # reads. The platform chart sets it for every cell in cellctl.cellResources.passageMatrixBudget,
 # next to the cell memory limit. The runtime still admits it against the pod's memory headroom
@@ -869,6 +876,8 @@ MODEL_ENV_FORBIDDEN_KEYS = frozenset(
         MEDIA_ENGINES_ENV,
         # Rendered per cell from the erasure selection: a chart-wide value would enable every owner's cell.
         SOURCE_ERASURE_POLICY_ENV,
+        # Rendered per cell from the face selection: a chart-wide value would enable faces in every cell.
+        FACES_HOSTED_ENV,
         # Names the cell's media store and holds its key paths; cellctl renders it per cell.
         MEDIA_STORE_CONFIG_ENV,
         # `inline` would run media extraction inside the serving process, which a
@@ -931,10 +940,13 @@ def check_model_env(model_env: object) -> None:
             raise ValueError(f"cell model environment has an invalid name: {key!r}")
         if not isinstance(model_env[key], str):
             raise ValueError(f"cell model environment value for {key} must be a string")
+        # The cell reads an EVERMATTER_ or KB_MCP_ name as the EXOMEM_ name, so it is refused
+        # exactly as that name is.
+        internal = canonical_name(key)
         if (
-            key in MODEL_ENV_FORBIDDEN_KEYS
-            or key.startswith(MODEL_ENV_FORBIDDEN_PREFIXES)
-            or key.endswith(MODEL_ENV_FORBIDDEN_SUFFIXES)
+            internal in MODEL_ENV_FORBIDDEN_KEYS
+            or internal.startswith(MODEL_ENV_FORBIDDEN_PREFIXES)
+            or internal.endswith(MODEL_ENV_FORBIDDEN_SUFFIXES)
         ):
             raise ValueError(f"cell model environment may not set {key}")
 
@@ -1022,7 +1034,9 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
     )
     # Defence in depth: settings load already refused these (main.py).
     check_model_env(spec.model_env)
-    if PASSAGE_MATRIX_BYTES_ENV not in spec.model_env:
+    # A model_env entry that names the budget under an alias reaches the cell as this name, so it
+    # replaces the default as well; two entries would leave the value to the order of the list.
+    if not any(canonical_name(key) == PASSAGE_MATRIX_BYTES_ENV for key in spec.model_env):
         budget_mib = _memory_mib(spec.resources.passage_matrix_budget)
         env.append({"name": PASSAGE_MATRIX_BYTES_ENV, "value": str(budget_mib * 1024 * 1024)})
     for key, value in sorted(spec.model_env.items()):
@@ -1031,6 +1045,8 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
         env.append({"name": MEDIA_ENGINES_ENV, "value": spec.media_engines})
     if spec.source_erasure_policy:
         env.append({"name": SOURCE_ERASURE_POLICY_ENV, "value": spec.source_erasure_policy})
+    if spec.faces_hosted:
+        env.append({"name": FACES_HOSTED_ENV, "value": "1"})
     return env
 
 
@@ -1319,6 +1335,13 @@ CATALOGUE_BACKUP_EXCLUDES = tuple(
     for name in (".lexical-staged-*.sqlite", ".lexical.sqlite.rebuild-*.tmp")
     for suffix in ("", "-wal", "-shm", "-journal")
 )
+# The face index holds face vectors, which a re-scan rebuilds and no backup may keep. Mirrors the rebuildable
+# `face-index` family; tests/test_face_store.py pins this mirror to the registry.
+FACE_INDEX_BACKUP_EXCLUDES = tuple(
+    f"/data/host/.local/state/exomem/state/*/faces/index.sqlite{suffix}"
+    for suffix in ("", "-wal", "-shm", "-journal")
+)
+STATE_BACKUP_EXCLUDES = (*CATALOGUE_BACKUP_EXCLUDES, *FACE_INDEX_BACKUP_EXCLUDES)
 
 
 # move-cloud-cells-to-local-storage D10: the backed-up filesystem's used and
@@ -1706,7 +1729,7 @@ def render_backup_job(
         "restic snapshots || restic init",
         # Without --host restic records the Job pod's random hostname.
         f"restic backup --json --host {shlex.quote(spec.cell_id)}"
-        f"{''.join(' --exclude ' + shlex.quote(pattern) for pattern in CATALOGUE_BACKUP_EXCLUDES)} {' '.join(backed_up)} "
+        f"{''.join(' --exclude ' + shlex.quote(pattern) for pattern in STATE_BACKUP_EXCLUDES)} {' '.join(backed_up)} "
         "> /tmp/backup.json || exit 1",
         (
             "SNAPSHOT_ID=$(grep -o '\"snapshot_id\":\"[a-f0-9]\\{64\\}\"' /tmp/backup.json "
@@ -1725,7 +1748,11 @@ def render_backup_job(
         # D12: the cell's drain record, "<evicted count> <evicted bytes> <census time>", on a line of its own.
         # The census time is the cell's. A record that the Job cannot read reports unknown at the hold start.
         media_census_command(spec.hold_started_at),
-        # collect-released-media D5: only after the prune succeeded, and last, once the termination message is whole.
+        # add-cloud-media-store D10: the cell's storage record, a JSON line of its own after the census. A record that
+        # the Job cannot read reports both figures null at the hold start.
+        media_storage_command(spec.hold_started_at),
+        # collect-released-media D5: only after the prune succeeded, and last, once the termination message is whole. Its
+        # result is the fourth line (k8s_client._media_collection).
         *([media_collect_command()] if collects and retention is not None else []),
     ]
     pod_spec = _job_pod_spec(
@@ -1789,6 +1816,29 @@ def render_restic_verify_job(
             "template": {"metadata": {"labels": labels}, "spec": pod},
         },
     }
+
+
+class BackupStores(Protocol):
+    """The two object stores cellctl's configuration names for cell backups."""
+
+    @property
+    def object_storage_bucket(self) -> str: ...
+    @property
+    def object_storage_endpoint(self) -> str: ...
+    @property
+    def cell_data_backup_bucket(self) -> str: ...
+    @property
+    def cell_data_endpoint(self) -> str: ...
+
+
+def backup_store(stores: BackupStores, *, stored_key: bool) -> dict[str, str]:
+    """The bucket and S3 endpoint a cell's backup and restore Jobs reach. An old cell keeps the
+    founder-account bucket its stored key was minted for; a new cell reads the custodian's key,
+    which only the locked cell-data bucket accepts (D9). The operator restore tools use this rule too."""
+
+    if stored_key:
+        return {"bucket_name": stores.object_storage_bucket, "endpoint": stores.object_storage_endpoint}
+    return {"bucket_name": stores.cell_data_backup_bucket, "endpoint": stores.cell_data_endpoint}
 
 
 def render_restore_job(

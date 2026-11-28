@@ -14,14 +14,22 @@ import shutil
 import stat
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from collections.abc import Iterator
+from dataclasses import asdict, dataclass, field, replace
+from pathlib import Path, PurePosixPath
 
 import httpx2
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-from . import adoption_run, import_selection, import_stage, media_capacity, operation_entries
+from . import (
+    adoption_run,
+    extraction_parts,
+    import_selection,
+    import_stage,
+    media_capacity,
+    operation_entries,
+)
 from .cell_init import _ensure_private_directory
 from .cli_progress import Progress, human_bytes
 from .cloud_import import STORAGE_ALLOWANCE_EXCEEDED
@@ -30,6 +38,7 @@ from .cloud_import_client import (
     CHECKPOINT_RECORD,
     PREFLIGHT,
     REGISTER,
+    Choices,
     CloudImportClientConfig,
     CloudImportError,
     Window,
@@ -37,6 +46,7 @@ from .cloud_import_client import (
     _Where,
     import_source,
     lands_declared,
+    resumed_choices,
     safe_code,
     server_code,
 )
@@ -53,9 +63,6 @@ WAIT_POLL_SECONDS = 30
 WAIT_LIMIT_SECONDS = 7200
 LIST_LIMIT = 50
 GIB = 1 << 30
-# Filing a window to its end gives up on a window whose replies show no movement this many times in a row: no count
-# moved, and the page's position (its number, its phase and the files planned) stayed the same.
-FILING_STALL_CALLS = 5
 # The states of the cell's `file` reply, from the module that builds it.
 WORKING, STOPPED, DONE = adoption_run.FILING_STATES
 # The CLI's own state for a `file` call that the cell refused with an error; no `file` reply has it.
@@ -67,6 +74,8 @@ _REPEAT_ONCE = frozenset({"MUTATION_OUTCOME_UNKNOWN", "MUTATION_COMMITTED_ACKNOW
 _REPEAT_AFTER_WAIT = "MUTATION_ACKNOWLEDGEMENT_PENDING"
 # The code with which a cell refuses an action that it does not know.
 _UNKNOWN_ACTION = "INVALID_MODE"
+# The `file` operation's field that arrived with the resident filer (a wake that does not wait for the filing).
+_FILER_FIELD = "wait"
 # The code that the CLI gives a tool error, because the transport carries no code of the cell's own.
 _TOOL_ERROR = "TOOL_ERROR"
 
@@ -93,6 +102,10 @@ class Cell:
         """One `file` call on a staged window; a cell that cannot file in one call raises FilingUnavailable."""
         raise FilingUnavailable
 
+    async def offers_file(self) -> bool:
+        """Whether the cell files a registered import itself; the base cell cannot file, as its `file` says."""
+        return False
+
 
 class McpCell(Cell):
     """The cell's tools through the Cloud gateway, signed in with the CLI's OAuth client."""
@@ -109,10 +122,13 @@ class McpCell(Cell):
             self._entered = False
             await self._client.__aexit__(*error)
 
-    async def _call(self, arguments: dict) -> dict:
+    async def _enter(self) -> None:
         if not self._entered:
             await self._client.__aenter__()
             self._entered = True
+
+    async def _call(self, arguments: dict) -> dict:
+        await self._enter()
         # The cell lists the public tools only, so the grouped call goes out as the door call that stands for it.
         result = await self._client.call_tool(*operation_entries.spell_call("adoption_studio", arguments, "public"))
         if isinstance(result.structured_content, dict):
@@ -136,17 +152,49 @@ class McpCell(Cell):
                 raise FilingUnavailable from error
             return {"success": False, "error": {"code": _TOOL_ERROR, "message": str(error)}}
 
+    async def offers_file(self) -> bool:
+        """Whether the cell shows that it files a registered import with no caller, as its resident filer does.
+
+        The filer came with the `wait` field of the `file` operation. A cell that lists the operation's fields without
+        `wait` files only inside a call, and a write door without `imports.file` has no filing at all. The probe shows
+        that the cell's code has the filer, not that the filer is running. A reply that cannot be read proves
+        nothing, so the cell is then taken to offer filing.
+        """
+        await self._enter()
+        if await self._lacks_file():
+            return False
+        fields = await self._file_fields()
+        return fields is None or _FILER_FIELD in fields
+
+    async def _file_fields(self) -> set[str] | None:
+        """The fields that the cell's own help lists for its `file` operation; None when it cannot be read.
+
+        The door's published schema lists no per-operation fields, so `read_instructions` is the cell's answer.
+        """
+        operation = self._file_door()[1]["operation"]
+        try:
+            result = await self._client.call_tool("read_instructions", {"topic": operation})
+            arguments = (result.structured_content or {}).get("arguments")
+            return set(arguments) if isinstance(arguments, dict) and arguments else None
+        except Exception:  # noqa: BLE001 -- help that cannot be read says nothing about the operation
+            return None
+
+    @staticmethod
+    def _file_door() -> tuple[str, dict]:
+        """The write door and the call that stands for `file` on it, as the public surface spells them."""
+        return operation_entries.spell_call("adoption_studio", {"action": "file"}, "public")
+
     async def _lacks_file(self) -> bool:
         """Whether the cell's published write door lists its operations, and `imports.file` is not one of them.
 
         A schema that cannot be read, or that lists no operations, proves nothing, so the caller keeps the error as a stop.
         """
-        door = operation_entries.spell_call("adoption_studio", {"action": "file"}, "public")[0]
+        door, call = self._file_door()
         try:
             for tool in await self._client.list_tools():
                 if tool.name == door:
                     operations = (((tool.input_schema or {}).get("properties") or {}).get("operation") or {}).get("enum") or ()
-                    return bool(operations) and "imports.file" not in operations
+                    return bool(operations) and call["operation"] not in operations
         except Exception:  # noqa: BLE001 -- a listing or a schema that cannot be read says nothing about the operation
             return False
         return False
@@ -270,14 +318,13 @@ class FilingReply:
                 raise FilingUnavailable
             return cls.refused(code, error.get("message"))
         progress, stop = reply.get("progress"), reply.get("stop")
-        if reply.get("filing") not in adoption_run.FILING_STATES or not isinstance(progress, dict) or any(
-                type(progress.get(name)) is not int for name in adoption_run.FILING_COUNTS):
+        mark = adoption_run.filing_mark(progress)
+        if reply.get("filing") not in adoption_run.FILING_STATES or mark is None:
             return cls.refused("FILING_REPLY_UNREADABLE", "the reply lacks the state or the counts of a file reply")
         stop = stop if isinstance(stop, dict) else {}
         person = reply.get("person") if isinstance(reply.get("person"), list) else []
         return cls(reply["filing"], reply.get("continuation") if isinstance(reply.get("continuation"), str) else None,
-                   tuple(progress[name] for name in adoption_run.FILING_COUNTS),
-                   json.dumps(progress.get("page"), sort_keys=True), safe_code(stop.get("code")), _bounded(stop.get("reason")),
+                   *mark, safe_code(stop.get("code")), _bounded(stop.get("reason")),
                    frozenset(item["need"] for item in person if isinstance(item, dict) and isinstance(item.get("need"), str)))
 
 
@@ -524,7 +571,7 @@ class _Run:
         if reply.state == CALL_ERROR and reply.code in _REPEAT_ONCE:  # nosemgrep: ep-lexical-intent -- `reply` is the cell's parsed envelope; this compares closed protocol states and outcome codes, not text.
             reply = await call()
         waits = 0
-        while reply.state == CALL_ERROR and reply.code == _REPEAT_AFTER_WAIT and waits < FILING_STALL_CALLS:  # nosemgrep: ep-lexical-intent -- `reply` is the cell's parsed envelope; this compares closed protocol states and outcome codes, not text.
+        while reply.state == CALL_ERROR and reply.code == _REPEAT_AFTER_WAIT and waits < adoption_run.FILING_STALL_CALLS:  # nosemgrep: ep-lexical-intent -- `reply` is the cell's parsed envelope; this compares closed protocol states and outcome codes, not text.
             await self.sleep(self.poll)
             reply = await call()
             waits += 1
@@ -586,7 +633,7 @@ class _Run:
                     self.stopped.pop(import_id, None)
                     if not to_the_end:
                         break
-                    if same >= FILING_STALL_CALLS:
+                    if same >= adoption_run.FILING_STALL_CALLS:
                         self.stopped[import_id] = "FILING_STALLED"
                         del self.unfiled[import_id]
                         self.progress.say(f"Filing window {self._number(import_id)} made no progress in {same} calls; "
@@ -631,21 +678,24 @@ class _Run:
         if unadmitted:
             return [], 0, unadmitted
         taken, cost, plain = [], series_cost, len(series_file)
-        for member in pool:
-            if cost + member.cost > limit or (admitted is not None and plain + member.size > admitted):
+        groups = _groups(pool)
+        for group in groups:
+            weight, size = sum(member.cost for member in group), sum(member.size for member in group)
+            if cost + weight > limit or (admitted is not None and plain + size > admitted):
                 break
-            taken.append(member)
-            cost, plain = cost + member.cost, plain + member.size
+            taken.extend(group)
+            cost, plain = cost + weight, plain + size
         if taken:
             return taken, cost, None
-        need, pinned = series_cost + pool[0].cost, reading.pinned.bytes
+        first = sum(member.cost for member in next(_groups(pool)))
+        need, pinned = series_cost + first, reading.pinned.bytes
         if ceiling is not None and need > ceiling:
             raise self.stop("WINDOW_REFUSED_FOR_SPACE", "the Job refused a window for space and the next member cannot form a smaller one")
         if need > reading.reachable.bytes + pinned:
             raise self.stop(
                 "BAND_TOO_SMALL",
                 f"band too small: the window budget is {reading.budget.bytes} bytes, the reachable budget is "
-                f"{reading.reachable.bytes} bytes, {pinned} bytes are job-pinned, and the next member needs {pool[0].cost} bytes")
+                f"{reading.reachable.bytes} bytes, {pinned} bytes are job-pinned, and the next member needs {first} bytes")
         if need > reading.reachable.bytes:
             return [], 0, (f"the next member needs {need} bytes; claimed jobs keep {pinned} bytes of originals on the "
                            "volume, which free up when their jobs end")
@@ -745,9 +795,10 @@ class _Run:
                     resume = True
                 elif error.ended:
                     # Rule (b): Cloud reported that this import ended and replays its ID; the rerun uses a new one.
+                    # The window is renewed either way, so a later rerun works; the stop says to rerun only when it can help.
                     window.renew()
                     self.series.write(self.record)
-                    resume = True
+                    resume = error.rerun_helps
                 elif error.why:
                     # The client gave up its checkpoint, but Cloud's import may be open: the rerun replays the same ID, and Cloud's state decides.
                     message = (f"{error.why}. The checkpoint is removed. Cloud import {error.import_id} stays as it is, and the next run "
@@ -1008,8 +1059,20 @@ def _kept_now(source: Path, member: Member) -> import_selection.Kept | None:
     return import_selection.Kept(member.path, info.st_size, info.st_mtime_ns, (info.st_dev, info.st_ino))
 
 
-def _series_file(label: str, members: list[Member]) -> str:
-    return json.dumps({"label": label, "paths": [member.path for member in members]}, ensure_ascii=False)
+#: The browser family a command-line upload states. It is the sender's own word for what it is; the cell stores it.
+CLI_FAMILY = "cli"
+
+
+def _series_file(label: str, members: list[Member], *, ask_cell: bool, origin_label: str | None) -> str:
+    """The file every window carries: the series' paths, its origin and, when asked, the cell's filing request."""
+    document: dict = {"label": label, "paths": [member.path for member in members]}
+    if ask_cell:
+        document["filing"] = import_stage.FILING_CELL
+    origin = {import_stage.ORIGIN_BROWSER: CLI_FAMILY}
+    if origin_label:
+        origin[import_stage.ORIGIN_LABEL] = origin_label
+    document["origin"] = origin
+    return json.dumps(document, ensure_ascii=False)
 
 
 async def _preflight(run: _Run, members: list[Member], reading: Reading) -> None:
@@ -1029,8 +1092,27 @@ async def _preflight(run: _Run, members: list[Member], reading: Reading) -> None
 
 
 
+def _page_of(path: str) -> str:
+    """The Source page that a part page belongs to; any other path is its own."""
+    page = extraction_parts.source_page_for(PurePosixPath(path))
+    return page.as_posix() if page is not None else path
+
+
 def _sorted(members: list[Member]) -> list[Member]:
-    return sorted(members, key=lambda member: (_CLASS_ORDER[member.klass], member.path))
+    """Artifacts first and text last, each in path order; a page's part pages follow the page (OpenSpec `keep-speech-results-in-cloud`, D4)."""
+    return sorted(members, key=lambda member: (_CLASS_ORDER[member.klass], _page_of(member.path), member.path != _page_of(member.path), member.path))
+
+
+def _groups(pool: list[Member]) -> Iterator[list[Member]]:
+    """The pool as the units a window takes whole: a page with its part pages, or one member."""
+    group: list[Member] = []
+    for member in pool:
+        if group and _page_of(member.path) != _page_of(group[0].path):
+            yield group
+            group = []
+        group.append(member)
+    if group:
+        yield group
 
 
 def _classify(kept: import_selection.Kept, reading: Reading) -> Member:
@@ -1047,18 +1129,22 @@ def _classify(kept: import_selection.Kept, reading: Reading) -> Member:
 async def import_folder(source: Path, config: CloudImportClientConfig, checkpoint: Path, *, cell: Cell, api, uploads=None,
                         include_hidden: bool = False, use_gitignore: bool = True, progress: Progress | None = None,
                         poll_seconds: float = WAIT_POLL_SECONDS, sleep=asyncio.sleep, clock=time.monotonic,
-                        resend_residual: bool = False, file: bool = False, collection: str | None = None) -> dict:
+                        resend_residual: bool = False, file: bool = False, collection: str | None = None,
+                        origin_label: str | None = None, ask_cell: bool | None = None) -> dict:
     """Send a folder as windows, or as one import when the cell reports no window budget. See the module docstring.
 
     `file` also files each landed window through the cell's `file`, while the series waits and at its end; a cell that
     refuses `file` leaves the windows staged, as before. The CLI turns it on by default. It never discards.
+    `ask_cell` says whether each window's series file asks the cell to file the stage itself: it follows `file`
+    unless it is given, so a sender can ask the cell to file and make no `file` call of its own.
     """
     progress, source, checkpoint = progress or Progress(), source.resolve(), checkpoint.resolve()
     where, held = _Where(WINDOWS), []
     try:
         return await _import_folder(source, config, checkpoint, cell=cell, api=api, uploads=uploads, include_hidden=include_hidden,
                                     use_gitignore=use_gitignore, progress=progress, poll_seconds=poll_seconds, sleep=sleep,
-                                    clock=clock, resend=resend_residual, held=held, file=file, collection=collection)
+                                    clock=clock, resend=resend_residual, held=held, file=file, collection=collection,
+                                    origin_label=origin_label, ask_cell=file if ask_cell is None else ask_cell)
     except Stopped:
         raise
     except Exception as error:  # noqa: BLE001 -- provider errors may contain presigned URLs
@@ -1071,7 +1157,7 @@ async def import_folder(source: Path, config: CloudImportClientConfig, checkpoin
 
 
 async def _import_folder(source, config, checkpoint, *, cell, api, uploads, include_hidden, use_gitignore, progress,
-                         poll_seconds, sleep, clock, resend, held, file, collection) -> dict:
+                         poll_seconds, sleep, clock, resend, held, file, collection, origin_label, ask_cell) -> dict:
     # nosemgrep: ep-word-membership -- the series file's own reserved name, fixed by D12.
     if os.path.lexists(source / import_stage.SERIES_FILE):
         raise CloudImportError(PREFLIGHT, "SERIES_FILE_IN_SOURCE", f"the source folder holds a file named {import_stage.SERIES_FILE} "
@@ -1103,25 +1189,22 @@ async def _import_folder(source, config, checkpoint, *, cell, api, uploads, incl
         if series is not None:  # A series exists: sending the folder as one import would send every landed member again.
             raise stopped(series, "NO_WINDOW_BUDGET", "the cell reports no window budget now (its media store may be off or rolled back), "
                                                        "so the series cannot go on")
-        return await _older_cell(source, config, checkpoint, limits, options, **{k: settings[k] for k in ("api", "uploads", "progress", "poll_seconds")})
+        return await _older_cell(source, config, checkpoint, limits, options, ask_cell=ask_cell, origin_label=origin_label,
+                                 **{k: settings[k] for k in ("cell", "api", "uploads", "progress", "poll_seconds", "collection")})
     if series is None:
-        series = await _begin(source, config, record, first, options, settings)
+        series = await _begin(source, config, record, first, options, settings, origin_label, ask_cell)
     if series not in held:
         held.append(series)
     run = run or _Run(series, record, source, config, **settings)
     return await run.drive()
 
 
-async def _begin(source, config, record, first, options, settings) -> Series:
+async def _begin(source, config, record, first, options, settings, origin_label, ask_cell) -> Series:
     """Select, classify and refuse before any upload; then record the series."""
-    progress = settings["progress"]
     selection = import_selection.select(source, include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"])
-    for line in selection.report_lines():
-        progress.say(line)
-    if not selection.kept:
-        raise CloudImportError(PREFLIGHT, "NOTHING_TO_IMPORT", "no file is left to import; pass --include-hidden or --no-gitignore to take more")
+    _report(selection, settings["progress"])
     # The preflight needs classes, which need the cell's classification inputs; an unknown input waits.
-    placeholders = [Member(kept.rel, kept.size, kept.mtime_ns, TEXT) for kept in selection.kept]
+    placeholders = _placeholders(selection)
     series = Series(str(source), config.api_base_url, str(uuid.uuid4()), "", placeholders, options=options)
     run = _Run(series, record, source, config, **settings)
     reading, since = first, run.clock()
@@ -1129,7 +1212,8 @@ async def _begin(source, config, record, first, options, settings) -> Series:
         await run.wait(since, "the cell reports an unknown figure: " + "; ".join(reading.unknown_reasons() or ["its limits"]))
         reading = Reading.of(await settings["cell"].status())
     members = _sorted([_classify(kept, reading) for kept in selection.kept])
-    series.members, series.series_file = members, _series_file(source.name, members)
+    series.members = members
+    series.series_file = _series_file(source.name, members, ask_cell=ask_cell, origin_label=origin_label)
     await _preflight(run, members, reading)
     offloadable = sum(m.size for m in members if m.klass == OFFLOADABLE)
     if offloadable:
@@ -1141,16 +1225,57 @@ async def _begin(source, config, record, first, options, settings) -> Series:
     return series
 
 
-async def _older_cell(source, config, checkpoint, limits, options, *, api, uploads, progress, poll_seconds) -> dict:
-    """A cell without a window budget: refuse a folder above its known size, else send one import as before."""
+def _report(selection: import_selection.Selection, progress: Progress) -> None:
+    """Say what the selection leaves behind, and refuse a selection with nothing to send."""
+    for line in selection.report_lines():
+        progress.say(line)
+    if not selection.kept:
+        raise CloudImportError(PREFLIGHT, "NOTHING_TO_IMPORT", "no file is left to import; pass --include-hidden or --no-gitignore to take more")
+
+
+def _placeholders(selection: import_selection.Selection) -> list[Member]:
+    return [Member(kept.rel, kept.size, kept.mtime_ns, TEXT) for kept in selection.kept]
+
+
+async def _older_cell(source, config, checkpoint, limits, options, *, cell, api, uploads, progress, poll_seconds,
+                      ask_cell, origin_label, collection) -> dict:
+    """A cell without a window budget: refuse a folder above its known size, else send one import.
+
+    A request to file or a label needs the series file that a window carries, and a cell that offers filing reads it.
+    A new import takes its choices from the cell's offer. A rerun takes them from its checkpoint, so it sends the
+    archive of the first run and the result names the request that run made, because the cell, not this command, files.
+    """
     maximum = (limits or {}).get("max_storage_gib")
-    if type(maximum) is int:
+    needs_series_file = ask_cell or origin_label is not None
+    now = Choices(filing=ask_cell, label=origin_label, collection=collection)
+    choices = resumed_choices(checkpoint, now, source)
+    if choices is None:
+        offered = needs_series_file and await cell.offers_file()
+        claim = ("asked" if offered else "not_offered") if ask_cell else None
+        choices = replace(now, carried=offered, cell_filing=claim)
+    offered = choices.carried
+    selection = None
+    if offered or type(maximum) is int:
         selection = import_selection.select(source, include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"])
-        if selection.kept_bytes > maximum * GIB:
-            raise CloudImportError(PREFLIGHT, "FOLDER_ABOVE_CELL_SIZE", f"the folder declares {selection.kept_bytes} bytes and the "
-                                   f"cell's known size is {maximum * GIB} bytes ({maximum} GiB); nothing is sent", resume=False)
-    return await import_source(source, config, checkpoint, api=api, uploads=uploads, poll_seconds=poll_seconds,
-                               progress=progress, include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"])
+    if type(maximum) is int and selection.kept_bytes > maximum * GIB:
+        raise CloudImportError(PREFLIGHT, "FOLDER_ABOVE_CELL_SIZE", f"the folder declares {selection.kept_bytes} bytes and the "
+                               f"cell's known size is {maximum * GIB} bytes ({maximum} GiB); nothing is sent", resume=False)
+    window = None
+    if offered:
+        _report(selection, progress)
+        series_file = _series_file(collection or source.name, _placeholders(selection), ask_cell=ask_cell, origin_label=origin_label)
+        window = Window(selection, series_file.encode("utf-8"))
+    elif needs_series_file:
+        if ask_cell:
+            progress.say("The cell does not file imports itself. Ask your assistant to file this import once it is staged.")
+        if origin_label is not None:
+            progress.say("The cell cannot record --label, so the files filed from this import will not carry it.")
+    row = await import_source(source, config, checkpoint, api=api, uploads=uploads, poll_seconds=poll_seconds, progress=progress,
+                              include_hidden=options["include_hidden"], use_gitignore=options["use_gitignore"],
+                              window=window, choices=choices)
+    if row.get("cell_filing") == "asked":
+        progress.say("The upload is done and the cell files the folder by itself.")
+    return row
 
 
 async def _residual(cell: Cell) -> dict[str, tuple[str, int]]:

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +27,7 @@ from . import (
     pointer_write,
     project_keys,
     semantic_writes,
+    sensitivity_classes,
     temporal,
     vocabulary_resolution,
 )
@@ -155,6 +156,14 @@ def set_frontmatter_field(
             if route := source_corrections.correction_route(vault_root, rel_path):
                 reason += " " + route
         raise SetFrontmatterError(code="APPEND_ONLY", reason=reason)
+
+    if field == sensitivity_classes.FIELD and value is not None:
+        # The same registered keys that a capture and `files.classify` accept, so a plain edit
+        # never leaves a class that a policy would read as unclassified.
+        try:
+            value = list(sensitivity_classes.validated(vault_root, value))
+        except sensitivity_classes.SensitivityError as e:
+            raise SetFrontmatterError(code=e.code, reason=e.reason) from e
 
     curated = in_curated_tree(rel_path)
     if curated and not allow_curated:
@@ -311,6 +320,7 @@ def set_frontmatter_field(
         log.exception("set_frontmatter_field write failed for %s", rel_path)
         warnings.append(f"partial write — reconcile on desktop: {error}")
         raise
+    warnings.extend(committed.review_field_warnings())
 
     return SetFrontmatterResult(
         path=rel_path,
@@ -383,6 +393,14 @@ def owned_field_route(vault_root: Path, field: str) -> str | None:
             "manage_memory_file", {"operation": "reclassify", "artifact_path": "...", "reason": "..."}
         )
         return f"`{field}` changes only through {call}, which checks the raw file's recorded identity."
+    if writer == page_fields.WRITER_CLASSIFY:
+        call = capabilities.active_call_text(
+            "manage_memory_file", {"operation": "classify", "sensitivity": ["..."], "reason": "..."}
+        )
+        return (
+            f"`{field}` changes only through {call}, which checks the classes against the registry "
+            "and never moves the file or touches any other byte."
+        )
     return (
         f"`{field}` is the back-reference that a compiled page's `sources:` citation writes; "
         "edit the citing page instead."
@@ -400,13 +418,15 @@ def set_pointer_field(
     today: dt.date | None = None,
     validate_only: bool = False,
     operation: str | None = None,
+    writer: str | None = None,
 ) -> SetFrontmatterResult | SetFrontmatterValidation:
     """Correct a pointer field of a page through the governed pointer write.
 
-    Only a curation `edit` step calls this: the user confirms its exact plan, and `operation`
-    files the record where the step's compensation finds it. The value span is patched where
+    A curation `edit` step calls this: the user confirms its exact plan, and `operation`
+    files the record where the step's compensation finds it. The operation that a field's
+    registry `writer` names calls it too, passing that `writer`. The value span is patched where
     the YAML parser places it and every other byte, line endings included, is kept: `updated`
-    is not a pointer, so the write's span proof would refuse it. A field that another operation
+    is not a pointer, so the write's span proof would refuse it. A field that another writer
     owns (`owned_field_route`) refuses. A page outside the append-only trees takes the same
     route, so a change that touches only where it belongs is reversible for every page type; a
     page in a curated tree refuses, as `set_frontmatter_field` refuses it without `allow_curated`.
@@ -437,7 +457,7 @@ def set_pointer_field(
             reason=f"`{field}` is not a pointer field, so it keeps its captured bytes in {rel_path}.",
         )
     owner = owned_field_route(vault_root, field)
-    if owner is not None:
+    if owner is not None and page_fields.writers(vault_root).get(field) != writer:
         raise SetFrontmatterError(code="POINTER_FIELD_OWNED", reason=owner)
     try:
         text, guard = read_guarded_text(vault_root, abs_path)
@@ -462,6 +482,117 @@ def set_pointer_field(
         )
     except (FrontmatterSpliceError, pointer_write.PointerWriteError) as error:
         raise SetFrontmatterError(error.code, error.reason) from error
+    landed = _land_pointer_write(
+        vault_root, rel_path=rel_path, guard=guard, after=after, write=write, why=why,
+        expected_hash=expected_hash, today=today, validate_only=validate_only,
+        operation=operation, auxiliary=project_plan,
+        note=lambda record_id: (
+            f"set_frontmatter_field via exomem (pointer write {record_id}). {why.strip()} "
+            f"Field: {field!r}. Old: {old_value!r}. New: {value!r}."
+        ),
+    )
+    if validate_only:
+        return SetFrontmatterValidation(
+            path=rel_path, field=field, old_value=old_value, new_value=value,
+            validate_only=True, semantic=landed.semantic,
+        )
+    return SetFrontmatterResult(
+        path=rel_path, field=field, old_value=old_value, new_value=value,
+        warnings=landed.warnings, semantic=landed.semantic, pointer_write=landed.record_id,
+    )
+
+
+def revert_pointer_field(
+    vault_root: Path,
+    *,
+    path: str,
+    record_id: str,
+    fields: Collection[str],
+    why: str,
+    expected_hash: str | None = None,
+    today: dt.date | None = None,
+    validate_only: bool = False,
+    operation: str | None = None,
+) -> SetFrontmatterResult | SetFrontmatterValidation:
+    """Return a page to the bytes before pointer write `record_id`, through a recorded write.
+
+    The record must be of `path` and change only `fields`, so the operation that owns those
+    fields never reverts another operation's write. The revert is itself a recorded pointer
+    write, so it can be reverted in turn.
+    """
+    _require_settable(next(iter(fields), ""), why)
+    try:
+        abs_path, rel_path = resolve_under_vault(
+            vault_root, path, must_exist=True, must_be_file=True
+        )
+        text, guard = read_guarded_text(vault_root, abs_path)
+    except VaultPathError as e:
+        raise SetFrontmatterError(code=e.code, reason=e.reason) from e
+    except (OSError, UnicodeError) as error:
+        raise SetFrontmatterError(code="UNREADABLE", reason=f"could not safely read {path}") from error
+    try:
+        loaded = pointer_write.load_record(vault_root, record_id)
+        if loaded.get("page") != rel_path or any(
+            span.get("key") not in fields for span in loaded.get("spans") or ()
+        ):
+            raise pointer_write.PointerWriteError(
+                "POINTER_RECORD_UNKNOWN", f"that record is not a write of {', '.join(sorted(fields))} on {rel_path}"
+            )
+        write = pointer_write.revert_write(loaded, record_id, text, path=rel_path)
+    except pointer_write.PointerWriteError as error:
+        raise SetFrontmatterError(error.code, error.reason) from error
+    front = parse_frontmatter(text)[0]
+    restored = parse_frontmatter(write.after)[0]
+    field = next(iter(sorted(fields)))
+    landed = _land_pointer_write(
+        vault_root, rel_path=rel_path, guard=guard, after=write.after, write=write, why=why,
+        expected_hash=expected_hash, today=today, validate_only=validate_only,
+        operation=operation, auxiliary=(),
+        note=lambda new_id: (
+            f"set_frontmatter_field via exomem (pointer write {new_id}). {why.strip()} "
+            f"Reverted pointer write {record_id}."
+        ),
+    )
+    if validate_only:
+        return SetFrontmatterValidation(
+            path=rel_path, field=field, old_value=front.get(field), new_value=restored.get(field),
+            validate_only=True, semantic=landed.semantic,
+        )
+    return SetFrontmatterResult(
+        path=rel_path, field=field, old_value=front.get(field), new_value=restored.get(field),
+        warnings=landed.warnings, semantic=landed.semantic, pointer_write=landed.record_id,
+    )
+
+
+@dataclass(frozen=True)
+class _Landed:
+    """What `_land_pointer_write` produced: the semantic report and, for a commit, its record."""
+
+    semantic: dict[str, Any]
+    record_id: str | None = None
+    warnings: list[str] | None = None
+
+
+def _land_pointer_write(
+    vault_root: Path,
+    *,
+    rel_path: str,
+    guard: Any,
+    after: str,
+    write: pointer_write.PointerWrite,
+    why: str,
+    expected_hash: str | None,
+    today: dt.date | None,
+    validate_only: bool,
+    operation: str | None,
+    auxiliary: tuple[PlannedWrite, ...],
+    note: Callable[[str], str],
+) -> _Landed:
+    """Preflight one proven pointer write and, unless `validate_only`, commit and record it.
+
+    `note` builds the operation-log line from the record id. The page keeps every byte outside
+    the proven spans, and the reason record lets a revert return the exact bytes.
+    """
     now = today or temporal.now()
     try:
         date_iso = semantic_writes.resolve_reviewed_date_iso(None, now)
@@ -491,10 +622,7 @@ def set_pointer_field(
             ),
         )
     if validate_only:
-        return SetFrontmatterValidation(
-            path=rel_path, field=field, old_value=old_value, new_value=value,
-            validate_only=True, semantic=preflight.as_dict(),
-        )
+        return _Landed(semantic=preflight.as_dict())
     rel_no_ext = rel_path.removesuffix(".md")
     record_id = pointer_write.new_record_id()
     try:
@@ -503,10 +631,7 @@ def set_pointer_field(
             date_iso=date_iso,
             op="set_frontmatter_field",
             rel_path_no_ext=rel_no_ext,
-            body=(
-                f"set_frontmatter_field via exomem (pointer write {record_id}). {why.strip()} "
-                f"Field: {field!r}. Old: {old_value!r}. New: {value!r}."
-            ),
+            body=note(record_id),
             operation_token=preflight.transition_token,
         )
     except (OSError, UnicodeError, ValueError) as error:
@@ -519,17 +644,14 @@ def set_pointer_field(
             committed = semantic_writes.commit_existing(
                 vault_root,
                 preflight=preflight,
-                auxiliary_writes=(*project_plan, *log_plan.writes),
+                auxiliary_writes=(*auxiliary, *log_plan.writes),
                 derived_auxiliary_writes=tuple(
                     ("operation-log", write) for write in log_plan.writes
                 ),
             )
     except semantic_writes.SemanticWriteError as error:
         raise SetFrontmatterError(error.code, error.reason) from error
-    return SetFrontmatterResult(
-        path=rel_path, field=field, old_value=old_value, new_value=value,
-        warnings=warnings, semantic=committed.as_dict(), pointer_write=record_id,
-    )
+    return _Landed(semantic=committed.as_dict(), record_id=record_id, warnings=warnings)
 
 
 def apply_pointer_patch(

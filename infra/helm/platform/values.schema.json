@@ -233,6 +233,10 @@
           "type": "array", "uniqueItems": true,
           "items": {"$ref": "#/$defs/mediaEngineName"}
         },
+        "facesHostedCellIds": {
+          "type": "array", "maxItems": 1024, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}
+        },
         "sourceErasureCellIds": {
           "type": "object",
           "propertyNames": {"minLength": 1},
@@ -533,6 +537,7 @@
         "hostname": {"type": "string"},
         "additionalHostnames": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"}},
         "publicBaseUrl": {"type": "string"},
+        "siteOrigin": {"type": "string", "pattern": "^(?:https://[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63})?$"},
         "mcpPath": {"type": "string", "pattern": "^/[A-Za-z0-9/_-]*$"},
         "cellProtocolVersion": {"type": "string", "pattern": "^[0-9]+$"},
         "controlPlaneKeySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},

@@ -23,6 +23,7 @@ import json
 import os
 import secrets
 import shutil
+import subprocess
 import sys
 import time
 from dataclasses import asdict
@@ -33,6 +34,7 @@ from . import (
     catalogue_prewarm,
     drill,
     drill_cluster,
+    home_import,
     host_speed,
     images,
     infra,
@@ -86,8 +88,9 @@ def _parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--keep", action="store_true", help="leave the stack running for inspection")
     run_parser.add_argument(
         "--large-import", action="store_true",
-        help="bring a large folder and then a media-heavy one into a cell whose local-storage volume cannot hold "
-        "two copies (design D7); runs after provisioning, in place of the other steps (partial proof; never gates a node)",
+        help="bring a large folder and then a media-heavy one into a cell whose local-storage volume is below twice the "
+        "data and below what staged copies left behind would need (design D7); runs after provisioning, in place of "
+        "the other steps (partial proof; never gates a node)",
     )
     run_parser.add_argument("--large-import-files", type=int, default=large_import_fixture.DEFAULT_FILES,
                             help="with --large-import: the number of files in both folders; the byte total shrinks first")
@@ -96,8 +99,8 @@ def _parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--large-import-minutes", type=float, default=115,
                             help="with --large-import: stop filing and report what is done this long after the process started")
     run_parser.add_argument("--large-import-smoke", action="store_true",
-                            help="with --large-import: accept data that cannot show the volume is below two copies; "
-                            "the verdict is then smoke_only, never pass")
+                            help="with --large-import: accept data that cannot show the volume is below twice the data "
+                            "and below what staged copies left behind would need; the verdict is then smoke_only, never pass")
     run_parser.add_argument(
         "--raw-import", action="store_true",
         help="bring the generator's messy collection into a fresh cell and into one that already holds another collection, "
@@ -107,6 +110,13 @@ def _parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--raw-import-python", type=Path, default=None,
                             help="with --raw-import: an interpreter with the server and its extractors installed "
                             "(the local arm and the scorer run on it)")
+    run_parser.add_argument(
+        "--home-import", action="store_true",
+        help="send a fixture tree through the real import Job with a series file that asks the cell to file it, "
+        "make no file call from any client, restart the cell once while it files, and check the cell's Sources, "
+        "leftovers and counts against the fixture's manifest; runs after provisioning, in place of the other steps "
+        "(partial proof; never gates a node)",
+    )
     run_parser.add_argument(
         "--original-fixity", action="store_true",
         help="seed stored originals, time the fixity table rebuild and passes in the cell, then restore one "
@@ -175,6 +185,15 @@ def main(argv: list[str] | None = None) -> int:
             ("--local-storage-coexistence", args.local_storage_coexistence), ("--steps", args.steps)) if chosen]
         if others:
             parser.error(f"--large-import runs alone; remove {', '.join(others)}")
+    if args.command == "run" and args.home_import:
+        others = [flag for flag, chosen in (
+            ("--cloud-import", args.cloud_import), ("--owner-export", args.owner_export),
+            ("--operator-restore-abort", args.operator_restore_abort), ("--large-import", args.large_import),
+            ("--raw-import", args.raw_import), ("--original-fixity", args.original_fixity),
+            ("--release", args.release), ("--catalogue-prewarm", args.catalogue_prewarm),
+            ("--local-storage-coexistence", args.local_storage_coexistence), ("--steps", args.steps)) if chosen]
+        if others:
+            parser.error(f"--home-import runs alone; remove {', '.join(others)}")
     if args.command == "run" and args.raw_import:
         others = [flag for flag, chosen in (
             ("--cloud-import", args.cloud_import), ("--owner-export", args.owner_export),
@@ -188,7 +207,8 @@ def main(argv: list[str] | None = None) -> int:
         others = [flag for flag, chosen in (
             ("--cloud-import", args.cloud_import), ("--owner-export", args.owner_export),
             ("--operator-restore-abort", args.operator_restore_abort), ("--large-import", args.large_import),
-            ("--raw-import", args.raw_import), ("--local-storage-coexistence", args.local_storage_coexistence),
+            ("--raw-import", args.raw_import), ("--home-import", args.home_import),
+            ("--local-storage-coexistence", args.local_storage_coexistence),
             ("--steps", args.steps)) if chosen]
         if others:
             parser.error(f"--original-fixity runs alone; remove {', '.join(others)}")
@@ -203,7 +223,8 @@ def main(argv: list[str] | None = None) -> int:
         others = [flag for flag, chosen in (
             ("--cloud-import", args.cloud_import), ("--owner-export", args.owner_export),
             ("--operator-restore-abort", args.operator_restore_abort), ("--large-import", args.large_import),
-            ("--raw-import", args.raw_import), ("--original-fixity", args.original_fixity),
+            ("--raw-import", args.raw_import), ("--home-import", args.home_import),
+            ("--original-fixity", args.original_fixity),
             ("--local-storage-coexistence", args.local_storage_coexistence), ("--steps", args.steps),
             ("--catalogue-prewarm", args.catalogue_prewarm)) if chosen and flag != mode]
         if others:
@@ -244,6 +265,7 @@ async def _run(args: argparse.Namespace) -> int:
         "operator_restore_abort": args.operator_restore_abort,
         "large_import": args.large_import,
         "raw_import": args.raw_import,
+        "home_import": args.home_import,
         "original_fixity": args.original_fixity,
         "release_rollout": args.release,
         "catalogue_prewarm": args.catalogue_prewarm,
@@ -259,7 +281,7 @@ async def _run(args: argparse.Namespace) -> int:
     if not report.inputs["exomem_worktree_clean"]:
         report.notes.append("the exomem checkout had uncommitted changes")
     only = {int(part) for part in args.steps.split(",")} if args.steps else None
-    if args.large_import or args.raw_import or args.original_fixity or args.catalogue_prewarm:
+    if args.large_import or args.raw_import or args.home_import or args.original_fixity or args.catalogue_prewarm:
         # The cell must exist and be paid for; every later step is a P3 lifecycle check this mode does not make.
         only = {1, 2}
     if args.release:
@@ -270,18 +292,20 @@ async def _run(args: argparse.Namespace) -> int:
         report.invalid_reasons.append(
             "the large-import mode runs steps 1 and 2, then its own scenario" if args.large_import
             else "the raw-import mode runs steps 1 and 2, then its own scenario" if args.raw_import
+            else "the home-import mode runs steps 1 and 2, then its own scenario" if args.home_import
             else "the original-fixity mode runs steps 1 and 2, then its own scenario" if args.original_fixity
             else "the release mode runs steps 1 to 3, then its own proofs" if args.release
             else "the catalogue-prewarm mode runs steps 1 and 2, then its own scenarios" if args.catalogue_prewarm
             else f"only steps {sorted(only)} were selected")
     # The CLI journey needs the disposable CA in the images and versioned object storage.
-    native_cli = args.cloud_import or args.large_import or args.raw_import
+    native_cli = args.cloud_import or args.large_import or args.raw_import or args.home_import
     # Both modes run their cells on the local storage domain (TopoLVM on a loop-device disk).
     local_domain = args.large_import or args.release
     node_storage: infra.NodeStorage | None = None
     node: drill_cluster.Agent | None = None
     plan: large_import.LargeImportPlan | None = None
     raw_plan: raw_import.RawImportPlan | None = None
+    home_plan: home_import.HomeImportPlan | None = None
     # One set of values: cellctl is configured with it, and the scenarios read it back as what to expect.
     prewarm_settings = platform.CataloguePrewarm() if args.catalogue_prewarm else None
 
@@ -370,6 +394,8 @@ async def _run(args: argparse.Namespace) -> int:
                     node, release_rollout.POOL_GIB)
         if args.raw_import:
             raw_plan = raw_import.RawImportPlan(run_id=run_id, workdir=workdir, cli_image=v1, python=args.raw_import_python)
+        if args.home_import:
+            home_plan = home_import.HomeImportPlan(run_id=run_id, workdir=workdir, cli_image=v1)
         with stage(report, "control_database"):
             await substrate.bootstrap_database(stack)
             report.stages["control_database"]["migrate_tail"] = substrate.migrate(stack, source)[-800:]
@@ -421,6 +447,7 @@ async def _run(args: argparse.Namespace) -> int:
         ctx = Context(stack=stack, substrate=control, images=built, resolver=resolver, report=report,
                       cli_image=v1 if args.cloud_import else None,
                       raw_import=raw_plan,
+                      home_import=home_plan,
                       owner_export_image=v1 if args.owner_export else None,
                       operator_restore_abort=args.operator_restore_abort, large_import=plan, release_rollout=args.release,
                       original_fixity=original_fixity.FixityPlan(
@@ -438,23 +465,7 @@ async def _run(args: argparse.Namespace) -> int:
                 await ctx.admin_release({"cellImage": built.cell_v1, "release": RELEASE_V1})
             report.stages["release"]["principal"] = "deploy token" if args.release else "admin token"
             report.stages["release"]["published_cell_slots"] = await _published_cell_slots(ctx, timeout=120)
-        try:
-            await run_steps(ctx, only=only)
-        finally:
-            await close_clients(ctx)
-        report.stages["post_checks"] = post_checks(ctx)
-        mismatches = await ready_matches_pods(ctx)
-        report.stages["post_checks"]["ready_matches_pod"] = not mismatches
-        if mismatches:
-            report.defects.append(
-                {
-                    "step": "post_checks", "cross_lane": True, "owner": "Artexis10/exomem#1368",
-                    "component": "infra/cellctl reconcile._reconcile_row",
-                    "message": "a converged row's `ready` is not re-observed: a row that is not dirty gets only "
-                    "observed_at written, so a cell whose pod later turns NotReady keeps ready=true",
-                    "evidence": mismatches,
-                }
-            )
+        await _steps_then_checks(ctx, report, args.report, workdir, only)
         harness_errors = [step.number for step in report.steps if step.failure and "traceback" in step.failure]
         harness: dict[str, object] = {"steps_with_harness_errors": harness_errors}
         if args.harness_check:
@@ -470,6 +481,8 @@ async def _run(args: argparse.Namespace) -> int:
             code = 0 if report.stages["large_import"]["verdict"] in ("pass", "smoke_only") else 1
         elif args.raw_import:
             code = 0 if report.stages["raw_import"]["verdict"] == raw_import.PASS else 1
+        elif args.home_import:
+            code = 0 if report.stages["home_import"]["verdict"] == home_import.PASS else 1
         elif args.original_fixity or args.catalogue_prewarm:
             # Its stage passed, or StageFailed would have ended the run; steps 3 to 12 did not run.
             code = 0
@@ -487,7 +500,11 @@ async def _run(args: argparse.Namespace) -> int:
         code = 2
     finally:
         # Each cleanup stands alone, so one failing never strands the stack
-        # or loses the report.
+        # or loses the report. The report is written first, before the cleanups that can run long, so
+        # that a step the workflow's timeout kills during one of them still uploads it; the write
+        # after them replaces it with the cleanup notes.
+        if not guarded(report, "report", lambda: report.write(args.report)):
+            code = 2
         if stack is not None and not args.keep:
             guarded(report, "diagnostics", lambda: _collect_diagnostics(stack, workdir))
         if not guarded(report, "teardown", lambda: infra.teardown(stack, keep=args.keep)):
@@ -508,6 +525,31 @@ async def _run(args: argparse.Namespace) -> int:
             shutil.rmtree(workdir, ignore_errors=True)
     _print_summary(report, args.report)
     return code
+
+
+async def _steps_then_checks(ctx: Context, report: Report, report_path: Path, workdir: Path, only: set[int] | None) -> None:
+    try:
+        await run_steps(ctx, only=only)
+    finally:
+        await close_clients(ctx)
+    # The report and the logs the steps kept leave before the checks that read the cluster: a cluster that stopped
+    # answering holds those checks, and the workflow's step timeout then ends the run with nothing uploaded. The report
+    # written at the end of the run replaces this one.
+    guarded(report, "report", lambda: report.write(report_path))
+    guarded(report, "kept diagnostics", lambda: _publish_kept_diagnostics(workdir))
+    report.stages["post_checks"] = post_checks(ctx)
+    mismatches = await ready_matches_pods(ctx)
+    report.stages["post_checks"]["ready_matches_pod"] = not mismatches
+    if mismatches:
+        report.defects.append(
+            {
+                "step": "post_checks", "cross_lane": True, "owner": "Artexis10/exomem#1368",
+                "component": "infra/cellctl reconcile._reconcile_row",
+                "message": "a converged row's `ready` is not re-observed: a row that is not dirty gets only "
+                "observed_at written, so a cell whose pod later turns NotReady keeps ready=true",
+                "evidence": mismatches,
+            }
+        )
 
 
 def _compare_with_known_findings(report: Report, path: Path, only: set[int] | None) -> dict[str, object]:
@@ -562,9 +604,22 @@ def _wait_json(resolver: Resolver, url: str, what: str) -> None:
     wait_for(probe, timeout=300, interval=3, description=f"{what} to answer {url}")
 
 
+# One kubectl read of the cluster's state, at the most: a wedged API server costs five of these, not the diagnostics.
+DIAGNOSTIC_READ_SECONDS = 60
+
+
+def _publish_kept_diagnostics(workdir: Path) -> None:
+    """Copy what the scenarios kept (cell logs, samples) to the folder that the workflow uploads."""
+    artifacts = os.environ.get("REHEARSAL_DIAGNOSTICS_DIR")
+    if artifacts and (workdir / "diagnostics").is_dir():
+        shutil.copytree(workdir / "diagnostics", Path(artifacts), dirs_exist_ok=True)
+
+
 def _collect_diagnostics(stack: infra.Stack, workdir: Path) -> None:
     out = workdir / "diagnostics"
     out.mkdir(exist_ok=True)
+    # What the scenario kept leaves first: the reads below can still run long.
+    _publish_kept_diagnostics(workdir)
     for name, command in {
         "pods": ["get", "pods", "--all-namespaces", "-o", "wide"],
         "events": ["get", "events", "--all-namespaces", "--sort-by=.lastTimestamp"],
@@ -573,14 +628,16 @@ def _collect_diagnostics(stack: infra.Stack, workdir: Path) -> None:
         # The stand-in Traefik's warnings and errors, and its access log of every 5xx it returned.
         "traefik": ["logs", "--namespace", platform.EDGE_NAMESPACE, "deployment/rehearsal-traefik", "--tail=1000"],
     }.items():
-        result = stack.k3s.kubectl(*command, check=False)
+        try:
+            result = stack.k3s.kubectl(*command, check=False, timeout=DIAGNOSTIC_READ_SECONDS)
+        except subprocess.TimeoutExpired:
+            (out / f"{name}.txt").write_text(f"(kubectl {' '.join(command)} did not return in {DIAGNOSTIC_READ_SECONDS} s)\n", encoding="utf-8")
+            continue
         # The gateway logs only warnings and errors, so a healthy run leaves its log empty. An empty file reads
         # as a collection that failed, so the file says the command ran and printed nothing.
         text = result.stdout + result.stderr
         (out / f"{name}.txt").write_text(text or f"(kubectl {' '.join(command)} printed nothing)\n", encoding="utf-8")
-    artifacts = os.environ.get("REHEARSAL_DIAGNOSTICS_DIR")
-    if artifacts:
-        shutil.copytree(out, Path(artifacts), dirs_exist_ok=True)
+    _publish_kept_diagnostics(workdir)
 
 
 def _print_summary(report: Report, path: Path) -> None:
@@ -589,6 +646,9 @@ def _print_summary(report: Report, path: Path) -> None:
     raw = report.stages.get("raw_import")
     if raw and raw.get("verdict"):
         print(f"[rehearsal] raw-import verdict: {raw['verdict']} ({len(raw['findings'])} findings)")
+    home = report.stages.get("home_import")
+    if home and home.get("verdict"):
+        print(f"[rehearsal] home-import verdict: {home['verdict']} ({len(home['findings'])} findings)")
     large = report.stages.get("large_import")
     if large and large.get("verdict"):
         print(f"[rehearsal] large-import verdict: {large['verdict']} ({len(large['findings'])} findings)")

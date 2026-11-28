@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from .. import origin_bindings, planning, provenance, record_formats, records
 from .. import structured_collections as collections
-from . import connection, edit_back, link_values, views
+from . import connection, edit_back, link_values, related_pages, views
 
 
 @dataclass
@@ -40,6 +40,7 @@ class PreparedRecord:
     request_hash: str | None = None
     recheck_in_leaf: bool = False
     link_notes: dict = field(default_factory=dict)
+    related_notes: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,18 @@ class DetachedResume:
     guard: object = None
     native: object = None
     error: Exception | None = None
+
+
+def bind_arguments(signature, *args, **kwargs):
+    """Bind the writer's own defaults and validate its arguments before reading a candidate."""
+    bound = signature.bind(*args, **kwargs)
+    bound.apply_defaults()
+    arguments = dict(bound.arguments)
+    arguments.pop("self", None)
+    collection = arguments.pop("collection")
+    records._validate_why(arguments["why"])
+    records._validate_hold(arguments["hold"])
+    return collection, arguments
 
 
 def from_snapshot(writer, name, collection, arguments):
@@ -192,6 +205,10 @@ def append(writer, row, manifest, declared, arguments):
         candidate.adoption = writer._admit_detached_resume(manifest, resumed)
     except collections.CollectionError as error:
         candidate.error = error
+    if candidate.error is None and candidate.before is None:
+        # A new row only: a replay of an existing row, and every update, create nothing to look up.
+        found = related_pages.for_write(writer, manifest, [(key, candidate.values)])
+        candidate.related_notes = found.notes() if found is not None else {}
     candidate.hold_candidate = {"action": "append", "item": dict(candidate.values), "item_key": item_key,
         "body": candidate.body, "guards": {"expected_container_hash": arguments["expected_container_hash"]}}
     return candidate
@@ -231,7 +248,7 @@ def update(writer, row, manifest, declared, arguments):
             if (not changes or set(changes) - planning.TRIAGE_FIELDS
                     or any(value is None and name not in {"area", "parent"} for name, value in changes.items())):
                 raise collections.CollectionError("INVALID_PLAN_ARGUMENTS", "triage transition is invalid")
-            if old_values["lifecycle"] != "active" or old_values["kind"] == "area":
+            if not planning.triage_eligible(old_values):
                 raise collections.CollectionError("INVALID_PLAN", "triage requires an active deliverable plan")
         changes, deleted = planning._normalize_changes(manifest, changes)
         delete_fields = tuple(set(delete_fields) | set(deleted))

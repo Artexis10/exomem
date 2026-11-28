@@ -17,7 +17,7 @@ from .vault_store import cli_fence
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="exomem cell-media-census")
+    parser = argparse.ArgumentParser(prog="evermatter cell-media-census")
     parser.add_argument("--vault", type=Path, default=Path("/data/vault"))
     args = parser.parse_args(argv)
     try:

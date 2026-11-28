@@ -50,7 +50,7 @@ from exomem import vault as pages
 from exomem.collection_store import capability, connection, custody, replica, schema
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
-from exomem.vault_store import migrate, mode, ownership, write
+from exomem.vault_store import derivation, migrate, mode, ownership, verify, write
 
 ALPHA = "Knowledge Base/Notes/Alpha.md"
 BETA = "Knowledge Base/Notes/Beta.md"
@@ -206,7 +206,7 @@ def test_a_migration_stores_every_file_and_the_rows_equal_the_sidecars_and_no_va
             ("migrate", "drill")
         ]
         with sidecar(lexstore.lexical_path(vault)) as lexical:
-            for table in ("pages", "fts", "semantic_units", "unit_fts"):
+            for table in ("pages", "fts", "title_fts", "wikilink_keys", "semantic_units", "unit_row_keys", "unit_fts"):
                 assert table_rows(store, table) == table_rows(lexical, table)
             assert table_rows(lexical, "pages"), (
                 "the lexical catalogue must hold pages for this check to mean anything"
@@ -254,6 +254,43 @@ def test_a_sidecar_row_that_no_longer_matches_its_file_refuses_the_migration_and
         state_migration.VAULT_STORE_COMPATIBILITY_ID
         not in state_migration.recorded_descriptor_ids(vault)
     )
+
+
+def test_a_graph_sidecar_edge_to_a_page_that_left_the_catalogue_is_replaced_by_the_files_rows_and_reported(
+    vault, capsys, tmp_path
+):
+    """A migration that refuses, or copies a stale edge, because the graph sidecar kept what a vanished page's linker authored."""
+    (vault / BETA).unlink()
+    # The catalogue and the references follow the files. The graph sidecar drops the vanished page's own
+    # rows and keeps Alpha's edge toward it, as when the path that removed a target missed its linkers.
+    lexstore.search_bm25(vault, "lighthouse", 3, scope="kb", repair=True)
+    memory_refs.ReferenceIndex(vault).rebuild_all()
+    with closing(epistemic_graph.EpistemicGraphIndex(vault)._connect()) as graph, graph:
+        epistemic_graph.drop_page_graph_rows(graph, BETA)
+    with sidecar(epistemic_graph.sidecar_path(vault)) as graph:
+        kept = graph.execute(
+            "SELECT edge_key FROM graph_edges WHERE source_path = ? AND dst_page_key = ?",
+            (ALPHA, f"file:{BETA}"),
+        ).fetchall()
+    assert kept, "the sidecar must hold the stale edge for this check to mean anything"
+
+    assert migrate_apply(vault) == 0, capsys.readouterr().err
+
+    applied = printed(capsys)
+    assert applied["status"] == "migrated"
+    stale = applied["graph_sidecar"]
+    assert stale["differing_rows"] >= len(kept)
+    assert stale["tables"]["graph_edges"]["keys"]
+    expected = tmp_path / "expected.sqlite"
+    verify.derive_expected(vault, expected)
+    with closing(sqlite3.connect(expected)) as derived, closing(
+        connection.open_reader(connection.store_path(vault))
+    ) as store:
+        for table in ("graph_nodes", "graph_edges", "graph_parent_refs", "graph_dependencies"):
+            assert table_rows(store, table) == table_rows(derived, table)
+        assert not store.execute(
+            "SELECT 1 FROM graph_edges WHERE dst_page_key = ?", (f"file:{BETA}",)
+        ).fetchall()
 
 
 def test_an_identity_row_that_differs_from_its_page_refuses_the_migration_and_names_the_table(
@@ -358,6 +395,18 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
 ):
     """A rollback that loses a page or leaves an index that answers differently than before store mode, or a vault
     that cannot enter store mode again afterwards."""
+    target = vault / BETA
+    target.write_bytes(target.read_bytes() + b"\n- [rule] Check the tide. ^tide\n")
+    source = vault / ALPHA
+    source.write_bytes(source.read_bytes() + b"\n![[Beta#^tide]]\n")
+    build_indexes(vault)
+    with sidecar(epistemic_graph.sidecar_path(vault)) as graph:
+        file_links = table_rows(graph, "graph_unit_links")
+    assert len(file_links) == 1
+
+    def check_stored_links():
+        with closing(connection.open_reader(connection.store_path(vault))) as store:
+            assert table_rows(store, "graph_unit_links") == file_links
 
     def answers():
         with library_scope():
@@ -375,6 +424,7 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
         "the graph answer must carry the link for this drill to mean anything"
     )
     assert migrate_apply(vault) == 0
+    check_stored_links()
     with monkeypatch.context() as windows:
         windows.setattr(capability, "sys", SimpleNamespace(platform="win32"))
         assert answers() == before
@@ -392,7 +442,7 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
         json.loads(line) for line in (tmp_path / "export/audit.jsonl").read_text().splitlines()
     ]
     assert [entry["operation"] for entry in audit] == ["migrate"]
-    assert not store_objects(vault) & {"pages", "fts", "graph_nodes", "graph_edges"}
+    assert not store_objects(vault) & {"pages", "fts", "graph_nodes", "graph_edges", "graph_unit_links"}
     with closing(connection.open_reader(connection.store_path(vault))) as store:
         assert store.execute("SELECT mode FROM store_mode").fetchone() == ("file",)
         assert store.execute("SELECT COUNT(*) FROM store_pages").fetchone() == (0,)
@@ -405,6 +455,7 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
     # A vault that returned to file mode migrates again, and the store keeps its history across both.
     assert migrate_apply(vault) == 0
     assert mode.store_mode_active(vault)
+    check_stored_links()
 
 
 def test_a_rollback_export_names_the_page_that_a_moved_page_came_from(vault, tmp_path):
@@ -841,15 +892,17 @@ def test_a_migration_dry_run_reports_queued_graph_work_and_leaves_it_queued(vaul
     assert report["status"] == "dry-run"
     assert report["queued_graph_work"]["receipts"] == queued
     assert report["queued_graph_work"]["oldest_age_seconds"] >= 0
-    assert "catches the graph index up" in report["queued_graph_work"]["apply"]
+    assert "drains this queue" in report["queued_graph_work"]["apply"]
     assert deferred_index.graph_queue_age(vault)[0] == queued
 
 
-@pytest.mark.parametrize("drain", ["clears nothing", "raises", "outlasts the ceiling"])
-def test_queued_graph_work_that_cannot_drain_refuses_before_any_staging(
+@pytest.mark.parametrize(
+    "drain", ["clears nothing", "raises", "outlasts the ceiling", "cannot start"]
+)
+def test_queued_graph_work_that_cannot_drain_still_migrates_and_says_where_it_stopped(
     vault, capsys, monkeypatch, drain
 ):
-    """A migration that stages and proves a whole vault, or reports a traceback, when its catch-up cannot converge."""
+    """A migration that refuses, or reports a traceback, when its graph catch-up cannot converge."""
     _leave_graph_repair_queued(vault)
     if drain == "clears nothing":
         monkeypatch.setattr(index_sync, "drain_graph_work", lambda *args, **keywords: 0)
@@ -859,21 +912,99 @@ def test_queued_graph_work_that_cannot_drain_refuses_before_any_staging(
             raise RuntimeError("the graph sidecar is busy")
 
         monkeypatch.setattr(index_sync, "drain_graph_work", failing)
+    elif drain == "cannot start":
+
+        def no_projection(*args, **keywords):
+            raise RuntimeError("the recall projection cannot be published")
+
+        monkeypatch.setattr(
+            epistemic_graph.EpistemicGraphIndex, "publish_recall_projection", no_projection
+        )
     else:
         monkeypatch.setattr(migrate, "CATCH_UP_SECONDS", 0)
-    staged = []
-    stage = migrate.stage
-    monkeypatch.setattr(
-        migrate, "stage", lambda *args, **keywords: staged.append(1) or stage(*args, **keywords)
-    )
-    objects = store_objects(vault)
     capsys.readouterr()
 
-    assert migrate_apply(vault) == 1
+    assert migrate_apply(vault) == 0, capsys.readouterr().err
 
-    error = capsys.readouterr().err
-    assert "VAULT_STORE_GRAPH_NOT_CAUGHT_UP" in error
-    assert "exomem maintain --reconcile --rebuild-graph" in error
-    assert staged == []
-    assert store_objects(vault) == objects
-    assert not mode.store_mode_active(vault)
+    applied = printed(capsys)
+    assert applied["status"] == "migrated"
+    assert applied["graph_catch_up"]["left"] > 0
+    assert applied["graph_catch_up"]["stopped"] != "the queue drained"
+    assert mode.store_mode_active(vault)
+
+
+def test_a_store_migrated_before_the_change_journal_gets_it_at_its_next_derivation(vault, tmp_path):
+    """A store that an older build migrated has no change journal, and until it has one every recall after
+    a write reads the whole catalogue again. Its next derivation must create the journal with no owner pass,
+    journal that derivation's own page, and record the journal so that a rollback leaves none of it behind.
+    """
+    journal = "SELECT name FROM sqlite_master WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\'"
+    assert migrate_apply(vault) == 0
+    path = connection.store_path(vault)
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        with handle.transaction() as tx:
+            # What an older build left: no journal objects, and none in the rollback record.
+            names = {name: kind for name, kind in tx.execute(
+                "SELECT name, type FROM sqlite_master WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\'"
+            )}
+            for name in [name for name, kind in names.items() if kind == "trigger"] + [
+                name for name, kind in names.items() if kind == "table"
+            ]:
+                tx.execute(f"DROP {names[name].upper()} {name}")
+            tx.execute("DELETE FROM store_mode_objects WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\'")
+        assert len(names) > 2, "the migrated store must have held the journal for this check to mean anything"
+        assert mode.status(vault)["owner_schema"] == "current"
+
+        writer = CollectionWriter(vault, handle)
+        write.commit(writer, write.StoreChange(
+            write.Origin.GOVERNED, "test", puts=(write.PagePut(ALPHA, b"# Alpha\n\nThe tide gauge reads high.\n"),),
+        ))
+        derivation.drain(vault.resolve(), writer)
+
+    assert mode.status(vault)["owner_schema"] == "current"
+    with closing(connection.open_reader(path)) as reader:
+        assert {name for (name,) in reader.execute(journal)} == set(names)
+        assert lexstore.change_journal_complete(reader)
+        assert (ALPHA,) in reader.execute("SELECT DISTINCT path FROM catalogue_changes").fetchall()
+        recorded = {name for (name,) in reader.execute(
+            "SELECT name FROM store_mode_objects WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\'"
+        )}
+    assert recorded == set(names)
+
+    assert rollback_apply(vault, tmp_path / "export") == 0
+    with closing(connection.open_reader(path)) as reader:
+        assert reader.execute(journal).fetchall() == []
+
+
+def test_a_change_journal_that_cannot_be_created_leaves_the_derivation_going(vault, monkeypatch):
+    """A missing journal only makes recall read every row, but a drain that failed with it would leave every
+    later write underived. A creation that fails partway leaves no journal object and the page derived.
+    """
+    journal = "SELECT name FROM sqlite_master WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\'"
+    assert migrate_apply(vault) == 0
+    path = connection.store_path(vault)
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        with handle.transaction() as tx:
+            names = dict(tx.execute(journal.replace("SELECT name", "SELECT name, type")))
+            for name in [name for name, kind in names.items() if kind == "trigger"] + [
+                name for name, kind in names.items() if kind == "table"
+            ]:
+                tx.execute(f"DROP {names[name].upper()} {name}")
+            tx.execute("DELETE FROM store_mode_objects WHERE name LIKE 'catalogue\\_change%' ESCAPE '\\'")
+
+        def fails_partway(conn):
+            conn.execute(f"CREATE TABLE {lexstore.CHANGE_JOURNAL}(seq INTEGER PRIMARY KEY, path TEXT, stamp BLOB)")
+            raise sqlite3.OperationalError("database or disk is full")
+
+        monkeypatch.setattr(lexstore, "create_change_journal", fails_partway)
+        writer = CollectionWriter(vault, handle)
+        write.commit(writer, write.StoreChange(
+            write.Origin.GOVERNED, "test", puts=(write.PagePut(ALPHA, b"# Alpha\n\nThe tide gauge reads high.\n"),),
+        ))
+        derivation.drain(vault.resolve(), writer)
+
+    assert mode.status(vault)["owner_schema"] == "current"
+    with closing(connection.open_reader(path)) as reader:
+        assert reader.execute(journal).fetchall() == []
+        # The drain derived the page: a failed batch would leave its intent queued for a retry.
+        assert reader.execute("SELECT count(*) FROM store_derivation_queue WHERE path = ?", (ALPHA,)).fetchone() == (0,)

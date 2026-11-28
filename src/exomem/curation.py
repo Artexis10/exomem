@@ -30,6 +30,7 @@ from .kbdir import managed_root, managed_split
 from .vault import (
     BatchWriteError,
     ContentHashMismatchError,
+    CreateOnlyConflict,
     DefiniteNoEffect,
     PathGuard,
     PathGuardError,
@@ -59,6 +60,10 @@ CURATION_ACTIONS: Final[tuple[str, ...]] = (
     "relocate",
 )
 READ_ONLY_ACTIONS: Final[frozenset[str]] = frozenset({"work-item", "preview", "status"})
+#: The actions whose caller repeats the identical call until the answer stops asking for it. A
+#: repeat of one runs the next steps, so the writer lease must not replay the last reply for it.
+# nosemgrep: ep-word-set -- members of the closed curation action enum above, decided per action's code.
+CONTINUING_ACTIONS: Final[frozenset[str]] = frozenset({"resume", "relocate"})
 #: The actions that hold the vault mutation boundary themselves, one canonical seam at a time
 #: (`guards_own_boundary`). `relocate` prepares read-only and seals through `seal_proposal`, as
 #: `propose` does. `revert` is absent: it still relies on the command's boundary.
@@ -424,6 +429,25 @@ class CurationError(ValueError):
 
 def _error(code: str, reason: str) -> CurationError:
     return CurationError(code, reason)
+
+
+def _write_refusal(error: Exception, what: str) -> CurationError:
+    """The refusal for an artifact write that did not land: a collision only where a create-only
+    target already exists, else the write's own code and the cause. The cause is the batch writer's
+    message, the system's error text or an exception class name; a plain `ValueError` brings its
+    own fixed text, and the batch access check's `WRITE_REFUSED` text names the artifact's
+    vault-relative path."""
+    if isinstance(error, CreateOnlyConflict):
+        return _error("CURATION_PLAN_COLLISION", f"{what} already exists")
+    if isinstance(error, BatchWriteError):
+        cause = error.message
+    elif isinstance(error, OSError):
+        cause = os.strerror(error.errno) if error.errno else type(error).__name__
+    elif type(error) is ValueError:
+        cause = str(error)  # the store's and batch's own fixed texts
+    else:
+        cause = type(error).__name__
+    return _error("CURATION_STORE_WRITE_FAILED", f"{what} was not written: {cause}")
 
 
 #: How long a caller refused by `_run_claim` waits before it retries: one step's short work.
@@ -1985,6 +2009,19 @@ def _move_call(vault_root: Path, args: Mapping[str, Any]) -> dict[str, Any]:
         raise _error(
             "CURATION_STEP_INVALID",
             f"a move's fields patch sets only pointer fields, and {refused[0]!r} is not one",
+        )
+    # The classify operation alone changes a page's class: it checks the classes against the registry and
+    # leaves one reason record to revert. A rehome that carried the field would skip both.
+    # (Fields owned by the reclassify, custody and closure writers pass here today: old debt, reported.)
+    classify_owned = sorted(
+        name for name, writer in page_fields.writers(vault_root).items()
+        if writer == page_fields.WRITER_CLASSIFY and name in fields
+    )
+    if classify_owned:
+        raise _error(
+            "CURATION_STEP_INVALID",
+            f"a move's fields patch cannot set {classify_owned[0]!r}. "
+            + (frontmatter.owned_field_route(vault_root, classify_owned[0]) or ""),
         )
     destination = str(args["new_path"])
 
@@ -6087,8 +6124,7 @@ class CurationStore:
                     commit_point=commit_point,
                 )
             except (BatchWriteError, OSError, ValueError) as error:
-                code = "CURATION_PLAN_COLLISION" if create_only else "CURATION_STORE_WRITE_FAILED"
-                raise _error(code, "curation artifact write was refused") from error
+                raise _write_refusal(error, "curation artifact") from error
 
     def _create_plan_at(self, path: Path, plan: Mapping[str, Any]) -> None:
         _require_plan_relocation_history(self.vault_root, plan)
@@ -6140,7 +6176,7 @@ class CurationStore:
                 vault_root=self.vault_root,
             )
         except (BatchWriteError, OSError, ValueError) as error:
-            raise _error("CURATION_PLAN_COLLISION", "curation plan seal was refused") from error
+            raise _write_refusal(error, "curation plan") from error
 
     def create_forward(
         self,
@@ -7024,6 +7060,7 @@ def apply_compensation(
 __all__ = [
     "CURATION_ACTIONS",
     "READ_ONLY_ACTIONS",
+    "CONTINUING_ACTIONS",
     "STEP_KINDS",
     "MAX_PLAN_BYTES",
     "MAX_SEALED_BYTES",

@@ -1,0 +1,52 @@
+name: User note
+
+# A feat, fix or perf pull request decides about a user note: it adds a file under user-notes/
+# or its body has the line `User note: none` (user-notes/README.md). A note that the pull request
+# adds or changes must have the right shape. The check never judges the wording.
+#
+# pull_request, not pull_request_target: GitHub blocks pull_request_target in public
+# repositories by default from 2026-12-02, and this check needs no secrets.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  decision:
+    name: User note decision
+    runs-on: ubuntu-latest
+    steps:
+      # Run the base revision's checker, so a pull request cannot weaken the checker that judges
+      # it. A change to this workflow file shows in review.
+      - name: Check out trusted base revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      # The pull request's merge result is data: the checker reads its user-notes files and never runs it.
+      - name: Check out the pull request's merge result
+        uses: actions/checkout@v4
+        with:
+          path: pull-request
+          fetch-depth: 2
+          filter: blob:none
+          sparse-checkout: user-notes
+          persist-credentials: false
+
+      - name: Check the user note
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # The pull request that introduces the checker has no base copy of it to run.
+          if [ ! -f scripts/user_notes.py ]; then
+            echo "::notice::The base revision has no scripts/user_notes.py yet, so this pull request, which introduces the check, is not checked."
+            exit 0
+          fi
+          # Both parsers install at the exact versions the repository pins: markdown-it-py in pyproject.toml and PyYAML in uv.lock.
+          python3 -m pip install --disable-pip-version-check "$(grep -o -m1 'markdown-it-py==[0-9.]*' pyproject.toml)" "pyyaml==$(python3 -c "import tomllib; print(next(p['version'] for p in tomllib.load(open('uv.lock', 'rb'))['package'] if p['name'] == 'pyyaml'))")"
+          python3 scripts/user_notes.py check --repo pull-request --base HEAD^1 --head HEAD \
+            --title "$PR_TITLE" --body "$PR_BODY"

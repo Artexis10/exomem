@@ -521,6 +521,18 @@ def test_index_sync_reuses_preflight_semantic_state_without_reparsing(
     assert [node["text"] for node in graph_units] == ["preflight result"]
 
 
+def test_index_structure_can_use_a_corpus_page_after_its_source_changes(tmp_path: Path) -> None:
+    path = _write(tmp_path, "## Decision\n\nKeep the original snapshot.\n\n- [config] before ^before\n")
+    source = path.read_text(encoding="utf-8")
+    direct = semantic_contract.build_page_state(tmp_path, _REL, source)
+    expected = semantic_index.structural_metadata(semantic_index.from_semantic_page_state(direct))
+    cached = semantic_contract.build_corpus_context(tmp_path).pages[_REL]
+
+    _write(tmp_path, "- [config] after ^after\n")
+
+    assert semantic_index.structural_metadata(semantic_index.from_semantic_page_state(cached)) == expected
+
+
 def test_committed_parent_hash_rejects_old_lexical_and_graph_units_immediately(
     tmp_path: Path,
 ) -> None:

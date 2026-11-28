@@ -1075,9 +1075,7 @@ class CreationCommit:
 
     def review_field_warnings(self) -> list[str]:
         """The one warning a commit owes for the review fields it dropped, if any."""
-        if not self.ignored_review_fields:
-            return []
-        return [relation_review.ignored_review_fields_warning(self.ignored_review_fields)]
+        return relation_review.review_field_warnings(self.ignored_review_fields)
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -1155,6 +1153,8 @@ class ExistingPreflight:
     provenance_server_at: str | None = None
     #: The page is a profile, so the preview tells the agent what a commit needs (`PROFILE_PREVIEW_NEXT_ACTION`).
     profile: bool = False
+    #: Review fields the caller sent for a page that takes no relation review; the write drops them.
+    ignored_review_fields: tuple[str, ...] = ()
 
     @property
     def before_hash(self) -> str:
@@ -1176,6 +1176,8 @@ class ExistingPreflight:
         }
         if self.operation == "tier2_overwrite":
             value["draft_token"] = self.transition_token
+        if fields := relation_review.ReviewFieldCheck(ignored=self.ignored_review_fields).as_dict():
+            value["relation_review_fields"] = fields
         if self.profile:
             value["next_action"] = PROFILE_PREVIEW_NEXT_ACTION
             # An in-place change's proof is its transition token alone, so the token is its `review_token`.
@@ -1217,6 +1219,12 @@ class ExistingCommit:
     # Exact canonical write bytes, not the normalized semantic source hash.
     # Absent on legacy/replay results without an exact byte proof.
     after_hash: str | None = None
+    #: Review fields the commit dropped because the page takes no relation review.
+    ignored_review_fields: tuple[str, ...] = ()
+
+    def review_field_warnings(self) -> list[str]:
+        """The one warning a commit owes for the review fields it dropped, if any."""
+        return relation_review.review_field_warnings(self.ignored_review_fields)
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -2320,12 +2328,20 @@ def _preflight_existing(
     # transition has no validate result to copy a hash from; the server's own `transition_hash`
     # stands in for it.
     review_requested: semantic_contract.RelationReviewState | None = None
+    ignored_review_fields: tuple[str, ...] = ()
+    if applicability != "full":
+        # A page the review never reaches has no use for review fields: record no decision and
+        # report them dropped, as a creation does. A refusal would only make the caller resend.
+        ignored_review_fields = relation_review.check_review_fields(
+            {
+                "relation_disposition": relation_disposition,
+                "relation_review_hash": relation_review_hash,
+                "relation_review_reason": relation_review_reason,
+            },
+            False,
+        ).ignored
+        relation_disposition = None
     if relation_disposition == "reviewed_none":
-        if applicability != "full":
-            raise SemanticWriteError(
-                "INVALID_RELATION_REVIEW",
-                "reviewed-none applies only to an active compiled result",
-            )
         if not validate_only and relation_review_hash is None:
             if transition_token is not None:
                 absent = relation_review.missing_review_fields_error(
@@ -2458,6 +2474,7 @@ def _preflight_existing(
         origin_inputs,
         provenance_server_at=provenance_server_at,
         profile=_is_profile(root, before.page_type, after.page_type),
+        ignored_review_fields=ignored_review_fields,
     )
 
 
@@ -2824,6 +2841,7 @@ def _revalidate_existing_preflight(
         return replace(
             refreshed, read_dependency_guards=preflight.read_dependency_guards,
             provenance_server_at=preflight.provenance_server_at,
+            ignored_review_fields=preflight.ignored_review_fields,
         )
 
 
@@ -3311,6 +3329,7 @@ def commit_existing(
     context = _relation_advisory_context(vault_root, preflight.after)
     return replace(
         committed,
+        ignored_review_fields=preflight.ignored_review_fields,
         structure_suggestion=suggestion,
         records_routing=delivered_routing,
         due_state=due,

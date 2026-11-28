@@ -149,12 +149,14 @@ def logged(conn: sqlite3.Connection, collection_id: str) -> tuple[int, int]:
 
 def refused(action: str, *, repair: str | None = None) -> collections.CollectionError:
     """The one refusal of a row mutation, a row-history read or a held edit of a derived collection."""
+    repair = repair or "import into this collection; to edit rows, create a NEW collection without derived"
     return collections.CollectionError(
         COLLECTION_DERIVED,
         f"a derived collection keeps its rows outside the store and takes them only from imports, "
         f"so {action} is refused",
+        # `remediation` is the detail that an agent's refusal carries.
         {"action": action, "history": "the collection's import log, one entry per imported member",
-         "repair": repair or "import into this collection; to edit rows, create a NEW collection without derived"},
+         "remediation": repair},
     )
 
 

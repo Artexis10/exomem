@@ -21,6 +21,7 @@ from . import (
 from . import curation as curation_module
 from .kbdir import managed_join, managed_split
 from .operation_entries import OutcomeVerb
+from .speech_attach_schema import SPEECH_OPERATIONS
 
 log = logging.getLogger(__name__)
 
@@ -161,6 +162,13 @@ _MAX_DERIVED_DIAGNOSTICS = 9
 #: Each media operation and the outcome its result reports.
 # nosemgrep: ep-word-set -- the media tool's closed operations, each implemented by the media command.
 MEDIA_OUTCOMES = {"process": "processed", "retry": "retried", "reprocess": "reprocessed"}
+#: The speech-result fields of an attach or rename reply, which the agent reads as built.
+#: `speech_attach.reply` and `speaker_rename` bound each: the lists hold at most `MAX_NAMES` entries.
+_SPEECH_REPLY_FIELDS = (
+    "operation", "outcome", "media_type", "state", "sidecar_path", "extracted_by", "attached_digest",
+    "speakers", "speaker_verification", "names_not_carried", "prior_extraction", "speech_job", "renamed",
+    "next_action",
+)
 #: The media operations whose result reports how many jobs they requeued.
 MEDIA_REQUEUE_OPERATIONS = frozenset({"retry", "reprocess"})
 
@@ -493,7 +501,7 @@ def _adoption_control_projection(leaf: Mapping[str, Any]) -> dict[str, Any]:
     Without them the reply that must stop (`apply_stop`), that has a next page (`next_after`),
     that yielded the boundary to a waiting write (`stop_reason`) or that leaves staged files with
     the person (`finish.residual`) has the shape of ordinary progress. Each field is built by
-    `adoption_run` and is small: `stop_reason` is one token, `apply_stop` has five keys,
+    `adoption_run` and is small: `stop_reason` is one token, `apply_stop` has at most five keys,
     `next_actions` holds at most five entries of three strings, and `residual` counts files by a
     closed set of reasons. The inventory and the plan items are not copied. `residual` stays under
     `finish` because the next actions name it as `finish.residual`.
@@ -2245,16 +2253,18 @@ def with_leaf_index_observed(
     return source_result_attribution.carry(terminal, changed)
 
 
-def as_replay(terminal: Any) -> Any:
-    """Mark a stored terminal that answers a retry, so the reply says it is the earlier commit's.
+def as_replay(stored: Any) -> Any:
+    """Mark a stored reply that answers a retry, so the reply says it is the earlier call's.
 
     `mutated`, `request_id` and `receipt_id` stay those of the commit it replays: the egress
-    filter binds a unit write's parent on `mutated`, so a replay must not change it. Anything that
-    is not a terminal passes through.
+    filter binds a unit write's parent on `mutated`, so a replay must not change it. A leaf reply
+    that no commit wrapped (a paused preparation) carries the same marker. A value that is not a
+    mapping passes through, and so does a reply that defines its own `replayed` field (the
+    episode resume reply lists the leaves it replayed): the marker never overwrites it.
     """
-    if not isinstance(terminal, Mapping) or terminal.get("_terminal") != _TERMINAL_MARKER:
-        return terminal
-    return source_result_attribution.carry(terminal, {**terminal, "replayed": True})
+    if not isinstance(stored, Mapping) or "replayed" in stored:
+        return stored
+    return source_result_attribution.carry(stored, {**stored, "replayed": True})
 
 
 def replayed_terminal(
@@ -2572,13 +2582,34 @@ def _pointer_repointed(leaf: Any) -> list[Mapping[str, Any]]:
     ]
 
 
+def _related_pages_projection(leaf: Any) -> list[Any] | None:
+    """The pages that already name the subject of each row a Records write created, as the writer built them.
+
+    An append and a bulk upsert both carry it, and the agent reads those pages before it writes an unknown, so the
+    default reply keeps it. `related_pages.PER_REPLY` bounds the list; the `note` result's `related_pages` is a count.
+    """
+    found = leaf.get("related_pages") if isinstance(leaf, Mapping) else None
+    if isinstance(found, list) and found and all(
+        isinstance(row, Mapping) and isinstance(row.get("item_key"), str) for row in found
+    ):
+        return found
+    return None
+
+
+def _is_adoption_leaf(leaf: Any) -> bool:
+    """Whether the leaf is an Adoption Studio call's reply, which carries its run's id."""
+    return isinstance(leaf, Mapping) and isinstance(leaf.get("run_id"), str) and leaf["run_id"].startswith("adr-")
+
+
 def _stated_outcome(leaf: Any) -> str | None:
-    """The sentence an approval leaf states itself.
+    """The sentence a leaf states itself in place of the generic "Saved" lead.
 
     An approval has no page `path` for `_user_summary` to name, and its outcome (approved, already
     approved, revoked, moved aside) depends on the ledger's state, so the leaf carries the sentence.
+    An import step that stopped before its end (`plan` or `finish` with a continuation) says so, because a
+    reader who stops at "Saved" never calls the step again.
     """
-    if not isinstance(leaf, Mapping) or leaf.get("operation") != "approve_procedure":
+    if not isinstance(leaf, Mapping) or not (leaf.get("operation") == "approve_procedure" or _is_adoption_leaf(leaf)):
         return None
     sentence = leaf.get("outcome")
     return sentence if isinstance(sentence, str) and sentence else None
@@ -2657,9 +2688,17 @@ def project_terminal(
             f"{user_summary}{_unfiled_record_clause(records_routing)} "
             f"({cloud_cell.store_identity()['name']})"
         )
-        # An update that dropped relations says so where the person reads, with the repair.
-        if isinstance(leaf, Mapping) and leaf.get("relations_dropped") and isinstance(
-            leaf.get("outcome"), str
+        # An update that dropped relations, a compact observation whose source link went to the
+        # page, or a dated observation reports its effect where the person reads the reply.
+        if (
+            isinstance(leaf, Mapping)
+            and (
+                leaf.get("relations_dropped")
+                or leaf.get("relations_cited")
+                or leaf.get("kind_defaulted")
+                or leaf.get("observation_at_end")
+            )
+            and isinstance(leaf.get("outcome"), str)
         ):
             compact["user_summary"] += f". {leaf['outcome']}"
     flagged = _identity_findings(artifact_receipt)
@@ -2743,6 +2782,8 @@ def project_terminal(
         compact.update({key: value for key, value in leaf.items() if key != "outcome"})
         if user_summary is None:
             compact["outcome"] = stated_outcome
+    elif isinstance(leaf, Mapping) and leaf.get("operation") in SPEECH_OPERATIONS:
+        compact.update({key: leaf[key] for key in _SPEECH_REPLY_FIELDS if key in leaf})
     elif isinstance(leaf, Mapping) and leaf.get("operation") == "configure_memory":
         # The configuration contract is metadata-only and bounded by the
         # canonical prominence vocabulary. Keep the newly effective contract
@@ -2786,11 +2827,7 @@ def project_terminal(
                 if key in leaf
             }
         )
-    elif (
-        isinstance(leaf, Mapping)
-        and isinstance(leaf.get("run_id"), str)
-        and str(leaf["run_id"]).startswith("adr-")
-    ):
+    elif _is_adoption_leaf(leaf):
         # An Adoption Studio call: the caller carries on with the run id, the plan id
         # and the continuation cursor, so these must survive the compact view. A `file`
         # reply is built small for this view: its state, summary, stop, person list and
@@ -2834,6 +2871,15 @@ def project_terminal(
             {key: leaf[key] for key in ("duplicate_of", "fields_not_applied", "same_url", "duplicate_check_unavailable")
              if key in leaf}
         )
+    if isinstance(leaf, Mapping) and isinstance(leaf.get("sensitivity"), Mapping):
+        # The classes the page records, from a write or from the earlier copy a repeat found, and what governs who
+        # reads them now; built by `sensitivity_classes.report`.
+        compact["sensitivity"] = leaf["sensitivity"]
+        # The record id a classify wrote: the caller passes it back as `revert_record` to undo the
+        # classification, so it must survive the default detail.
+        record = leaf.get("pointer_write")
+        if isinstance(record, str) and len(record) == 32 and all(c in "0123456789abcdef" for c in record):
+            compact["pointer_write"] = record
     if result.get("state") == "committed":
         compact.update(_commit_metadata_projection(leaf))
     compact.update(media_projection)
@@ -2891,6 +2937,9 @@ def project_terminal(
         compact["structure_suggestion"] = structure_suggestion
     if records_routing is not None:
         compact["records_routing"] = records_routing
+    related_pages = _related_pages_projection(leaf)
+    if related_pages is not None:
+        compact["related_pages"] = related_pages
     entity_candidate = _entity_candidate_projection(leaf)
     if entity_candidate is not None:
         compact["entity_candidate"] = entity_candidate
@@ -2961,6 +3010,10 @@ def project_terminal(
         refs = source_result_attribution.recipe(artifact_receipt or _path_projection(leaf)).sources
         if refs:
             source_result_attribution.bind(compact, refs, paths=(("user_summary",),))
+    # A leaf's own next step reaches the agent; the terminal's (guarded writes) already copied
+    # through `_ENVELOPE_KEYS`, and an identity finding's correction step still overrides it.
+    if isinstance(leaf, Mapping) and isinstance(leaf.get("next_action"), str):
+        compact.setdefault("next_action", leaf["next_action"])
     if flagged:
         compact["next_action"] = _correction_next_action(flagged[0][0], len(flagged))
     elif (filing_step := _unfiled_record_step(records_routing)) is not None:

@@ -102,6 +102,50 @@ def test_a_credits_declaration_without_a_key_is_refused_before_any_session(monke
     assert started == []
 
 
+def test_a_launcher_credit_run_starts_without_a_parent_key(monkeypatch, tmp_path):
+    """A managed launcher supplies the key later, while the run still requires credits in init."""
+    monkeypatch.setenv(billing.ENV_VAR, "credits")
+    monkeypatch.setenv("EXOMEM_OUTCOME_CREDIT_AUTH", "launcher")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(command, "runs_dir", lambda: tmp_path)
+    monkeypatch.setattr(command.record, "checkout_state", lambda: {})
+    monkeypatch.setattr(command.record, "cli_version", lambda: "test")
+    started = []
+
+    def launch(run_dir, *args):
+        assert command.read_record(run_dir)["billing"] == "credits"
+        assert "ANTHROPIC_API_KEY" not in claude_env()[0]
+        assert init_faults(INIT, model="m", exomem=False) == []
+        assert init_faults({"model": "m", "apiKeySource": "none"}, model="m", exomem=False)
+        started.append(run_dir)
+
+    monkeypatch.setattr(command, "run_lab_suite", launch)
+    command.run_suite("lab", "launcher-credits")
+    assert started == [tmp_path / "launcher-credits"]
+
+
+def test_a_launcher_credit_session_drops_an_inherited_key(monkeypatch):
+    """The launcher owns key selection, so the runner must not forward the caller's key."""
+    monkeypatch.setenv(billing.ENV_VAR, "credits")
+    monkeypatch.setenv("EXOMEM_OUTCOME_CREDIT_AUTH", "launcher")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-inherited")
+    assert "ANTHROPIC_API_KEY" not in claude_env()[0]
+
+
+def test_an_unknown_credit_auth_stops_before_a_record_or_session(monkeypatch, tmp_path):
+    """A misspelt transport must not silently launch on a different credential path."""
+    monkeypatch.setenv(billing.ENV_VAR, "credits")
+    monkeypatch.setenv("EXOMEM_OUTCOME_CREDIT_AUTH", "launchre")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-inherited")
+    monkeypatch.setattr(command, "runs_dir", lambda: tmp_path)
+    started = []
+    monkeypatch.setattr(command, "run_lab_suite", lambda *a, **k: started.append(a))
+    with pytest.raises(SystemExit, match="EXOMEM_OUTCOME_CREDIT_AUTH"):
+        command.run_suite("lab", "unknown-auth")
+    assert started == []
+    assert not (tmp_path / "unknown-auth").exists()
+
+
 @pytest.mark.parametrize(("declared", "kept"), [("subscription", False), ("credits", True)])
 def test_the_declaration_decides_whether_a_session_gets_the_key(monkeypatch, declared, kept):
     """Fails when a shell that holds ANTHROPIC_API_KEY bills credits to a run that declared the

@@ -42,6 +42,7 @@ from urllib.parse import quote, unquote
 
 from . import (
     activation_conventions,
+    build_record,
     capabilities,
     context_catalogue,
     context_roles,
@@ -690,6 +691,9 @@ def _usable(prepared: _Prepared) -> View | None:
     if prepared.caller.restricted and prepared.unlisted:
         # The catalogue is behind by work it cannot list, so it cannot say whether that work
         # touches a page this caller may see. It answers warming, never a guess at stale.
+        build_record.note_warming(
+            build_record.WAITING_ON_CONTEXT_CATALOGUE, working_set_runtime.background_build_state(prepared.root)
+        )
         return _abstention(prepared, INDEX_WARMING)
     return None
 
@@ -880,6 +884,7 @@ def _compile_profile(prepared: _Prepared) -> View:
     missing = packet["missing"]
     if any(entry.get("reason") == "lane_failed" for entry in missing):
         # A failed lane leaves knowledge unknown; warming costs a retry instead of silently serving omissions.
+        build_record.note_warming(build_record.WAITING_ON_CONTEXT_LANE)
         return _abstention(prepared, INDEX_WARMING)
     if packet.get("abstained"):
         return _abstention(prepared, UNAVAILABLE)
@@ -895,6 +900,9 @@ def _compile_profile(prepared: _Prepared) -> View:
     generation = _digest(json.dumps([row.item() for row in rows], sort_keys=True))
     # A losing build cannot publish lines from an obsolete catalogue state.
     if catalogue.token() != token:
+        build_record.note_warming(
+            build_record.WAITING_ON_CONTEXT_CATALOGUE, working_set_runtime.background_build_state(prepared.root)
+        )
         return _abstention(prepared, INDEX_WARMING)
     return View(prepared.ref, READY, generation, stale, rows,
                 missing=tuple(entry for entry in missing if entry.get("reason") == MISSING_TRUNCATED))
@@ -1930,9 +1938,10 @@ def read_view(
     continuation for the next page. A view that cannot be served yet answers with its readiness state
     and no items. Raises NOT_FOUND, INVALID_CONTINUATION or CONTINUATION_STALE.
     """
-    # The view decides every entry it reads. Like `find`, it resolves placement and reads the connector
-    # ceiling once for all of them, and the terminal guard reads both again, live.
-    with state_paths.resolution_scope():
+    from .vault_store import read as store_read
+
+    # All readers use the same store revision throughout this view.
+    with state_paths.resolution_scope(), store_read.request_snapshot(Path(vault_root)):
         if purpose is None:
             return _read_view(Path(vault_root), path, continuation, None)
         # The readers under the view (a record's current state) take the purpose from the bound principal.

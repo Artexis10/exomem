@@ -15,7 +15,7 @@ Subcommands:
 - `tui` — launch the interactive terminal UI over the same product commands
   (requires the optional `tui` extra; needs an interactive terminal)
 - `doctor` — read-only local install/setup preflight
-- `auth sessions|revoke` — operator-only durable MCP session administration
+- `auth sessions|revoke` — durable MCP session administration
 - `governance-schema status|plan-migration|stage-migration|commit-migration|restore-migration-backup|downmigrate` — offline schema control
 - `cell-init` — idempotent Evermatter Cloud cell init-container entrypoint: vault
   init when absent, then offline state migration; no governance schema
@@ -24,6 +24,8 @@ Subcommands:
   cell, uploaded to controller-presigned parts; reports sizes and digests only
 - `cell-media-census` — Evermatter Cloud backup Job: the cell's last census of its
   evicted originals from its drain record, or `unknown unknown` when it cannot say
+- `cell-media-storage` — Evermatter Cloud backup Job: the cell's last reading of its
+  vault and media storage figures from its storage record, or nothing when it cannot say
 - `cell-media-manifest` — Evermatter Cloud backup Job: the media manifest that each
   snapshot carries, or an unknown manifest when the census cannot say
 - `cell-media-collect` — Evermatter Cloud backup Job: condemn the released media
@@ -54,7 +56,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
-from . import semantic_authoring
+from . import env_compat, semantic_authoring
 from .kbdir import managed_join, managed_root_rel
 
 
@@ -109,13 +111,22 @@ def _is_cli_only_invocation(raw: list[str]) -> bool:
 # runtime: each bounds itself in seconds on one CPU.
 # nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
 _LEAN_COMMANDS: frozenset[str] = frozenset(
-    {"cell-media-census", "cell-media-manifest", "cell-media-collect"}
+    {"cell-media-census", "cell-media-storage", "cell-media-manifest", "cell-media-collect"}
 )
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except env_compat.SettingsConflict as conflict:
+        print(f"evermatter: not run. {conflict}", file=sys.stderr)
+        return 2
+
+
+def _main(argv: list[str] | None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw[:1] and raw[0] in _LEAN_COMMANDS:
+        env_compat.refuse_process_conflicts()
         return _run_command(raw[0], raw[1:])
     from .runtime_resources import bootstrap, preload_local_dotenv_policy
 
@@ -123,9 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     bootstrap()
     # Named commands and identification/help keep their completion wait. A
     # serving route skips it only when its managed lifecycle already joined.
-    serving = (not raw or raw[0].startswith("-")) and not any(
-        item in {"--version", "--help", "-h"} for item in raw
-    )
+    serving = (not raw or raw[0].startswith("-")) and not env_compat.asks_only_to_identify(raw)
     try:
         return _run_cli(argv)
     finally:
@@ -138,8 +147,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not drained:
             print(
-                "exomem: a graph rebuild did not finish before exit; the change is "
-                "committed and `exomem reconcile` will bring the graph up to date",
+                "evermatter: a graph rebuild did not finish before exit; the change is "
+                "committed and `evermatter reconcile` will bring the graph up to date",
                 file=sys.stderr,
             )
 
@@ -153,6 +162,8 @@ def _run_cli(argv: list[str] | None = None) -> int:
         from .install_info import print_version
 
         return print_version(as_json="--json" in raw)
+    if not env_compat.asks_only_to_identify(raw):  # help acts on no setting
+        env_compat.refuse_process_conflicts()
     if raw and raw[0] == "find":
         # `find` was the original friendly retrieval command.  Keep existing
         # scripts useful while the current product language calls it `ask`.
@@ -195,8 +206,8 @@ def _unsupported_platform_refusal(raw: list[str]) -> str | None:
         return None
     command = raw[0] if raw else "exomem"
     return (
-        f"exomem: {command} cannot run here. {support.reason}. "
-        "Run `exomem doctor` for the full report."
+        f"evermatter: {command} cannot run here. {support.reason}. "
+        "Run `evermatter doctor` for the full report."
     )
 
 
@@ -237,6 +248,7 @@ class _DotenvConflict(Exception):
 def _dotenv_conflict_message(command: str, conflict: _DotenvConflict) -> str:
     return (
         f"{command}: not run. The working-directory .env sets {', '.join(conflict.keys)} "
+        f"(under that name or an alias: {', '.join(p + '*' for p in env_compat.ALIAS_PREFIXES)}) "
         "to a different value than this process's environment, so it is unclear which "
         "deployment to act on. Unset those variables, remove them from the .env, or run "
         "from a directory without that .env."
@@ -255,11 +267,17 @@ def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
 
     The `.env` still wins over exported values. A command that writes
     credentials or sessions passes `refuse_conflicts`: when the `.env` would
-    replace an exported value with a different one, it stops instead of
-    acting on a store the operator did not name. Other commands warn.
+    replace an exported value with a different one, or either source sets an
+    `EVERMATTER_X` and `EXOMEM_X` to different values, it stops instead of
+    acting on a store the operator did not name. Other commands warn, except
+    that a placement setting in conflict always stops the command. The
+    comparison uses the `.env`'s names renamed to `EXOMEM_*`, so an
+    `EVERMATTER_X` line conflicts with an exported `EXOMEM_X`.
     """
     from . import cloud_cell
 
+    if refuse_conflicts:
+        env_compat.refuse_process_conflicts(every_setting=True)
     if cloud_cell.cloud_mode_enabled():
         return
     from .dotenv_guard import working_directory_dotenv
@@ -267,13 +285,13 @@ def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
     dotenv_path = working_directory_dotenv()
     if dotenv_path is None:
         return
-    from dotenv import dotenv_values, load_dotenv
-
+    settings, conflicts = env_compat.dotenv_settings(dotenv_path)
+    env_compat.settle_conflicts(
+        conflicts, source="the working-directory .env", refuse_all=refuse_conflicts
+    )
     # Names only: the values may be secrets.
     replaced = sorted(
-        key
-        for key, value in dotenv_values(dotenv_path).items()
-        if value is not None and key in os.environ and os.environ[key] != value
+        key for key, value in settings.items() if key in os.environ and os.environ[key] != value
     )
     if replaced and refuse_conflicts:
         raise _DotenvConflict(replaced)
@@ -282,7 +300,7 @@ def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
             f"warning: the working-directory .env replaces exported {', '.join(replaced)}",
             file=sys.stderr,
         )
-    load_dotenv(dotenv_path=dotenv_path, override=True)
+    env_compat.apply_settings(settings, override=True)
 
 
 def _build_auth_session_authority():
@@ -449,8 +467,8 @@ def _issue_local_main(args: argparse.Namespace) -> int:
 
 def _auth_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem auth",
-        description="Inspect and revoke durable MCP sessions (operator-only).",
+        prog="evermatter auth",
+        description="Inspect and revoke durable MCP sessions.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
     sessions = subcommands.add_parser("sessions", help="list non-secret session metadata")
@@ -585,7 +603,7 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
     import mimetypes
 
     parser = argparse.ArgumentParser(
-        prog="exomem attach",
+        prog="evermatter attach",
         description=(
             "Upload a file to the managed service's local listener with a local "
             "client token, or use --handoff-file from an MCP session, and print the returned handle."
@@ -1120,16 +1138,16 @@ def _send_upload_session(
 def _serve_main(argv: list[str]) -> int:
     # Static protocol examples keep help independent of optional product imports.
     parser = argparse.ArgumentParser(
-        prog="exomem",
+        prog="evermatter",
         description="Serve the MCP server by default, or run product commands directly.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Discover the operating contract and available product commands:\n"
-            "  exomem bootstrap --profile compact --json\n\n"
+            "  evermatter bootstrap --profile compact --json\n\n"
             "Inspect the bootstrap arguments:\n"
-            "  exomem bootstrap --help\n\n"
+            "  evermatter bootstrap --help\n\n"
             "Inspect any product command's arguments:\n"
-            "  exomem <command> --help"
+            "  evermatter <command> --help"
         ),
     )
     parser.add_argument(
@@ -1159,7 +1177,7 @@ def _serve_main(argv: list[str]) -> int:
     except KeyboardInterrupt:
         return 130
     except Exception as e:  # noqa: BLE001 — top-level CLI guard: report and exit non-zero
-        print(f"exomem failed: {e}", file=sys.stderr)
+        print(f"evermatter failed: {e}", file=sys.stderr)
         return 1
     return 0
 
@@ -1170,7 +1188,7 @@ def _studio_main(argv: list[str]) -> int:
     from urllib.parse import urlsplit, urlunsplit
 
     parser = argparse.ArgumentParser(
-        prog="exomem studio",
+        prog="evermatter studio",
         description="Show the packaged Epistemic Review Studio entry URL.",
     )
     parser.add_argument(
@@ -1218,7 +1236,7 @@ def _tui_main(argv: list[str]) -> int:
     fails in milliseconds with one actionable line, never a traceback.
     """
     parser = argparse.ArgumentParser(
-        prog="exomem tui",
+        prog="evermatter tui",
         description=(
             "Launch the interactive terminal UI: capture, ask, review, adopt, "
             "packs, status, and settings over the same product commands as the "
@@ -1242,14 +1260,14 @@ def _tui_main(argv: list[str]) -> int:
 
     if not _tui_stdio_is_tty():
         print(
-            "exomem tui needs an interactive terminal (stdin/stdout is not a TTY).",
+            "evermatter tui needs an interactive terminal (stdin/stdout is not a TTY).",
             file=sys.stderr,
         )
         return 2
     if not _module_available("textual"):
         print(
-            "exomem tui needs the optional TUI stack: run `uv sync --extra tui` "
-            "(source checkout) or `pip install 'exomem[tui]'`, then retry.",
+            "evermatter tui needs the optional TUI stack: run `uv sync --extra tui` "
+            "(source checkout) or `pip install 'evermatter[tui]'`, then retry.",
             file=sys.stderr,
         )
         return 1
@@ -1264,7 +1282,7 @@ def _backfill_media_main(argv: list[str]) -> int:
     import logging
 
     parser = argparse.ArgumentParser(
-        prog="exomem backfill-media",
+        prog="evermatter backfill-media",
         description="Make pre-existing Evidence binaries searchable: write a sidecar if "
         "missing, extract text (OCR/ASR/PDF), and CLIP-embed images. Idempotent; CPU or GPU.",
     )
@@ -1329,7 +1347,7 @@ def _index_main(argv: list[str]) -> int:
     import logging
 
     parser = argparse.ArgumentParser(
-        prog="exomem index",
+        prog="evermatter index",
         description="Build/refresh the semantic (bge) vector index INCREMENTALLY: "
         "skip files already up to date, embed new/changed ones in batches, prune "
         "rows for files that are gone. Idempotent; unlike a full audit_fix rebuild "
@@ -1464,12 +1482,12 @@ def _prominence_main(argv: list[str]) -> int:
     from . import prominence as prom_mod
 
     parser = argparse.ArgumentParser(
-        prog="exomem prominence",
+        prog="evermatter prominence",
         description="Show or set how much Evermatter participates in a conversation: "
         "off (explicit invocation only) | light (recall when asked, capture on "
         "request) | balanced (recall on topic match, capture durable conclusions) | "
         "maximal (recall before every substantive turn, capture every stepping "
-        "stone, and say so). Persisted to the same config file as `exomem mode`, "
+        "stone, and say so). Persisted to the same config file as `evermatter mode`, "
         "read by BOTH the server and the CLI.",
     )
     parser.add_argument(
@@ -1492,8 +1510,13 @@ def _prominence_main(argv: list[str]) -> int:
         if args.json:
             print(json.dumps(policy))
         elif args.hook_env:
+            # Each tunable is exported once, under its EVERMATTER_ name, and its other
+            # spellings are unset, so an earlier export cannot outrank or contradict it.
             for key, value in prom_mod.hook_env().items():
-                print(f"unset {key}" if value == "" else f"export {key}={value}")
+                exported = env_compat.emitted_name(key) if value != "" else None
+                print("unset " + " ".join(n for n in env_compat.names_for(key) if n != exported))
+                if exported is not None:
+                    print(f"export {exported}={value}")
         else:
             contract = policy["contract"]
             print(f"prominence: {policy['level']}  (source: {policy['source']})")
@@ -1513,8 +1536,8 @@ def _prominence_main(argv: list[str]) -> int:
     canonical = prom_mod.normalize(args.level)
     print(f"Prominence set to '{canonical}'  ({path})")
     print(f"  {prom_mod.CONTRACTS[canonical].summary}")
-    print("A running exomem server serves it to new sessions via bootstrap().")
-    print("Reinstall hooks (exomem install-hook) to apply the matching nudge cadence.")
+    print("A running Evermatter server serves it to new sessions via bootstrap().")
+    print("Reinstall hooks (evermatter install-hook) to apply the matching nudge cadence.")
     return 0
 
 
@@ -1535,7 +1558,7 @@ def _mode_main(argv: list[str]) -> int:
     from . import mode as mode_mod
 
     parser = argparse.ArgumentParser(
-        prog="exomem mode",
+        prog="evermatter mode",
         description="Show or set the compute mode: quiet (CPU, low footprint) | normal "
         "(default, CPU steady-state) | performance (use the GPU; aliases gpu/turbo). "
         "Low-resource aliases resource-saver/low-resource map to quiet. Persisted to "
@@ -1609,8 +1632,8 @@ def _mode_main(argv: list[str]) -> int:
         )
         return 1
     print(f"Compute mode set to '{persisted}'  ({path})")
-    print("A running exomem server applies it live within ~10s (or restart to apply now).")
-    print("CLI ops (exomem index / warm) use it on their next run.")
+    print("A running Evermatter server applies it live within ~10s (or restart to apply now).")
+    print("CLI ops (evermatter index / warm) use it on their next run.")
     return 0
 
 
@@ -1623,7 +1646,7 @@ def _dreamer_main(argv: list[str]) -> int:
     from . import dreamer
 
     parser = argparse.ArgumentParser(
-        prog="exomem dreamer",
+        prog="evermatter dreamer",
         description="Show or set the dreamer, the default-off background worker that "
         "proposes bounded upkeep. on | off | pause | resume write the `dreamer` key in "
         "the per-machine config file, which a running server's worker re-reads within one "
@@ -1671,18 +1694,18 @@ def _dreamer_main(argv: list[str]) -> int:
         # A running worker re-reads the setting; a server started with the
         # dreamer off starts one from its config poll.
         print(
-            "A running exomem server whose worker is running applies it within one poll "
+            "A running Evermatter server whose worker is running applies it within one poll "
             "(about 30s); a server started with the dreamer off starts its worker within "
             "one config poll (about 10s)."
         )
     else:
-        print("A running exomem server applies it within one poll (about 30s).")
+        print("A running Evermatter server applies it within one poll (about 30s).")
     return 0
 
 
 def _status_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem status",
+        prog="evermatter status",
         description="Report resource mode, residency, deferred work, and CUDA accounting.",
     )
     parser.add_argument(
@@ -1753,7 +1776,7 @@ def _install_info_main(argv: list[str]) -> int:
     reusing the word for install origin would be genuinely ambiguous.
     """
     parser = argparse.ArgumentParser(
-        prog="exomem install-info",
+        prog="evermatter install-info",
         description="Report install origin: version, source, revision, torch build, extras.",
     )
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
@@ -1783,8 +1806,8 @@ def _install_info_main(argv: list[str]) -> int:
 
 def _doctor_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem doctor",
-        description="Read-only local setup preflight for exomem installs.",
+        prog="evermatter doctor",
+        description="Read-only local setup preflight for Evermatter installs.",
     )
     parser.add_argument(
         "--vault",
@@ -1838,18 +1861,18 @@ def _doctor_main(argv: list[str]) -> int:
             print(
                 "\nA capable idle GPU was detected. Normal mode still avoids "
                 "steady-state CUDA residency. For faster explicit indexing, run:\n"
-                "    exomem mode performance"
+                "    evermatter mode performance"
             )
         print(
-            "\nResource controls: exomem mode quiet | normal | performance; "
-            "inspect with exomem status --resources --json."
+            "\nResource controls: evermatter mode quiet | normal | performance; "
+            "inspect with evermatter status --resources --json."
         )
     return 0 if report.success else 1
 
 
 def _relations_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem relations",
+        prog="evermatter relations",
         description="Relation-quality tools over the published graph snapshot.",
     )
     sub = parser.add_subparsers(dest="action", required=True)
@@ -2009,7 +2032,7 @@ def _warm_main(argv: list[str]) -> int:
     import time
 
     parser = argparse.ArgumentParser(
-        prog="exomem warm",
+        prog="evermatter warm",
         description=(
             "Pre-download and load the search models (bge embedder, reranker, "
             "CLIP when enabled) into the local Hugging Face cache. Optional "
@@ -2081,7 +2104,7 @@ def _warm_main(argv: list[str]) -> int:
             failed = True
             print(f"  {label}: FAILED ({e})", file=sys.stderr)
 
-    print("exomem warm — downloading/loading search models (first run can take minutes)")
+    print("evermatter warm — downloading/loading search models (first run can take minutes)")
     _step(f"embedding model {embeddings.MODEL_NAME}", embeddings.get_model)
     _step(
         f"reranker {embeddings.RERANKER_NAME}",
@@ -2109,7 +2132,7 @@ def _warm_main(argv: list[str]) -> int:
             print(
                 "warm: the ML stack is not installed — this is a lean install. "
                 "Add it with `uv sync --extra embeddings` (source checkout) or "
-                "`pip install 'exomem[embeddings]'`, then re-run `exomem warm`.",
+                "`pip install 'evermatter[embeddings]'`, then re-run `evermatter warm`.",
                 file=sys.stderr,
             )
             return 1
@@ -2139,17 +2162,28 @@ def _speaker_vault(args) -> Path:
 
 def _enroll_speaker_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem enroll-speaker",
+        prog="evermatter enroll-speaker",
         description=(
-            "Enroll (or extend) a named voice profile from an audio sample for opt-in "
-            "diarization. The sample is embedded into a 192-dim ECAPA voiceprint and stored in "
-            "the per-machine profile store beside the embedding sidecar — desk-side admin, never "
-            "an MCP tool. Re-enrolling the same name running-averages the centroid over samples. "
-            "Example: exomem enroll-speaker --name Alice --self alice-sample.wav"
+            "Enroll (or extend) a named voice profile for opt-in diarization. The voiceprint is a "
+            "192-dim ECAPA embedding stored in the per-machine profile store beside the embedding "
+            "sidecar — desk-side admin, never an MCP tool. Re-enrolling the same name running-averages "
+            "the centroid over samples. From an audio sample: evermatter enroll-speaker --name Alice --self "
+            "alice-sample.wav. From a recording's Source: evermatter enroll-speaker --name Alice "
+            "--recording 'Knowledge Base/Evidence/Audio/talk.m4a' --label 'Speaker A' shows the "
+            "label's lines and asks before it reads the audio."
         ),
     )
-    parser.add_argument("audio", help="path to an audio sample of the speaker's voice")
+    parser.add_argument("audio", nargs="?", help="path to an audio sample of the speaker's voice")
     parser.add_argument("--name", required=True, help="speaker name to attach to matched clusters")
+    parser.add_argument("--recording", help="vault path of a recording whose Source page labels the speaker")
+    parser.add_argument("--label", help="the speaker label as the recording's page shows it (with --recording)")
+    parser.add_argument("--yes", action="store_true", help="confirm without asking, after the lines are shown")
+    parser.add_argument(
+        "--cloud", action="store_true",
+        help="the recording is in your Cloud: read the original through your signed-in Cloud download "
+             "and delete the copy afterwards. Needs --page-file.",
+    )
+    parser.add_argument("--page-file", type=Path, help="with --cloud: the Source page as saved from your Cloud")
     parser.add_argument(
         "--self",
         dest="is_self",
@@ -2167,21 +2201,33 @@ def _enroll_speaker_main(argv: list[str]) -> int:
         default=os.environ.get("EXOMEM_VAULT_PATH"),
         help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
+    from .cloud_import_client import add_endpoint_arguments
+
+    add_endpoint_arguments(parser)
     args = parser.parse_args(argv)
+    if (args.audio is None) == (args.recording is None):
+        parser.error("give either an audio sample or --recording with --label")
+    if args.recording is not None and args.label is None:
+        parser.error("--recording needs --label")
+    if args.cloud and (args.recording is None or args.page_file is None):
+        parser.error("--cloud needs --recording and --page-file")
 
     from . import enroll_speaker as enroll_module
     from .voice_profiles import DEFAULT_THRESHOLD
 
+    threshold = args.threshold if args.threshold is not None else DEFAULT_THRESHOLD
     try:
-        rec = enroll_module.enroll_speaker(
-            args.audio,
-            args.name,
-            is_self=args.is_self,
-            threshold=args.threshold if args.threshold is not None else DEFAULT_THRESHOLD,
-            vault_root=_speaker_vault(args),
-        )
+        if args.recording is None:
+            rec = enroll_module.enroll_speaker(
+                args.audio, args.name, is_self=args.is_self, threshold=threshold, vault_root=_speaker_vault(args),
+            )
+        else:
+            rec = _enroll_from_recording(args, enroll_module, threshold)
+            if rec is None:
+                print("Not enrolled: nothing was confirmed, and no audio was read.")
+                return 1
     except (enroll_module.EnrollmentError, RuntimeError) as e:
-        print(f"exomem enroll-speaker: {e}", file=sys.stderr)
+        print(f"evermatter enroll-speaker: {getattr(e, 'code', 'ENROLLMENT_FAILED')}: {e}", file=sys.stderr)
         return 1
     print(
         f"Enrolled {args.name!r} ({rec['samples']} sample(s), "
@@ -2190,9 +2236,40 @@ def _enroll_speaker_main(argv: list[str]) -> int:
     return 0
 
 
+def _enroll_from_recording(args, enroll_module, threshold: float):
+    """The recording form of `enroll-speaker`: show the label's lines, confirm, then embed its spans."""
+    root = _speaker_vault(args)
+    if args.cloud:
+        from .cloud_import_client import CloudImportClientConfig
+
+        text, recorded = enroll_module.saved_page(args.page_file)
+        config = CloudImportClientConfig(args.mcp_url, args.api_base_url, args.oauth_client_id)
+        original = enroll_module.cloud_original(config, args.recording)
+    else:
+        text, recorded = enroll_module.local_page(root, args.recording)
+        original = enroll_module.local_original(root, args.recording)
+
+    def confirm(sample) -> bool:
+        print(f"{sample.label!r} speaks in {len(sample.spans)} span(s) of {args.recording}. Sample lines:")
+        for line in sample.lines:
+            print(f"  {line}")
+        if args.yes:
+            return True
+        try:
+            # nosemgrep: ep-word-set -- the answers of the prompt's own [y/N]: a closed set the prompt states, not a reading of free text.
+            return input(f"Keep this voice as {args.name!r}? [y/N] ").strip().lower() in {"y", "yes"}
+        except EOFError:
+            return False
+
+    return enroll_module.enroll_from_recording(
+        text, recorded, args.label, args.name,
+        original=original, confirm=confirm, is_self=args.is_self, threshold=threshold, vault_root=root,
+    )
+
+
 def _list_speakers_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem list-speakers",
+        prog="evermatter list-speakers",
         description="List the enrolled voice profiles used for named diarization.",
     )
     parser.add_argument(
@@ -2207,7 +2284,7 @@ def _list_speakers_main(argv: list[str]) -> int:
     try:
         profiles = enroll_module.list_speakers(_speaker_vault(args))
     except RuntimeError as e:
-        print(f"exomem list-speakers: {e}", file=sys.stderr)
+        print(f"evermatter list-speakers: {e}", file=sys.stderr)
         return 1
     if not profiles:
         print("No voice profiles enrolled.")
@@ -2220,7 +2297,7 @@ def _list_speakers_main(argv: list[str]) -> int:
 
 def _remove_speaker_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem remove-speaker",
+        prog="evermatter remove-speaker",
         description="Delete an enrolled voice profile; that voice then labels anonymously again.",
     )
     parser.add_argument("--name", required=True, help="profile name to remove")
@@ -2236,7 +2313,7 @@ def _remove_speaker_main(argv: list[str]) -> int:
     try:
         removed = enroll_module.remove_speaker(args.name, _speaker_vault(args))
     except RuntimeError as e:
-        print(f"exomem remove-speaker: {e}", file=sys.stderr)
+        print(f"evermatter remove-speaker: {e}", file=sys.stderr)
         return 1
     print(f"Removed {args.name!r}." if removed else f"No profile named {args.name!r}.")
     return 0
@@ -2244,7 +2321,7 @@ def _remove_speaker_main(argv: list[str]) -> int:
 
 def _trace_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem trace",
+        prog="evermatter trace",
         description=(
             "Join the server log, the call ledger, queries/writes/reads.jsonl, "
             "and mutations.jsonl for one request id into a single time-ordered "
@@ -2279,7 +2356,7 @@ def _logs_main(argv: list[str]) -> int:
     # `resolve_log_file` accepts.
     choices = obs_cli.file_aliases()
     parser = argparse.ArgumentParser(
-        prog="exomem logs",
+        prog="evermatter logs",
         description="Tail, grep, or verify the per-process JSONL log files.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -2411,7 +2488,7 @@ def _lease_release_main(config, *, confirmed: bool, as_json: bool) -> int:  # no
     else:
         print(
             "release did not take effect (the lease changed hands concurrently); "
-            "rerun 'exomem lease status'."
+            "rerun 'evermatter lease status'."
         )
     return 0
 
@@ -2455,7 +2532,7 @@ def _lease_schema_admission_main(
 
 def _collections_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem collections",
+        prog="evermatter collections",
         description=(
             "Owner operations on this vault's collection store; "
             "file collections are never read or changed."
@@ -2648,7 +2725,7 @@ def _collections_main(argv: list[str]) -> int:
 
 def _store_mode_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem store-mode",
+        prog="evermatter store-mode",
         description=(
             "Owner operations that move this vault's pages, lexical rows and graph rows into the "
             "collection store and back. File mode is the default. The explicit migrate command "
@@ -2790,7 +2867,7 @@ def _store_mode_main(argv: list[str]) -> int:
 
 def _intake_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem intake",
+        prog="evermatter intake",
         description=(
             "Owner inspection of saves the service queued because the vault was busy, and "
             "dismissal of a failed one. The service applies queued saves by itself."
@@ -2828,7 +2905,7 @@ def _intake_main(argv: list[str]) -> int:
 
 def _lease_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem lease",
+        prog="evermatter lease",
         description=(
             "Ops-only writer-lease inspection, schema admission, and manual release. "
             "Not an MCP or REST product command; 'steal'/'force-acquire' are deliberately "
@@ -2929,7 +3006,7 @@ def _governance_schema_status(vault: Path, *, now: int) -> dict[str, object]:
 
 def _governance_schema_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem governance-schema",
+        prog="evermatter governance-schema",
         description=(
             "Ops-only governance schema inspection, planning, and explicit rollback. "
             "This command is not exposed through MCP, REST, or Hosted agent surfaces."
@@ -3367,7 +3444,7 @@ def _reclaim_schema_main(argv: list[str]) -> int:
     something they ask for rather than something they discover.
     """
     parser = argparse.ArgumentParser(
-        prog="exomem reclaim-schema",
+        prog="evermatter reclaim-schema",
         description=(
             f"Remove the superseded copy of the shipped schema from "
             f"{managed_join('_Schema/')} once it has been redeployed to .exomem/schema/."
@@ -3393,7 +3470,7 @@ def _reclaim_schema_main(argv: list[str]) -> int:
     try:
         report = init_module.reclaim_legacy_shipped_schema(vault, apply=args.apply)
     except OpError as error:
-        print(f"exomem reclaim-schema: {error.message}\n{error.remediation}", file=sys.stderr)
+        print(f"evermatter reclaim-schema: {error.message}\n{error.remediation}", file=sys.stderr)
         return 1
 
     if not report["removed"] and not report["declined"]:
@@ -3424,7 +3501,7 @@ def _cell_init_failure_line(error_code: str, step: str) -> None:
 
 def _cell_init_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem cell-init",
+        prog="evermatter cell-init",
         description=(
             "Idempotent Evermatter Cloud cell init-container entrypoint: vault init "
             "when absent, then offline state migration. No governance schema "
@@ -3489,7 +3566,7 @@ def _cell_init_main(argv: list[str]) -> int:
 
 def _init_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem init",
+        prog="evermatter init",
         description=f"Bootstrap a fresh {managed_root_rel()} scaffold into a vault.",
     )
     parser.add_argument(
@@ -3512,10 +3589,10 @@ def _init_main(argv: list[str]) -> int:
     try:
         report = init_module.init_vault(Path(vault), force=args.force)
     except FileExistsError as e:
-        print(f"exomem init: {e}", file=sys.stderr)
+        print(f"evermatter init: {e}", file=sys.stderr)
         return 1
     except OpError as error:
-        print(f"exomem init: {error.message}\n{error.remediation}", file=sys.stderr)
+        print(f"evermatter init: {error.message}\n{error.remediation}", file=sys.stderr)
         return 1
     print(f"Initialized {managed_root_rel()} at {report['kb']}")
     print(f"  {len(report['created'])} files created + the typed folder tree.")
@@ -3532,15 +3609,15 @@ def _init_main(argv: list[str]) -> int:
     )
     print(f"  3. Adapt {managed_join('_Schema/project-keys.yaml')} to your own projects.")
     print(
-        "  4. For low-resource mode: exomem mode quiet; inspect with "
-        "exomem status --resources --json."
+        "  4. For low-resource mode: evermatter mode quiet; inspect with "
+        "evermatter status --resources --json."
     )
     return 0
 
 
 def _install_skill_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem install-skill",
+        prog="evermatter install-skill",
         description=(
             "Install the Evermatter skills into every agent client on this machine. "
             "The MCP server is the hands; the skills are the brain that tells the agent "
@@ -3594,7 +3671,7 @@ def _install_skill_main(argv: list[str]) -> int:
                 client=args.client, force=args.force, link=args.link, on_moved=moved
             )["clients"]
     except (FileExistsError, FileNotFoundError, ValueError) as e:
-        print(f"exomem install-skill: {e}", file=sys.stderr)
+        print(f"evermatter install-skill: {e}", file=sys.stderr)
         return 1
 
     for client, report in reports.items():
@@ -3619,11 +3696,11 @@ def _install_skill_main(argv: list[str]) -> int:
 
 def _package_skills_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem package-skills",
+        prog="evermatter package-skills",
         description=(
             "Build one uploadable .zip per skill for clients that have no filesystem "
             "install path (claude.ai, ChatGPT). Claude Code and Codex should use "
-            "`exomem install-skill` instead."
+            "`evermatter install-skill` instead."
         ),
     )
     parser.add_argument(
@@ -3665,7 +3742,7 @@ def _package_skills_main(argv: list[str]) -> int:
             vault=vault,
         )
     except (FileNotFoundError, OSError, ValueError) as e:
-        print(f"exomem package-skills: {e}", file=sys.stderr)
+        print(f"evermatter package-skills: {e}", file=sys.stderr)
         return 1
 
     print(f"Wrote {report['count']} skill archives to {report['out_dir']}:")
@@ -3675,13 +3752,13 @@ def _package_skills_main(argv: list[str]) -> int:
     print("Upload these in the client's settings:")
     print("  claude.ai  -> Settings > Capabilities > Skills > upload")
     print("  ChatGPT    -> Settings > Skills > upload")
-    print("Claude Code and Codex do not need these - run `exomem install-skill`.")
+    print("Claude Code and Codex do not need these - run `evermatter install-skill`.")
     return 0
 
 
 def _install_hook_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem install-hook",
+        prog="evermatter install-hook",
         description=(
             "Wire the KB capture, retrieval, and local continuation hooks into "
             "Claude Code or Codex: a "
@@ -3746,7 +3823,7 @@ def _install_hook_main(argv: list[str]) -> int:
         action="store_true",
         help=(
             "Remove the entries and scripts this installed, and the learning "
-            "instruction `exomem setup` placed in the client's CLAUDE.md or "
+            "instruction `evermatter setup` placed in the client's CLAUDE.md or "
             "AGENTS.md, and nothing else; also edits any yadm alternate sources, "
             "which is what makes the removal survive the next alternate selection."
         ),
@@ -3819,7 +3896,7 @@ def _install_hook_main(argv: list[str]) -> int:
                 remove_scripts=not args.keep_scripts,
             )
         except (OSError, RuntimeError, ValueError) as e:
-            print(f"exomem install-hook --uninstall: {e}", file=sys.stderr)
+            print(f"evermatter install-hook --uninstall: {e}", file=sys.stderr)
             return 1
         if args.json:
             print(json.dumps(report))
@@ -3843,7 +3920,7 @@ def _install_hook_main(argv: list[str]) -> int:
                 hook_home=Path(args.hook_home) if args.hook_home else None,
             )
         except ValueError as e:
-            print(f"exomem install-hook --check: {e}", file=sys.stderr)
+            print(f"evermatter install-hook --check: {e}", file=sys.stderr)
             return 2
         if args.json:
             print(json.dumps(report))
@@ -3884,7 +3961,7 @@ def _install_hook_main(argv: list[str]) -> int:
             refresh_max_activation_chars=args.refresh_max_activation_chars,
         )
     except (FileNotFoundError, OSError, RuntimeError, ValueError) as e:
-        print(f"exomem install-hook: {e}", file=sys.stderr)
+        print(f"evermatter install-hook: {e}", file=sys.stderr)
         return 1
 
     if args.json:
@@ -3913,13 +3990,104 @@ def _install_hook_main(argv: list[str]) -> int:
 # --------------------------------------------------------------------------- #
 # Simple product actions (friendly CLI aliases over canonical registry commands)
 # --------------------------------------------------------------------------- #
+def _faces_main(argv: list[str]) -> int:
+    """`exomem faces on|off|status|set|name|delete ...`: `on` here; the rest through the registry command `manage_faces`."""
+    # nosemgrep: ep-word-set -- the help flags this CLI's parsers register.
+    if not argv or argv[0] in {"-h", "--help"}:
+        print(
+            "usage: evermatter faces {on,off,status,set,name,delete} ...\n\n"
+            "Search by person. `on` shows what it stores and asks you to confirm; `off` stops it and keeps what\n"
+            "is stored; `delete` erases every face, group and name; `status`, `set` and `name` take the options\n"
+            "of `evermatter manage_faces --help`."
+        )
+        return 0 if argv else 2
+    head, rest = argv[0], argv[1:]
+    if head == "on":
+        return _faces_on_main(rest)
+    # Every faces command takes `--vault` as `on` does; the registry commands read the vault from the environment.
+    vault_parser = argparse.ArgumentParser(add_help=False)
+    vault_parser.add_argument("--vault", default=None)
+    chosen, rest = vault_parser.parse_known_args(rest)
+    if chosen.vault:
+        os.environ["EXOMEM_VAULT_PATH"] = str(Path(chosen.vault).expanduser())
+    if head == "off":
+        return _core_op_main(["manage_faces", "--action", "set", "--state", "off", *rest])
+    return _core_op_main(["manage_faces", "--action", head, *rest])
+
+
+def _faces_on_main(argv: list[str]) -> int:
+    from . import face_operations, face_scan, face_search, face_store
+    from .cli_ops import OpError
+    from .vault import resolve_vault
+
+    parser = argparse.ArgumentParser(
+        prog="evermatter faces on",
+        description=(
+            "Turn on search by person for this account. Shows what it stores, asks you to type the "
+            "confirmation, then scans the existing pictures and video keyframes. Ctrl-C stops the scan; "
+            "the service resumes it at its next start."
+        ),
+    )
+    parser.add_argument("--vault", default=None, help="vault root (default: $EXOMEM_VAULT_PATH)")
+    args = parser.parse_args(argv)
+    root = Path(args.vault).expanduser() if args.vault else resolve_vault()
+    refusal = face_store.deployment_refusal()
+    if refusal is not None:
+        error = face_search.faces_unavailable(refusal)
+        print(f"Error [{error.code}]: {error.message} {error.remediation}", file=sys.stderr)
+        return 1
+    if face_store.enabled(root):
+        print("Faces are already on.")
+        return 0
+    print(face_operations.DISCLOSURE)
+    # No flag takes the confirmation: a one-line shell call by an agent would then turn faces on.
+    if not sys.stdin.isatty():
+        print(
+            "Error [CONFIRMATION_REQUIRED]: faces stay off, because no terminal can take the confirmation. "
+            "The owner runs `evermatter faces on` in a terminal and types the confirmation.",
+            file=sys.stderr,
+        )
+        return 2
+    typed = input(f'\nType "{face_operations.CONFIRMATION}" to turn faces on: ')
+    if typed.strip() != face_operations.CONFIRMATION:
+        print("Faces stay off: the confirmation did not match.", file=sys.stderr)
+        return 1
+    try:
+        started = face_operations.turn_on(root)
+    except OpError as error:
+        print(f"Error [{error.code}]: {error.message} {error.remediation}", file=sys.stderr)
+        return 1
+    print("Faces are on.")
+    if not started:
+        return 0
+    try:
+        while face_scan.backfill_running(root):
+            progress = face_scan.progress(root)
+            total = "unknown" if progress.total is None else progress.total
+            print(f"\rScanned {progress.processed} of {total} pictures.", end="", flush=True)
+            time.sleep(2)
+    except KeyboardInterrupt:
+        face_scan.stop_backfill(root, timeout=30)
+        print("\nThe scan stopped. The service resumes it at its next start.")
+        return 0
+    face_scan.stop_backfill(root, timeout=30)
+    setting = face_store.read_setting(root)
+    unavailable = face_store.unavailable_reason(setting)
+    if unavailable is not None:
+        print(f"\nFaces are on but cannot run here: {unavailable}. `evermatter faces status` shows it.")
+        return 1
+    progress = face_scan.progress(root)
+    print(f"\nScanned {progress.processed} pictures. New pictures are scanned as they arrive.")
+    return 0
+
+
 def _activate_main(argv: list[str]) -> int:
     from . import commands as commands_module
 
     activation = next(command for command in commands_module.PRODUCT_COMMANDS if command.name == "activate_context")
     trigger = next(parameter for parameter in activation.params if parameter.name == "trigger")
     parser = argparse.ArgumentParser(
-        prog="exomem activate",
+        prog="evermatter activate",
         description=(
             "Compile durable context for a raw turn. Thin alias over "
             "activate_context; pass the user's words verbatim, not a query."
@@ -4078,7 +4246,7 @@ def _simple_action_main(argv: list[str]) -> int:
 
 def _simple_ask_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem ask",
+        prog="evermatter ask",
         description=(
             "Ask Evermatter what it knows. Thin alias over ask_memory with compact recall defaults."
         ),
@@ -4144,7 +4312,7 @@ def _simple_ask_main(argv: list[str]) -> int:
 
 def _simple_remember_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem remember",
+        prog="evermatter remember",
         description="Remember a durable conclusion. Thin alias over remember.",
     )
     parser.add_argument("content", help="compiled note body markdown")
@@ -4212,7 +4380,7 @@ def _simple_remember_main(argv: list[str]) -> int:
 
 def _simple_capture_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem capture",
+        prog="evermatter capture",
         description="Capture raw source or proof-bearing text. Thin alias over add/preserve.",
     )
     parser.add_argument("content", help="raw text to capture")
@@ -4322,7 +4490,7 @@ def _simple_review_main(argv: list[str]) -> int:
         action = argv[0]
         family = action in disposition_actions
         parser = argparse.ArgumentParser(
-            prog=f"exomem review {action}",
+            prog=f"evermatter review {action}",
             description=(
                 f"Set one signal family's disposition to `{action}`."
                 if family
@@ -4371,7 +4539,7 @@ def _simple_review_main(argv: list[str]) -> int:
         return _core_op_main(_with_json(core, args.json))
 
     parser = argparse.ArgumentParser(
-        prog="exomem review",
+        prog="evermatter review",
         description="Review the Epistemic Inbox or run the full vault audit.",
     )
     parser.add_argument(
@@ -4415,7 +4583,7 @@ def _simple_review_main(argv: list[str]) -> int:
 
 def _simple_connect_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem connect",
+        prog="evermatter connect",
         description="Suggest links or typed graph relations. Proposal-only by default.",
     )
     parser.add_argument("--path", help="existing page path")
@@ -4451,7 +4619,7 @@ def _simple_connect_main(argv: list[str]) -> int:
 
 def _simple_adopt_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem adopt",
+        prog="evermatter adopt",
         description="Adopt an existing vault safely. Thin alias over adopt_vault.",
     )
     parser.add_argument("path", nargs="?", help="vault subtree to scan")
@@ -4528,7 +4696,7 @@ def _run_offline_state_migration(
 
 def _simple_maintain_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="exomem maintain",
+        prog="evermatter maintain",
         description="Check vault health; write-capable fixes require explicit flags.",
     )
     parser.add_argument(
@@ -5377,7 +5545,7 @@ def _cell_export_main(argv: list[str]) -> int:
 def _media_replicas_main(argv: list[str]) -> int:
     """The owner's commands for replica stores and personal eviction."""
     parser = argparse.ArgumentParser(
-        prog="exomem media-replicas",
+        prog="evermatter media-replicas",
         description="Declare a replica store, confirm that you exported its key, list the replicas by original, or list "
                     "the replicas that a check found damaged.",
     )
@@ -5453,6 +5621,13 @@ def _cell_media_census_main(argv: list[str]) -> int:
     return census_main(argv)
 
 
+def _cell_media_storage_main(argv: list[str]) -> int:
+    # It reads one file, so it loads no CLI, server framework or native runtime.
+    from .cell_media_storage import main as storage_main
+
+    return storage_main(argv)
+
+
 def _cell_media_manifest_main(argv: list[str]) -> int:
     # It runs on a read-only clone: it reads the vault and the media ledger, nothing more.
     from .media_manifest import main as manifest_main
@@ -5510,11 +5685,13 @@ _COMMANDS: dict[str, Callable[[list[str]], int]] = {
     "cell-init": _cell_init_main,
     "media-replicas": _media_replicas_main,
     "cell-media-census": _cell_media_census_main,
+    "cell-media-storage": _cell_media_storage_main,
     "cell-media-manifest": _cell_media_manifest_main,
     "cell-media-collect": _cell_media_collect_main,
     # A thin alias over the registry command, so there is exactly one leaf; the long form
     # `exomem activate_context` keeps working.
     "activate": _activate_main,
+    "faces": _faces_main,
 }
 
 # The table entries that never configured the one-shot CLI log file: the cloud client, the cell jobs and the
@@ -5527,6 +5704,7 @@ _WITHOUT_CLI_LOG: frozenset[str] = frozenset(
         "cell-export",
         "cell-init",
         "cell-media-census",
+        "cell-media-storage",
         "cell-media-manifest",
         "cell-media-collect",
         "activate",

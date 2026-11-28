@@ -62,7 +62,7 @@ _CONFLICT_NAME = re.compile(r"^(?P<base>.+) \d+(?P<ext>\.[^.]+)$")
 _CONFLICT_TOKENS = ("conflicted copy", "sync-conflict")
 
 SCOPE_NOTE = (
-    "exomem writes only under 'Knowledge Base/'. Everything else in the vault "
+    "Evermatter writes only under 'Knowledge Base/'. Everything else in the vault "
     "is read-only input — never modified, still searchable via find "
     "scope=\"vault\"."
 )

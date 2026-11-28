@@ -35,7 +35,7 @@ def test_missing_extra_prints_install_hint(monkeypatch: pytest.MonkeyPatch, caps
     rc = main(["tui"])
     assert rc == 1
     err = capsys.readouterr().err
-    assert "exomem[tui]" in err
+    assert "evermatter[tui]" in err
     assert "--extra tui" in err
     assert "Traceback" not in err
 

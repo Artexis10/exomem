@@ -70,7 +70,8 @@ _DEFAULT_ADMISSION_FRACTION = 0.80
 # Percent of the last 10 s that tasks stalled on memory; 10% is sustained reclaim,
 # well above the idle cell's ~0%, and below the stalls that precede an OOM kill.
 _DEFAULT_PRESSURE_AVG10 = 10.0
-# Memory stops, and apart from them watchdog stops, before a job leaves the stop cycle.
+# Memory stops, and apart from them watchdog stops and job crashes, before a job leaves the stop
+# cycle.
 _DEFAULT_STOP_LIMIT = 3
 # A media child runs one job. Fifteen minutes is far above the small samples'
 # sub-second times and leaves room for a long scanned PDF. A file that outruns it, or

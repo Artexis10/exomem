@@ -12,10 +12,12 @@ and runs the command against the real exomem package.
 
 The media census is the same kind of command: it names `exomem cell-media-census`
 in the cell image, which prints the record the cell wrote (tests/test_media_drain_record.py runs it,
-and checks that the cell's record parses here). So are the media manifest and the collection of
+and checks that the cell's record parses here). So is the storage report, `exomem cell-media-storage`
+(tests/test_media_storage_record.py). So are the media manifest and the collection of
 collect-released-media, which name `exomem cell-media-manifest` and `exomem cell-media-collect`.
 """
 
+import json
 import re
 import shlex
 from datetime import datetime
@@ -58,6 +60,28 @@ def media_census_command(captured_at: str) -> str:
     )
 
 
+# add-cloud-media-store D10: like the census, the storage record is one file that the cell wrote. The Job reports it as
+# unknown, with the hold start, when the cell image has no such command or its record is missing or unreadable.
+MEDIA_STORAGE_SECONDS = 10
+
+
+def media_storage_command(captured_at: str) -> str:
+    """Append the cell's storage record to the termination message, on a line of its own after the census.
+
+    The cell image prints the JSON line that the cell wrote beside its media ledger (media_storage_record), with the
+    bytes of vault storage, the bytes of media storage, its reading time and the time of the census behind the media
+    figure. A record that is missing, linked, oversize or malformed, an image without the command, or a timeout,
+    leaves both figures null and the hold start.
+    """
+    unknown = json.dumps({"captured_at": captured_at, "vault_bytes": None, "media_used_bytes": None,
+                          "media_observed_at": None}, separators=(",", ":"))
+    return (
+        f"{{ storage=$(timeout {MEDIA_STORAGE_SECONDS} exomem cell-media-storage --vault /data/vault)"
+        f" || storage={shlex.quote(unknown)}; "
+        "printf '\\n%s' \"$storage\" >> /dev/termination-log || true; }"
+    )
+
+
 # collect-released-media D5: each snapshot holds the media manifest at this path, outside the paths a restore writes.
 MEDIA_MANIFEST_PATH = "/tmp/media-manifest.json"
 # Unlike the census, the manifest walks every companion in the vault. One that does not finish in time is unknown,
@@ -82,7 +106,7 @@ MEDIA_COLLECTION_NO_RESULT = "stopped no-result ? ? ?"
 
 def media_collect_command() -> str:
     """Condemn the released names that no retained snapshot reaches, and append the collector's result line to the
-    termination message, the third line after the census. Its failure, timeout or unknown answer leaves the backup
+    termination message, the fourth line after the storage record. Its failure, timeout or unknown answer leaves the backup
     successful. The command substitution keeps even a shell error inside it."""
     return (f"{{ collected=$( left=$((COLLECT_START + {MEDIA_COLLECT_BY_SECONDS} - $(date +%s))); "
             f"[ \"$left\" -gt 0 ] && exec timeout \"$left\" exomem cell-media-collect --snapshot \"$SNAPSHOT_ID\" "
@@ -116,6 +140,36 @@ def parse_media_collection(line: str) -> tuple[str, str, int | None, int | None,
     hidden, candidates, skipped = (None if match[key] == "?" else int(match[key])
                                    for key in ("hidden", "candidates", "skipped"))
     return match["outcome"], match["reason"], hidden, candidates, skipped
+
+
+# Substrate holds each storage figure, and the allowance they are counted against, in a bigint column.
+MAX_FIGURE = 2**63 - 1
+
+
+def parse_media_storage(line: str) -> tuple[int | None, int | None, datetime, datetime | None] | None:
+    """The record a report line carries as (vault bytes, media bytes, reading time, census time), a figure None when
+    null; None when the line is not a JSON object with a reading time that carries a time zone, two figures that are
+    null or byte counts, and a census time that is null or carries a time zone. A key beyond these is ignored, so a
+    newer cell image reports as before."""
+    try:
+        fields = json.loads(line)
+    except (ValueError, RecursionError):
+        return None
+    if type(fields) is not dict:
+        return None
+    try:
+        captured_at = datetime.fromisoformat(fields["captured_at"])
+        vault_bytes, media_used_bytes = fields["vault_bytes"], fields["media_used_bytes"]
+        census = fields["media_observed_at"]
+        media_observed_at = None if census is None else datetime.fromisoformat(census)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if captured_at.tzinfo is None or (media_observed_at is not None and media_observed_at.tzinfo is None):
+        return None
+    for figure in (vault_bytes, media_used_bytes):
+        if figure is not None and (type(figure) is not int or not 0 <= figure <= MAX_FIGURE):
+            return None
+    return vault_bytes, media_used_bytes, captured_at, media_observed_at
 
 
 def parse_media_census(line: str) -> tuple[int | None, int | None, datetime] | None:

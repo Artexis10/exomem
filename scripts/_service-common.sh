@@ -16,6 +16,72 @@ exomem_service_name() { echo "exomem"; }
 EXOMEM_SERVICE_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXOMEM_TRANSITION_RECEIPT_TOOL="$EXOMEM_SERVICE_COMMON_DIR/service-transition-receipt.py"
 
+# Setting names. The package (env_compat) holds this rule; the shell readers keep
+# this one copy, and tests/test_setting_names_in_step.py keeps it in step. A setting
+# `EXOMEM_X` may also be named `EVERMATTER_X` or the pre-rename `KB_MCP_X`; read
+# `EXOMEM_X`, else `EVERMATTER_X`, else `KB_MCP_X`. A placement setting (it picks
+# the vault or a state root) that a source names both `EXOMEM_X` and `EVERMATTER_X`
+# with different values is refused: a guess runs on the wrong data. The message
+# names both variables, never the values. Any other conflict lets `EXOMEM_X` win.
+#
+# exomem_resolve_setting LOOKUP SOURCE EXOMEM_X [LOOKUP_ARGS...] prints the value.
+# LOOKUP LITERAL_NAME [LOOKUP_ARGS...] prints that one name's value and returns 1
+# when the source does not set it, so a set but empty name still counts as set.
+exomem_resolve_setting() {
+    local lookup="$1" source="$2" name="$3" suffix
+    local explicit="" evermatter="" legacy=""
+    local has_explicit=1 has_evermatter=1 has_legacy=1
+    shift 3
+    if [[ "$name" != EXOMEM_* ]]; then
+        "$lookup" "$name" "$@" || true
+        return 0
+    fi
+    suffix="${name#EXOMEM_}"
+    if explicit="$("$lookup" "EXOMEM_$suffix" "$@")"; then has_explicit=0; fi
+    if evermatter="$("$lookup" "EVERMATTER_$suffix" "$@")"; then has_evermatter=0; fi
+    if legacy="$("$lookup" "KB_MCP_$suffix" "$@")"; then has_legacy=0; fi
+    if (( has_explicit == 0 )); then
+        if (( has_evermatter == 0 )) && [[ "$evermatter" != "$explicit" ]]; then
+            # The closed set of settings that choose where data lives, defined by the package itself.
+            case "$suffix" in
+                VAULT_PATH|STATE_ROOT|HOSTED_STATE_ROOT)
+                    echo "EVERMATTER_$suffix and EXOMEM_$suffix are set to different values in $source, so it is unclear which to use. Set each value once, under its EVERMATTER_ name, and remove or unset the other name, then run it again." >&2
+                    return 2
+                    ;;
+            esac
+        fi
+        printf '%s' "$explicit"
+    elif (( has_evermatter == 0 )); then
+        printf '%s' "$evermatter"
+    elif (( has_legacy == 0 )); then
+        printf '%s' "$legacy"
+    fi
+    return 0
+}
+
+# One literal name out of the process environment, for exomem_resolve_setting.
+exomem_process_env_lookup() {
+    local literal="$1"
+    [[ -n "${!literal+x}" ]] || return 1
+    printf '%s' "${!literal}"
+}
+
+# Read EXOMEM_X out of the process environment under any of its names.
+exomem_process_setting() {
+    exomem_resolve_setting exomem_process_env_lookup "the process environment" "$1"
+}
+
+# Force EXOMEM_X to a value for every process this shell starts: set it and remove the
+# EVERMATTER_X and KB_MCP_X spellings from the process environment. A child that
+# inherited both names with different values would refuse to start (the package rule
+# above), so a forced value that left an inherited alias in place would stop it.
+exomem_export_setting() {
+    local name="$1" value="$2"
+    [[ "$name" == EXOMEM_?* ]] || { echo "exomem_export_setting takes an EXOMEM_ name, not $name" >&2; return 2; }
+    unset "EVERMATTER_${name#EXOMEM_}" "KB_MCP_${name#EXOMEM_}"
+    export "$name=$value"
+}
+
 exomem_transition_receipt_path() {
     local service_id="$1" root
     [[ "$service_id" =~ ^[A-Za-z0-9_.@-]+$ ]] || return 2
@@ -484,11 +550,31 @@ def atomic_write(path: Path, data: bytes) -> None:
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
 
+# The binding may be named under any of the state root's names. The rule is
+# exomem_resolve_setting's (read EXOMEM_, else EVERMATTER_, else KB_MCP_; refuse
+# EXOMEM_ against EVERMATTER_ with different values), kept in step by
+# tests/test_setting_names_in_step.py. The writer below persists the binding as EVERMATTER_STATE_ROOT.
+NAMES = ("EXOMEM_STATE_ROOT", "EVERMATTER_STATE_ROOT", "KB_MCP_STATE_ROOT")
+EMITTED = NAMES[1]
+
+def resolve_existing(found: dict[str, str], source: str) -> str:
+    found = {name: value.strip() for name, value in found.items()}
+    explicit = found.get(NAMES[0])
+    if explicit is not None and NAMES[1] in found and found[NAMES[1]] != explicit:
+        raise SystemExit(
+            f"{NAMES[1]} and {NAMES[0]} are set to different values in {source}, "
+            "so it is unclear which to use. Set each value once, under its EVERMATTER_ name, "
+            "and remove or unset the other name, then run it again."
+        )
+    return next((found[name] for name in NAMES if name in found), "")
+
 if platform == "Darwin":
     binding_path = unit
     payload = plistlib.loads(unit.read_bytes())
     environment = payload.setdefault("EnvironmentVariables", {})
-    existing = str(environment.get("EXOMEM_STATE_ROOT", "")).strip()
+    existing = resolve_existing(
+        {name: str(environment[name]) for name in NAMES if name in environment}, str(unit)
+    )
 else:
     text = unit.read_text(encoding="utf-8")
     match = re.search(r"(?m)^EnvironmentFile=([^\n]+)$", text)
@@ -498,13 +584,14 @@ else:
     env_path = Path(re.sub(r"\\x([0-9A-Fa-f]{2})", lambda m: chr(int(m.group(1), 16)), encoded))
     binding_path = env_path
     lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
-    existing = ""
+    found: dict[str, str] = {}
     for line in lines:
-        if line.startswith("EXOMEM_STATE_ROOT="):
-            value = line.split("=", 1)[1]
+        name, sep, value = line.partition("=")
+        if sep and name in NAMES:
             if len(value) >= 2 and value[0] == value[-1] == '"':
                 value = value[1:-1].replace(r'\"', '"').replace(r"\\", "\\")
-            existing = value.strip()
+            found[name] = value
+    existing = resolve_existing(found, str(env_path))
 if mode == "binding-path":
     print(binding_path.expanduser().resolve(strict=False))
     raise SystemExit(0)
@@ -526,16 +613,31 @@ if mode == "select":
 if mode != "bind":
     raise SystemExit("invalid state-root binding mode")
 
+# A binding that this writes is persisted as EVERMATTER_STATE_ROOT. An empty binding under
+# any name is filled in that name's place and the file's other names for it are removed, so
+# the file never holds two names for the state root. A binding that is already set is left
+# as the file wrote it.
 if platform == "Darwin":
     if not existing:
-        environment["EXOMEM_STATE_ROOT"] = selected
+        for name in NAMES:
+            environment.pop(name, None)
+        environment[EMITTED] = selected
         atomic_write(unit, plistlib.dumps(payload, sort_keys=False))
 else:
     if not existing:
         rendered = selected.replace("\\", "\\\\").replace('"', r'\"')
-        lines.append(f'EXOMEM_STATE_ROOT="{rendered}"')
+        written = False
+        kept = []
+        for line in lines:
+            if line.partition("=")[0] not in NAMES:
+                kept.append(line)
+            elif not written:
+                kept.append(f'{EMITTED}="{rendered}"')
+                written = True
+        if not written:
+            kept.append(f'{EMITTED}="{rendered}"')
         env_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write(env_path, ("\n".join(lines) + "\n").encode())
+        atomic_write(env_path, ("\n".join(kept) + "\n").encode())
 print(selected)
 PY
 }
@@ -625,15 +727,36 @@ exomem_repo_version() {
     sed -n 's|^version *= *"\([^"]*\)".*|\1|p' "$repo_root/pyproject.toml" | head -n1
 }
 
-# Read one key out of an exact dotenv file, or nothing.
-exomem_dotenv_file_value() {
-    local env_file="$1" name="$2"
-    [[ -f "$env_file" ]] || return 0
+# One literal name out of an exact dotenv file, for exomem_resolve_setting.
+exomem_dotenv_file_lookup() {
+    local name="$1" env_file="$2"
+    [[ -f "$env_file" ]] || return 1
+    grep -Eq "^[[:space:]]*${name}[[:space:]]*=" "$env_file" || return 1
+    # A name set twice takes its last value, as python-dotenv (the service's own reader) does.
     sed -n "s|^[[:space:]]*${name}[[:space:]]*=[[:space:]]*||p" "$env_file" \
-        | head -n1 | sed 's|^"\(.*\)"$|\1|; s|^'"'"'\(.*\)'"'"'$|\1|'
+        | tail -n1 | sed 's|^"\(.*\)"$|\1|; s|^'"'"'\(.*\)'"'"'$|\1|'
 }
 
-# Read one key out of <repo>/.env, or nothing.
+# Read one setting out of an exact dotenv file under any of its names, or nothing.
+exomem_dotenv_file_value() {
+    local env_file="$1" name="$2"
+    exomem_resolve_setting exomem_dotenv_file_lookup "$env_file" "$name" "$env_file"
+}
+
+# Refuse an EXOMEM_/EVERMATTER_ conflict on the hosted state root in the process environment
+# or in any dotenv file named here. Call it with the vault and state-root reads, before the
+# service stops or anything is published: the first process that reads the hosted state root
+# refuses a conflict, and by then the service is down. Prints the resolver's message (both
+# variables, no value) and returns its status.
+exomem_refuse_hosted_state_root_conflicts() {
+    local dotenv_file
+    for dotenv_file in "$@"; do
+        exomem_dotenv_file_value "$dotenv_file" EXOMEM_HOSTED_STATE_ROOT > /dev/null || return $?
+    done
+    exomem_process_setting EXOMEM_HOSTED_STATE_ROOT > /dev/null
+}
+
+# Read one setting out of <repo>/.env, or nothing.
 exomem_dotenv_value() {
     local repo_root="$1" name="$2"
     exomem_dotenv_file_value "$repo_root/.env" "$name"
@@ -647,43 +770,60 @@ exomem_unit_is_default() {
     [[ -n "$unit" && "$unit" -ef "$default" ]]
 }
 
-# Read one key out of the environment a rendered unit gives its service, or
-# nothing. A second service's settings live in its own unit, never in the
-# checkout's .env, which describes the default service.
-exomem_unit_env_value() {
-    local unit="$1" name="$2" python="${3:-python3}" value="" env_file line
-    [[ -f "$unit" ]] || return 0
+# One literal name out of the environment a rendered unit gives its service, for
+# exomem_resolve_setting. The unit's Environment= assignments come first, split
+# the way systemd splits them (a later assignment wins); systemd applies each
+# EnvironmentFile= after them, so a file that sets the name wins.
+exomem_unit_env_lookup() {
+    local name="$1" unit="$2" python="$3" value="" present=1 env_file line
     if [[ "$(uname -s)" == "Darwin" ]]; then
-        if [[ -x /usr/libexec/PlistBuddy ]]; then
-            value="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$name" "$unit" 2>/dev/null || true)"
-        fi
+        [[ -x /usr/libexec/PlistBuddy ]] || return 1
+        value="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$name" "$unit" 2>/dev/null)" \
+            || return 1
         printf '%s' "$value"
         return 0
     fi
-    # One Environment= line may carry several quoted or bare assignments, split
-    # the way systemd splits them; a later assignment wins.
-    value="$("$python" - "$unit" "$name" <<'PY'
+    if value="$("$python" - "$unit" "$name" <<'PY'
 import shlex
 import sys
 from pathlib import Path
 
+found = False
 value = ""
 for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
     if line.startswith("Environment="):
         for word in shlex.split(line.partition("=")[2]):
             key, sep, rest = word.partition("=")
             if sep and key == sys.argv[2]:
+                found = True
                 value = rest
 print(value, end="")
+raise SystemExit(0 if found else 1)
 PY
-)" || value=""
-    # systemd applies EnvironmentFile= after Environment=, so the file wins.
+)"; then
+        present=0
+    else
+        value=""
+    fi
     while IFS= read -r env_file; do
         env_file="${env_file#-}"
-        line="$(exomem_dotenv_file_value "$env_file" "$name")"
-        [[ -n "$line" ]] && value="$line"
+        if line="$(exomem_dotenv_file_lookup "$name" "$env_file")"; then
+            value="$line"
+            present=0
+        fi
     done < <(sed -n 's|^EnvironmentFile=||p' "$unit")
+    (( present == 0 )) || return 1
     printf '%s' "$value"
+}
+
+# Read one setting out of the environment a rendered unit gives its service, under
+# any of its names, or nothing. A second service's settings live in its own unit,
+# never in the checkout's .env, which describes the default service.
+exomem_unit_env_value() {
+    local unit="$1" name="$2" python="${3:-python3}"
+    [[ -f "$unit" ]] || return 0
+    exomem_resolve_setting exomem_unit_env_lookup \
+        "the service environment of $unit" "$name" "$unit" "$python"
 }
 
 # Print the name of the per-user uv tool that owns the CLI, `evermatter` or, for

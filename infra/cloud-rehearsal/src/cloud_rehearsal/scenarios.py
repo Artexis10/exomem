@@ -19,6 +19,7 @@ import base64
 import datetime as dt
 import json
 import secrets
+import subprocess
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -61,11 +62,12 @@ from .report import (
     innermost,
     stage,
 )
-from .shell import run, wait_for
+from .shell import wait_for
 from .substrate import PUBLIC_BASE_URL, Substrate
 
 if TYPE_CHECKING:
     from .catalogue_prewarm import CataloguePlan
+    from .home_import import HomeImportPlan
     from .large_import import LargeImportPlan
     from .original_fixity import FixityPlan
     from .raw_import import RawImportPlan
@@ -158,6 +160,8 @@ class Context:
     large_import: LargeImportPlan | None = None
     # The raw-data import mode (raw_import.py): what to run after provisioning.
     raw_import: RawImportPlan | None = None
+    # The Home-import mode (home_import.py): what to run after provisioning.
+    home_import: HomeImportPlan | None = None
     # The original-fixity mode (original_fixity.py): what to seed after provisioning.
     original_fixity: FixityPlan | None = None
     # The catalogue-prewarm mode (catalogue_prewarm.py): the scenarios to run after provisioning.
@@ -334,7 +338,16 @@ class Context:
     # --- the cluster, read as the operator ---
 
     def kubectl(self, *args: str, check: bool = True, input_text: str | None = None):
-        return self.stack.k3s.kubectl(*args, check=check, input_text=input_text)
+        plan = self.large_import
+        what = f"kubectl {args[0]}"
+        # The large-import stage ends each call at its own limit; every other call keeps the usual one.
+        limit = plan.call_limit(what) if plan is not None else None
+        try:
+            return self.stack.k3s.kubectl(*args, check=check, input_text=input_text, timeout=limit)
+        except subprocess.TimeoutExpired:
+            if limit is None:
+                raise
+            raise plan.call_timed_out(what, limit) from None
 
     def kube_json(self, *args: str) -> dict[str, Any]:
         return json.loads(self.kubectl(*args, "--output=json").stdout)
@@ -1378,6 +1391,13 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
                 if record.status != PASSED:
                     raise StepFailure("the raw-data import needs the provisioned cell, and step 2 did not pass")
                 await run_raw_import(ctx, ctx.raw_import)
+        if number == 2 and ctx.home_import is not None:
+            from .home_import import run_home_import
+
+            with stage(ctx.report, "home_import"):
+                if record.status != PASSED:
+                    raise StepFailure("the Home import needs the provisioned cell, and step 2 did not pass")
+                await run_home_import(ctx, ctx.home_import)
         if number == 2 and ctx.original_fixity is not None:
             from .original_fixity import run_original_fixity
 
@@ -1413,6 +1433,9 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
     if ctx.raw_import is not None and "raw_import" not in ctx.report.stages:
         with stage(ctx.report, "raw_import"):
             raise StepFailure("the requested raw-data import stage requires provisioning at step 2")
+    if ctx.home_import is not None and "home_import" not in ctx.report.stages:
+        with stage(ctx.report, "home_import"):
+            raise StepFailure("the requested Home import stage requires provisioning at step 2")
     if ctx.original_fixity is not None and "original_fixity" not in ctx.report.stages:
         with stage(ctx.report, "original_fixity"):
             raise StepFailure("the requested original-fixity stage requires provisioning at step 2")
@@ -1450,17 +1473,23 @@ def snapshot_logs(ctx: Context) -> None:
     snapshots, taken after every step, not only what survives to the end.
     """
 
+    # The large-import run reads these in its post checks, when a cluster that stopped answering would cost the usual
+    # fifteen minutes a read: each read is cut at the plan's evidence limit. Other scenarios keep the usual limit.
+    limit = ctx.large_import.read_seconds if ctx.large_import is not None else None
     for namespace, selector in [
         (CLOUD_NAMESPACE, "app.kubernetes.io/name=exomem-cloud-gateway"),
         (CLOUD_NAMESPACE, "app.kubernetes.io/name=cellctl"),
         *[(namespace_name(t.cell_id), "app.kubernetes.io/name=exomem-cell") for t in ctx.tenants if t.cell_id],
     ]:
         for previous in ((), ("--previous",)):
-            result = run(
-                ["docker", "exec", ctx.stack.k3s.container, "kubectl", "logs", "--namespace", namespace,
-                 f"--selector={selector}", "--all-containers", "--tail=-1", "--prefix", *previous],
-                check=False,
-            )
+            try:
+                result = ctx.stack.k3s.kubectl(
+                    "logs", "--namespace", namespace, f"--selector={selector}", "--all-containers", "--tail=-1", "--prefix",
+                    *previous, check=False, timeout=limit)
+            except subprocess.TimeoutExpired:
+                if limit is None:
+                    raise
+                raise StepFailure(f"kubectl logs of {namespace} did not return within {limit:.0f} s") from None
             if result.stdout:
                 ctx.log_snapshots.append(result.stdout)
 

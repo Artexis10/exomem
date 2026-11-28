@@ -26,9 +26,11 @@ import math
 import os
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from queue import Empty, Queue
+from typing import TypeVar
 
 _log = logging.getLogger(__name__)
 
@@ -199,12 +201,17 @@ class RequestBudget:
     reason, and it is why `note_skipped` mutates rather than rebinding.
     """
 
-    __slots__ = ("seconds", "deadline", "_skipped", "_truncated", "_lock")
+    __slots__ = ("seconds", "deadline", "request", "commit_started", "_skipped", "_truncated", "_lock")
 
     def __init__(self, *, seconds: float, entry: float | None = None) -> None:
         self.seconds = float(seconds)
         started = time.monotonic() if entry is None else float(entry)
         self.deadline = started + self.seconds
+        #: The budget of the whole call. A child that `leaving` or `capped` binds keeps its call's, so work that must
+        #: outlive a part's nearer deadline can still stop at the call's own (`request_overrun`).
+        self.request: RequestBudget = self
+        #: Whether a write in this call has taken the vault mutation boundary (`commit_may_start`).
+        self.commit_started = False
         self._skipped: list[str] = []
         self._truncated: list[str] = []
         self._lock = threading.Lock()
@@ -303,11 +310,40 @@ def can_afford(reserve: float) -> bool:
     return True if budget is None else budget.can_afford(reserve)
 
 
+def commit_may_start() -> bool:
+    """Whether this call's write may take the mutation boundary to start its commit.
+
+    A write whose preparation outlived the call's deadline is refused before its commit, so its client
+    hears back while it still listens. Only the call's first commit is refused: once one has begun,
+    a later one belongs to the same write and always runs. Without a budget every commit runs.
+    """
+    budget = current()
+    if budget is None:
+        return True
+    call = budget.request
+    return call.commit_started or time.monotonic() <= call.deadline
+
+
+def note_commit_started() -> None:
+    """Record that this call's write took the mutation boundary, so no later commit of it is refused."""
+    budget = current()
+    if budget is not None:
+        budget.request.commit_started = True
+
+
+def request_overrun() -> float:
+    """Seconds the whole call is past its own deadline, whatever nearer one a part of it runs under; 0 before it
+    or without a budget."""
+    budget = current()
+    return 0.0 if budget is None else max(0.0, time.monotonic() - budget.request.deadline)
+
+
 @contextmanager
 def _running_until(parent: RequestBudget, deadline: float, now: float | None = None) -> Iterator[None]:
     """Run under a child budget that ends at `deadline`; the parent also learns what the child skipped or cut."""
     now = time.monotonic() if now is None else now
     child = RequestBudget(seconds=max(0.0, deadline - now), entry=now)
+    child.request = parent.request
     token = set_current(child)
     try:
         yield
@@ -354,6 +390,26 @@ def capped(seconds: float) -> Iterator[None]:
         yield
 
 
+@contextmanager
+def bound_to(seconds: float | None) -> Iterator[RequestBudget]:
+    """Run under the call's budget, cut to end `seconds` from now when that is nearer; `None` cuts nothing.
+
+    For work whose own limit is shorter than the request's, such as a hold of the vault's boundary that a waiting
+    writer is refused for once it is overdue. The cut budget is the bound one, so a reader that this work calls
+    (`find`, a lexical read, a wait for a build) obeys it too. A call with no budget, such as the import filer's,
+    gets a fresh one of the usual length. Skips and truncations are recorded on the parent too.
+    """
+    parent = current()
+    if parent is not None and (seconds is None or seconds >= parent.remaining()):
+        yield parent
+        return
+    parent = parent or RequestBudget(seconds=budget_seconds())
+    now = time.monotonic()
+    deadline = parent.deadline if seconds is None else min(parent.deadline, now + max(0.0, seconds))
+    with _running_until(parent, deadline, now):
+        yield current()
+
+
 class ReadBudgetExhausted(BaseException):
     """Stop owned read work without converting interruption into a fallback scan."""
 
@@ -366,20 +422,76 @@ _READ_CHECKPOINT: ContextVar[ReadCheckpoint | None] = ContextVar(
 class ReadCheckpoint:
     """The same allowance on the caller and its accepted read batches."""
 
-    def __init__(self, budget: RequestBudget, *, bound_disclosure: bool = False) -> None:
+    def __init__(self, budget: RequestBudget, *, bound_disclosure: bool = False,
+                 bound_store_reads: bool = False, store_sql_steps: int | None = None) -> None:
         self.budget = budget
         self.bound_disclosure = bound_disclosure
+        self.bound_store_reads = bound_store_reads
+        self._store_sql_steps = store_sql_steps
 
     def remaining(self) -> float:
         return self.budget.remaining()
 
     def __call__(self) -> None:
-        if self.remaining() <= 0:
+        if self.remaining() <= 0 or (self._store_sql_steps is not None and self._store_sql_steps <= 0):
             raise ReadBudgetExhausted()
+
+    def store_sql_progress(self, steps: int) -> None:
+        if self._store_sql_steps is not None:
+            self._store_sql_steps -= steps
+
+
+_Result = TypeVar("_Result")
+
+
+def bounded_blocking_call(
+    operation: Callable[[], _Result], *, remaining: Callable[[], float],
+    slots: threading.Semaphore, wait_for_slot: bool = True,
+) -> _Result:
+    """Limit the caller's wait and keep a slot until blocking I/O actually ends."""
+    seconds = remaining()
+    if seconds <= 0 or not slots.acquire(timeout=seconds if wait_for_slot else 0):
+        raise TimeoutError()
+    result: Queue[_Result | BaseException] = Queue(maxsize=1)
+
+    def run() -> None:
+        value: _Result | BaseException
+        try:
+            value = operation()
+        except BaseException as error:  # noqa: BLE001 - deliver worker failure to the waiting caller
+            value = error
+        finally:
+            slots.release()
+        result.put(value)
+
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except BaseException:
+        slots.release()
+        raise
+    try:
+        value = result.get(timeout=max(0, remaining()))
+    except Empty as error:
+        raise TimeoutError() from error
+    if remaining() <= 0:
+        raise TimeoutError()
+    if isinstance(value, BaseException):
+        raise value
+    return value
 
 
 def current_checkpoint() -> ReadCheckpoint | None:
     return _READ_CHECKPOINT.get()
+
+
+def store_read_checkpoint() -> ReadCheckpoint | None:
+    check = current_checkpoint()
+    return check if check is not None and check.bound_store_reads else None
+
+
+def store_read_lock(lock):
+    """Keep passive store reads within their allowance when a lock is held."""
+    return locked(lock) if store_read_checkpoint() is not None else lock
 
 
 def checkpoint() -> None:

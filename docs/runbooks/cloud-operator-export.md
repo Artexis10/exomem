@@ -147,9 +147,13 @@ rehearsal step 11 does. It imports them from the same checkout, and the
 [restore drill and in-place restore](cloud-operator-restore.md) use the same
 file. It takes the source `cell-credentials` Secret into process memory and
 never prints it or writes a manifest file. It reads the source StatefulSet's
-digest image and the PVC size, and the live cellctl Deployment's bucket, S3
-endpoint and job-egress exceptions. A unique scratch namespace must not
-already exist.
+digest image, the PVC size and storage class, and the live cellctl Deployment's
+two backup stores (bucket and S3 endpoint each), job-egress exceptions and cell
+storage classes. The scratch
+volume takes the source volume's class and passphrase, so it keeps the source's
+encryption. The command refuses a cell on local storage. A cell that the key custodian provisioned has no key in
+`cell-credentials`; the command then copies its `cell-object-store-key` Secret
+into the scratch namespace. A unique scratch namespace must not already exist.
 
 ```bash
 : "${CELLCTL_PYTHON:?reviewed cellctl Python required}"
@@ -157,8 +161,9 @@ already exist.
   --cell-id "$CELL_ID" --snapshot "$SNAPSHOT" --scratch "$SCRATCH" --field-manager cloud-export-operator
 ```
 
-Only Namespace, default-deny/job-egress NetworkPolicies, Secret, PVC and Job
-are applied. The scratch Namespace has no `exomem.io/cloud-cell` label, so
+Only Namespace, default-deny/job-egress NetworkPolicies, the cell Secret, PVC,
+Job and, for a custodian-provisioned cell, the copied `cell-object-store-key`
+Secret are applied. The scratch Namespace has no `exomem.io/cloud-cell` label, so
 cellctl does not own it. No StatefulSet, Service or runtime ingress is created.
 The renderer validates the snapshot ID and scopes restore to `/data/vault` and
 `/data/host` on the **scratch** PVC. The Job has UID/GID 10001, no API token,

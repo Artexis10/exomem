@@ -107,12 +107,13 @@ if (-not $serviceAppDirectory) {
     Fail "could not resolve the service AppDirectory; the shared dotenv state-root authority is unavailable."
 }
 $resolvedVault = if ($Vault) { $Vault } else { Get-ExomemDotenvValue -RepoRoot $serviceAppDirectory -Name "EXOMEM_VAULT_PATH" }
-if (-not $resolvedVault) { $resolvedVault = $env:EXOMEM_VAULT_PATH }
+if (-not $resolvedVault) { $resolvedVault = Get-ExomemProcessSetting -Name "EXOMEM_VAULT_PATH" }
 if (-not $resolvedVault) {
-    Fail "no vault resolved (-Vault, .env, or EXOMEM_VAULT_PATH); offline state migration needs an explicit vault."
+    Fail "no vault resolved (-Vault, .env, or EVERMATTER_VAULT_PATH); offline state migration needs an explicit vault."
 }
 $bindingPath = Join-Path $serviceAppDirectory ".env"
 $managedStateRoot = Resolve-ExomemDotenvStateRootBinding -AppDirectory $serviceAppDirectory
+Assert-ExomemHostedStateRootUnambiguous -AppDirectory $serviceAppDirectory
 $endpoint = Get-ExomemServiceEndpoint -ServiceName $ServiceName
 $targetPort = [int]$endpoint.Port
 $transitionIdentity = @{
@@ -232,7 +233,7 @@ Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "stopped"
 $managedStateRoot = Ensure-ExomemDotenvStateRootBinding `
     -AppDirectory $serviceAppDirectory `
     -ExpectedStateRoot $transitionReceipt.state_root
-[Environment]::SetEnvironmentVariable("EXOMEM_STATE_ROOT", $managedStateRoot, "Process")
+Set-ExomemProcessSetting -Name "EXOMEM_STATE_ROOT" -Value $managedStateRoot
 Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "bound"
 
 # --- 3. Upgrade that environment while the service remains stopped ------------

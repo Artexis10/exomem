@@ -39,6 +39,7 @@ def _constructor_map():
         deferred_index,
         due_state,
         epistemic_graph,
+        face_store,
         generated_fragment_store,
         graph_sync,
         index_paths,
@@ -48,6 +49,7 @@ def _constructor_map():
         media_previews,
         memory_refs,
         ownership_rotation,
+        release_notes,
         review_state,
         served_context,
         source_imports,
@@ -107,11 +109,15 @@ def _constructor_map():
         "governance-store": (index_paths.governance_sidecar_path,),
         "due-state": (due_state.state_path,),
         "ownership-review": (ownership_rotation.asked_path, ownership_rotation.rotation_path),
+        "app-update-notices": (release_notes.state_path,),
         "review-state": (review_state.state_path,),
         "brief-watermarks": (brief_watermarks.sidecar_path,),
         "served-context": (served_context.sidecar_path,),
         "source-import-intents": (source_import._pending_path,),
         "voice-profile-store": (voice_profiles.voice_profiles_path,),
+        "face-deletion": (face_store.deletion_receipt_path,),
+        "face-index": (face_store.index_path,),
+        "face-people": (face_store.people_path,),
         "authorization-projections": (
             lambda root: projection_store.variant_store_path(root, namespace),
             lambda root: projection_measurement_store.measurement_store_path(
@@ -144,12 +150,16 @@ _FOLLOWS_ITS_TARGET = {
 # be able to agree green.  Legacy families with no current constructor remain
 # here because their names stay reserved and their bytes still migrate.
 _SOURCE_DESCRIBED_EXTERNAL_FAMILIES = {
+    "app-update-notices",
     "authorization-projections",
     "claims-store",
     "clip-store",
     "deferred-index-store",
     "due-state",
     "embeddings-store",
+    "face-deletion",
+    "face-index",
+    "face-people",
     "freshness-store",
     "generated-fragments-index",
     "governance-store",
@@ -371,6 +381,8 @@ def test_the_vault_backup_stages_exactly_the_families_declared_not_rebuildable()
         "procedure-approval-key",
         "source-import-intents",
         "write-intake-store",
+        "face-people",
+        "face-deletion",
     }
     assert {d.id for d in reserved_paths.external_canonical_descriptors()} <= declared
 

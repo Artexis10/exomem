@@ -18,8 +18,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from exomem import env_compat
 from exomem import remote_setup_wizard as rsw
 from exomem.__main__ import main
+
+
+def _read_settings(env_path: Path) -> dict[str, str]:
+    """What the service reads from the file: every spelling of a setting folded into its EXOMEM_ name."""
+    return env_compat.rename_settings(rsw.parse_env(env_path.read_text(encoding="utf-8")))[0]
+
 
 # ============================================================================
 # generate_signing_key
@@ -111,7 +118,7 @@ def test_patch_env_updates_existing_in_place_and_preserves_others() -> None:
     out = rsw.patch_env(existing, {"EXOMEM_VAULT_PATH": "/new"})
     lines = out.splitlines()
     # order preserved, only the targeted line changed
-    assert lines == ["OTHER=keep", "EXOMEM_VAULT_PATH=/new", "TAIL=z"]
+    assert lines == ["OTHER=keep", "EVERMATTER_VAULT_PATH=/new", "TAIL=z"]
 
 
 def test_patch_env_appends_new_keys_in_insertion_order() -> None:
@@ -131,13 +138,31 @@ def test_patch_env_does_not_touch_commented_key_of_same_name() -> None:
     out = rsw.patch_env(existing, {"EXOMEM_BASE_URL": "https://new"})
     assert out.splitlines() == [
         "# EXOMEM_BASE_URL=https://old",
-        "EXOMEM_BASE_URL=https://new",
+        "EVERMATTER_BASE_URL=https://new",
     ]
 
 
 def test_patch_env_empty_input_appends_all() -> None:
     out = rsw.patch_env("", {"A": "1", "B": "2"})
     assert out == "A=1\nB=2\n"
+
+
+def test_patch_env_writes_the_public_name_and_removes_the_other_spellings() -> None:
+    existing = "A=1\nKB_MCP_VAULT_PATH=/older\nEXOMEM_VAULT_PATH=/old\nEVERMATTER_BASE_URL=https://old\n"
+    out = rsw.patch_env(
+        existing,
+        {"EXOMEM_VAULT_PATH": "/new", "EXOMEM_BASE_URL": "https://new", "EXOMEM_PORT": "9000"},
+    )
+    # The first line of a setting is rewritten in place; its other spellings go; a new key is appended.
+    assert out.splitlines() == [
+        "A=1",
+        "EVERMATTER_VAULT_PATH=/new",
+        "EVERMATTER_BASE_URL=https://new",
+        "EVERMATTER_PORT=9000",
+    ]
+    assert rsw.patch_env(existing, {"EXOMEM_VAULT_PATH": None}) == (
+        "A=1\nEVERMATTER_BASE_URL=https://old\n"
+    )
 
 
 def test_patch_env_always_ends_with_single_newline() -> None:
@@ -204,7 +229,7 @@ def test_happy_path_writes_env_and_prints_connector(tmp_path: Path) -> None:
     code, out, doctor_calls = _run(env_path)
     assert code == 0
 
-    written = rsw.parse_env(env_path.read_text(encoding="utf-8"))
+    written = _read_settings(env_path)
     assert written["EXOMEM_VAULT_PATH"] == str(Path("/vault").expanduser())
     assert written["EXOMEM_BASE_URL"] == "https://kb.example.com"
     assert written["GITHUB_CLIENT_ID"] == "Iv1.abc"
@@ -333,9 +358,41 @@ def test_existing_signing_key_is_preserved(tmp_path: Path) -> None:
     )
     code, out, _ = _run(env_path)
     assert code == 0
-    written = rsw.parse_env(env_path.read_text(encoding="utf-8"))
+    written = _read_settings(env_path)
     assert written["EXOMEM_JWT_SIGNING_KEY"] == "keep-this-stable-key"
     assert written["UNRELATED"] == "x"  # unrelated key preserved
+    assert "[skipped: already set" in out
+
+
+def test_remote_setup_over_an_exomem_file_leaves_each_setting_under_one_name(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "EXOMEM_VAULT_PATH=/old\nEXOMEM_BASE_URL=https://old.example.com\n"
+        "KB_MCP_GITHUB_USERNAME=old-login\nEXOMEM_JWT_SIGNING_KEY=keep-this-stable-key\n",
+        encoding="utf-8",
+    )
+
+    code, _, _ = _run(env_path, base_url="https://new.example.com")
+
+    assert code == 0
+    written = rsw.parse_env(env_path.read_text(encoding="utf-8"))
+    assert written["EVERMATTER_VAULT_PATH"] == str(Path("/vault").expanduser())
+    assert written["EVERMATTER_BASE_URL"] == "https://new.example.com"
+    assert written["EVERMATTER_GITHUB_USERNAME"] == "octocat"
+    # The kept signing key is rewritten too, so it is the same value under the public name.
+    assert written["EVERMATTER_JWT_SIGNING_KEY"] == "keep-this-stable-key"
+    for rewritten in ("VAULT_PATH", "BASE_URL", "GITHUB_USERNAME", "JWT_SIGNING_KEY"):
+        assert f"EXOMEM_{rewritten}" not in written
+        assert f"KB_MCP_{rewritten}" not in written
+
+
+def test_an_evermatter_signing_key_is_preserved_not_rotated(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("EVERMATTER_JWT_SIGNING_KEY=keep-this-stable-key\n", encoding="utf-8")
+    code, out, _ = _run(env_path)
+    assert code == 0
+    written = _read_settings(env_path)
+    assert written["EXOMEM_JWT_SIGNING_KEY"] == "keep-this-stable-key"
     assert "[skipped: already set" in out
 
 
@@ -357,7 +414,7 @@ def test_existing_github_user_id_is_preserved_without_network(tmp_path: Path) ->
 
     assert code == 0
     assert calls == ["octocat"]
-    assert rsw.parse_env(env_path.read_text())["EXOMEM_GITHUB_USER_ID"] == "1234"
+    assert _read_settings(env_path)["EXOMEM_GITHUB_USER_ID"] == "1234"
 
 
 def test_existing_id_rejects_changed_login_resolving_to_another_account(
@@ -391,7 +448,7 @@ def test_existing_id_accepts_online_resolution_of_same_account(tmp_path: Path) -
     )
 
     assert code == 0
-    values = rsw.parse_env(env_path.read_text())
+    values = _read_settings(env_path)
     assert values["EXOMEM_GITHUB_USER_ID"] == "1234"
     assert values["EXOMEM_GITHUB_USERNAME"] == "octocat"
 
@@ -412,7 +469,7 @@ def test_setup_resolves_numeric_id_and_requires_normalized_login_match(tmp_path:
 
     assert code == 0
     assert calls == ["octocat"]
-    assert rsw.parse_env(env_path.read_text())["EXOMEM_GITHUB_USER_ID"] == "1234"
+    assert _read_settings(env_path)["EXOMEM_GITHUB_USER_ID"] == "1234"
 
 
 @pytest.mark.parametrize(
@@ -456,7 +513,7 @@ def test_ha_setup_preserves_or_generates_one_matching_storage_credential(
     code, output, _ = _run(env_path)
 
     assert code == 0
-    values = rsw.parse_env(env_path.read_text())
+    values = _read_settings(env_path)
     assert values["EXOMEM_WRITER_LEASE_TOKEN"]
     assert values["EXOMEM_WRITER_LEASE_TOKEN"] == values["EXOMEM_OAUTH_STORAGE_TOKEN"]
     assert values["EXOMEM_WRITER_LEASE_TOKEN"] == values["EXOMEM_LEASE_COORDINATOR_TOKEN"]
@@ -594,7 +651,7 @@ def test_interactive_existing_client_secret_is_preserved_without_rendering_it(
     )
 
     assert code == 0
-    assert rsw.parse_env(env_path.read_text())["GITHUB_CLIENT_SECRET"] == secret
+    assert _read_settings(env_path)["GITHUB_CLIENT_SECRET"] == secret
     assert secret not in "\n".join(prompts + output)
     assert any("keep existing" in prompt.lower() for prompt in prompts)
 
@@ -667,11 +724,21 @@ def test_patch_env_none_removes_a_key_and_keeps_the_rest() -> None:
     assert rsw.patch_env("A=1\n", {OWNER_KEY: None}) == "A=1\n"
 
 
+def test_patch_env_none_removes_the_owner_binding_under_every_prefix() -> None:
+    """A binding left under an alias prefix would bring the removed owner back."""
+    text = "EVERMATTER_OWNER_OAUTH_SUBJECT=github:1\nKB_MCP_OWNER_OAUTH_SUBJECT=github:2\nB=2\n"
+    assert rsw.patch_env(text, {OWNER_KEY: None}) == "B=2\n"
+
+
+def test_patch_env_none_removes_a_key_that_has_no_exomem_prefix() -> None:
+    assert rsw.patch_env("GITHUB_CLIENT_ID=abc\nB=2\n", {"GITHUB_CLIENT_ID": None}) == "B=2\n"
+
+
 def test_yes_without_a_flag_writes_no_binding(tmp_path: Path) -> None:
     env_path = tmp_path / ".env"
     code, _, _ = _run(env_path)
     assert code == 0
-    assert OWNER_KEY not in rsw.parse_env(env_path.read_text(encoding="utf-8"))
+    assert OWNER_KEY not in _read_settings(env_path)
 
 
 def test_yes_without_a_flag_leaves_an_existing_binding_alone(tmp_path: Path) -> None:
@@ -679,14 +746,14 @@ def test_yes_without_a_flag_leaves_an_existing_binding_alone(tmp_path: Path) -> 
     env_path.write_text(f"{OWNER_KEY}=github:1234\n", encoding="utf-8")
     code, _, _ = _run(env_path)
     assert code == 0
-    assert rsw.parse_env(env_path.read_text(encoding="utf-8"))[OWNER_KEY] == "github:1234"
+    assert _read_settings(env_path)[OWNER_KEY] == "github:1234"
 
 
 def test_remote_owner_flag_binds_the_resolved_id(tmp_path: Path) -> None:
     env_path = tmp_path / ".env"
     code, out, _ = _run(env_path, remote_owner=True)
     assert code == 0
-    assert rsw.parse_env(env_path.read_text(encoding="utf-8"))[OWNER_KEY] == "github:1234"
+    assert _read_settings(env_path)[OWNER_KEY] == "github:1234"
     assert "remote_owner" in out
 
 
@@ -695,7 +762,7 @@ def test_no_remote_owner_flag_removes_the_binding(tmp_path: Path) -> None:
     env_path.write_text(f"KEEP=1\n{OWNER_KEY}=github:1234\n", encoding="utf-8")
     code, _, _ = _run(env_path, remote_owner=False)
     assert code == 0
-    written = rsw.parse_env(env_path.read_text(encoding="utf-8"))
+    written = _read_settings(env_path)
     assert OWNER_KEY not in written
     assert written["KEEP"] == "1"
 
@@ -723,7 +790,7 @@ def test_interactive_setup_asks_whether_the_account_is_the_owner(
     assert "octocat" in owner_prompts[0]
     assert "act as you, the owner" in owner_prompts[0]
     assert "[Y/n]" in owner_prompts[0]
-    written = rsw.parse_env(env_path.read_text(encoding="utf-8"))
+    written = _read_settings(env_path)
     assert (written.get(OWNER_KEY) == "github:1234") is bound
     assert (OWNER_KEY in written) is bound
 
@@ -765,7 +832,7 @@ def test_patch_env_replaces_and_removes_export_prefixed_lines() -> None:
     text = "KEEP=1\nexport EXOMEM_OWNER_OAUTH_SUBJECT=github:1234\nexport OTHER=x\n"
     assert rsw.patch_env(text, {OWNER_KEY: None}) == "KEEP=1\nexport OTHER=x\n"
     assert rsw.patch_env(text, {OWNER_KEY: "github:5678"}) == (
-        "KEEP=1\nexport EXOMEM_OWNER_OAUTH_SUBJECT=github:5678\nexport OTHER=x\n"
+        "KEEP=1\nexport EVERMATTER_OWNER_OAUTH_SUBJECT=github:5678\nexport OTHER=x\n"
     )
 
 
@@ -809,3 +876,39 @@ def test_the_doctor_gate_does_not_see_a_removed_binding(
     assert code == 0
     assert seen["state"] == "unset"
     assert OWNER_KEY not in os.environ
+
+
+# ============================================================================
+# scripts/set-*.py — the one-line .env writers
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    ("script", "argv", "key"),
+    [
+        ("set-env.py", ["EXOMEM_VISION_CAPTION", "1"], "VISION_CAPTION"),
+        ("set-rest-key.py", ["--force"], "REST_API_KEY"),
+        ("set-upload-token.py", ["--force"], "UPLOAD_TOKEN"),
+    ],
+)
+def test_the_env_helper_scripts_rewrite_an_old_line_as_one_evermatter_line(
+    script: str, argv: list[str], key: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure: a helper run over an old `.env` replaced the line under its old name, or added a second one."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("env_helper", Path(__file__).resolve().parents[1] / "scripts" / script)
+    assert spec is not None and spec.loader is not None
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"OTHER=kept\nEXOMEM_{key}=old\nKB_MCP_{key}=older\n", encoding="utf-8")
+    monkeypatch.setattr(helper, "ENV", env_path)
+    monkeypatch.setattr("sys.argv", [script, *argv])
+
+    helper.main()
+
+    lines = env_path.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "OTHER=kept"
+    assert [line.split("=", 1)[0] for line in lines[1:]] == [f"EVERMATTER_{key}"]
+    assert not lines[1].endswith("=old")

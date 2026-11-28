@@ -7,6 +7,7 @@ value here is what cellctl used before, so no render or digest moves.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -131,3 +132,29 @@ class StorageConfig:
 
 
 DEFAULT_STORAGE = StorageConfig()
+
+
+def parse_storage_config(raw: str | None) -> StorageConfig:
+    """Parse cellctl's CELLCTL_CELL_STORAGE value: the shared cap and optional local class.
+
+    It accepts the earlier nested cap. The operator restore tools read the live
+    Deployment's value through this same parser.
+    """
+
+    if not raw:
+        return DEFAULT_STORAGE
+    value = json.loads(raw)
+    # These are the closed keys of the controller's storage configuration schema.
+    if not isinstance(value, dict) or not set(value) <= {"domain", "local", "max_cell_gib", "per_cell_class"}:
+        raise ValueError("cell storage must be a JSON object with optional domain, local and max_cell_gib")
+    local = value.get("local")
+    if local is not None and not isinstance(local, dict):
+        raise ValueError("cell storage local must be an object")
+    local = dict(local) if local is not None else None
+    legacy_cap = local.pop("max_cell_gib", None) if local is not None else None
+    cap = value.get("max_cell_gib", legacy_cap if legacy_cap is not None else DEFAULT_STORAGE.max_cell_gib)
+    if legacy_cap is not None and cap != legacy_cap:
+        raise ValueError("max_cell_gib and local.max_cell_gib must agree")
+    return StorageConfig(domain=value.get("domain", LEGACY_CLASS),
+                         local=LocalStorage(**local) if local is not None else None, max_cell_gib=cap,
+                         per_cell_class=value.get("per_cell_class"))

@@ -10,12 +10,18 @@ no row id: it names no version, so it guards no edit, and the leaf refuses it an
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
-from . import collection_profiles, memory_refs, page_ids, record_governance, vault
+from . import collection_profiles, memory_refs, page_ids, record_governance, request_budget, vault
+from . import structured_collections as collections
 from .cli_ops import OpError
+
+log = logging.getLogger(__name__)
+
+_Decision = TypeVar("_Decision")
 
 #: Pages of rows read to find one id. A collection larger than this refuses rather than guess.
 _MAX_SCAN_PAGES = 20
@@ -35,6 +41,19 @@ def names_a_manifest(selector: str) -> bool:
         or "/" in selector
         or memory_refs.normalize_id(selector) is not None
     )
+
+
+def selected_collection_id(vault_root: Path, selector: str | None) -> str | None:
+    """The id of the existing collection `selector` names, or None when it names none this caller can read."""
+    if selector is None:
+        return None
+    named = memory_refs.normalize_id(selector.strip())
+    if named is not None:
+        return named
+    try:
+        return record_governance.resolve_collection(vault_root, selector).collection_id
+    except Exception:  # noqa: BLE001 - an unresolved selector gets the leaf's own refusal
+        return None
 
 
 def resolve_collection(
@@ -101,13 +120,16 @@ def id_head(item_id: str) -> str:
     return page_ids.part_head(key) if key is not None else item_id.partition(".")[0]
 
 
-def bound_row(item_id: str, matches: Sequence[tuple[str, str]], snapshot: str | None, *, profile: str) -> dict[str, str]:
+def bound_row(
+    item_id: str, matches: Sequence[tuple[str, str]], snapshot: str | None, *, profile: str, stale_ok: bool = False
+) -> dict[str, str]:
     """The binding `item_id` stands for among the readable rows that carry its head (`id_head`).
 
     `matches` are `(item_key, item_version)` of the rows the caller may read, never of withheld
     ones, so a withheld row answers as an absent one. `snapshot` is the container hash the
     query of that read returned. A row's key is no row id: it is refused for a row the caller may
-    read, and answers as no row otherwise.
+    read, and answers as no row otherwise. A stale id is refused unless `stale_ok`: a reader of the
+    row, which needs no version guard, takes the head's row at its current version.
     """
     key_named = memory_refs.normalize_id(item_id)
     if key_named is not None:
@@ -129,7 +151,7 @@ def bound_row(item_id: str, matches: Sequence[tuple[str, str]], snapshot: str | 
         raise OpError("AMBIGUOUS_ITEM", f"id {item_id} names more than one row of this collection.")
     key, version = matches[0]
     current = page_ids.part_id(key, version)
-    if current != item_id:
+    if current != item_id and not stale_ok:
         raise OpError(
             "STALE_ITEM",
             f"id {item_id} is stale: the row has changed and now has id {current}. "
@@ -140,7 +162,7 @@ def bound_row(item_id: str, matches: Sequence[tuple[str, str]], snapshot: str | 
 
 
 def bind_item(
-    query: Callable[..., Mapping[str, Any]], *, collection: str, item_id: str, profile: str
+    query: Callable[..., Mapping[str, Any]], *, collection: str, item_id: str, profile: str, stale_ok: bool = False
 ) -> dict[str, str]:
     """The `item_key`, `expected_item_version` and `expected_container_hash` that `item_id` stands for.
 
@@ -172,4 +194,54 @@ def bind_item(
             "ITEM_SCAN_INCOMPLETE",
             "this collection is too large to find a row by its id; filter the query to the row and use its key.",
         )
-    return bound_row(item_id, [(row[column], row["item_version"]) for row in found], snapshot, profile=profile)
+    return bound_row(
+        item_id, [(row[column], row["item_version"]) for row in found], snapshot, profile=profile, stale_ok=stale_ok
+    )
+
+
+#: The remediation of a busy save's refusal for a value its collection does not declare.
+RESEND_WITH_A_DECLARED_VALUE = (
+    "Nothing was saved and nothing is held. Send the call again with a value the collection declares. If a change"
+    " that declares this value is still being saved, send the same value again once that change has committed."
+)
+
+
+def decide_on_declaration(
+    vault_root: Path,
+    collection: str,
+    budget: request_budget.RequestBudget,
+    *,
+    profile: str,
+    decide: Callable[[str, collections.CollectionManifest], _Decision],
+    store_sql_steps: int | None = None,
+) -> _Decision | None:
+    """`decide` over the manifest that `collection` names, as a request thread reads it now; None where that is unknown.
+
+    A title, path, UUID or reference resolves as a read of `profile` resolves it. A collection that the store
+    owns is read from the store's last commit beside the store thread (`read_served`): it never queues behind
+    that thread and never reads the projected `_collection.md`, which can lag the store. `decide` runs inside the
+    same read, so whatever else it reads comes from that snapshot too. The read stops at `budget` and answers
+    None for any refusal, such as a busy or unserved store or a title that several collections carry. It records
+    no release: a refusal it answers None for reaches no caller, and a mutation's own resolution of its
+    collection records none either. Its decisions go to a collector that nothing emits, which a nested read with
+    its own receipt boundary joins instead of opening one that it would emit.
+    """
+    from .collection_store import runtime as store_runtime
+    from .governance import egress
+
+    def read() -> _Decision:
+        with egress.disclosure_boundary(vault_root, "record_value_check", sink=True):
+            path = resolve_collection(vault_root, collection, profile=profile)
+            return decide(path, record_governance.resolve_collection_without_receipt(vault_root, path))
+
+    try:
+        check = request_budget.ReadCheckpoint(budget, bound_store_reads=True, store_sql_steps=store_sql_steps)
+        with request_budget.checking(check):
+            result = store_runtime.read_served(vault_root, read)
+            check()
+            return result
+    except request_budget.ReadBudgetExhausted:
+        return None
+    except Exception as error:  # noqa: BLE001 - an unknown, withheld or unreadable collection keeps the replay's own refusal
+        log.debug("a busy %s save could not read its collection's declaration: %s", profile, type(error).__name__)
+        return None

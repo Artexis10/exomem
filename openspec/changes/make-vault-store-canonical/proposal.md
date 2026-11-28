@@ -13,27 +13,28 @@ The spike also built the alternative: one SQLite store, canonical for page bytes
 ## What Changes
 
 - **Store mode.** A vault in store mode keeps one canonical SQLite database: the per-vault collection store database, extended with pages (exact bytes and frontmatter), the lexical catalogue tables, the graph tables, a projection manifest and the audit trail. Binary media stays on disk, referenced by path and hash.
-- **One transaction per governed write.** Exomem derives the lexical and graph rows from the bytes being written, with the same derivation code as today. It then commits bytes, rows, audit and projection intent in one `BEGIN IMMEDIATE`. Readers see the write at acknowledgement, with no drain, watcher event or repair.
+- **One transaction per governed write.** Exomem commits bytes, audit, projection intents, and derivation intents in one `BEGIN IMMEDIATE`. The store thread derives the lexical and graph rows. A read after acknowledgement sees those rows or reports lag.
 - **Markdown as a byte-exact projection.** A projector writes each committed file after commit, makes it durable, then records it in the manifest. Obsidian and other tools keep reading and editing Markdown.
 - **Outside edits.** A file whose hash differs from the manifest is an outside edit. It imports as a governed write when the store has not moved; otherwise it is held as a correction for review. An outside delete is held, never applied silently.
 - **Two stages.** Stage 1 is store mode with the same derived rows as today. Stage 2 adds semantic units and canonicity on the same store.
-- **Semantic units as first-class rows (stage 2).** Each unit gets one row with today's identity rule, its provenance, verdict and canonicity. Typed relationships can start or end at a unit and are stored as rows, with no limit per unit; a claim-level write changes the page, the unit and its relationships together, and a generated relations file beside each page carries them.
+- **Semantic units as first-class rows (stage 2).** Existing projections hold unit rows and bind references from the page summary. Typed relationships can start or end at a unit. The store commits relationship changes with page changes and exports them to a generated relations file beside each page.
 - **Canonicity of originals (stage 2).** Every stored file records its origin, hash, size, format and derivation. A file wrongly filed as an original can be superseded by the true original and kept as derived.
 - **Migration and rollback.** Migration runs offline and verifies equal derived rows and byte-identical projection before activation. Rollback drains the projection, refuses while held edits are unexported, exports the audit trail and canonicity records, then rebuilds file mode from the Markdown.
 - **What store mode retires.** For writes that Exomem commits, store mode needs no lexical freshness witnesses and catalogue repair, no graph sync checkpoints and drains, no derived receipts, no deferred full-refresh receipts and no self-write echo suppression. File mode keeps them until it is retired.
 - **Root layout and readable names (D12).** Moved to the change `adopt-root-vault-layout`. It never gates the switch.
 - **File mode stays** until the switch. Both modes share the derivation code and the readers.
+- **Store mode becomes the default, then the only canonical mode (D15, owner, 2026-11-27).** After the owner's switch and named gates, new vaults start in store mode and managed upgrades migrate file-mode vaults. File mode retires after Windows acceptance, the Cloud cells' migration, the removal of multi-host writer-lease support (owner, 2026-11-27: one machine per vault) and two minor releases of notice. An outside edit keeps D5's rules and gets name advice as a review item, never a hold.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `canonical-vault-store`: the per-vault canonical store, its one-transaction write contract, byte-exact Markdown projection, outside-edit import with base-revision checks, semantic units as first-class rows, canonicity of originals, and verified, reversible migration.
+- `canonical-vault-store`: the per-vault canonical store, its one-transaction write contract, byte-exact Markdown projection, outside-edit import with base-revision checks, semantic units as first-class rows, canonicity of originals, and verified migration, reversible until file mode retires (D15).
 
 ### Modified Capabilities
 
-- `epistemic-graph`: graph rows live in the canonical store in store mode and commit with their page; file mode is unchanged.
-- `live-index-freshness`: in store mode, lexical rows commit with their page, and graph audit re-derives from store bytes instead of repairing from Markdown.
+- `epistemic-graph`: graph rows live in the canonical store in store mode and follow each page's derivation intent.
+- `live-index-freshness`: in store mode, lexical rows follow each page's derivation intent, and graph audit derives from stored bytes.
 
 ## Impact
 

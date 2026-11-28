@@ -1387,13 +1387,17 @@ def test_a_scheduled_run_waits_while_an_open_cut_runs_its_own_full(monkeypatch):
     not os.environ.get("RELEASE_PLEASE_NODE_MODULES"), reason="pinned Release Please parser"
 )
 def test_changelog_changes_follow_release_pleases_own_parser(tmp_path, monkeypatch):
-    """A breaking footer or a second header in a body is a release, as release-please counts it."""
+    """A breaking footer or a second header in a body is a release, as release-please counts it.
+
+    An unparseable message is skipped without corrupting the JSON the decision reads.
+    """
     repository(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("NODE_PATH", os.environ["RELEASE_PLEASE_NODE_MODULES"])
     (tmp_path / "start.txt").write_text("start")
     start = commit(tmp_path, "chore: start")
     messages = (
+        "Merge branch 'feature' into main",
         "ci: cache the wheel build",
         "chore: drop the retired key\n\nBREAKING CHANGE: the key is gone",
         "chore: bump a pin\n\nfix(store): keep a save a restart interrupted",
@@ -1408,3 +1412,31 @@ def test_changelog_changes_follow_release_pleases_own_parser(tmp_path, monkeypat
         ("chore", True),
         ("fix", False),
     ]
+
+
+def test_the_callback_that_starts_a_decision_does_not_hold_the_slot(monkeypatch):
+    """The evidence callback dispatches the decision and ends seconds later; another run still holds."""
+
+    def api(path, pages=False):
+        if path.startswith("actions/workflows/release-evidence-automation.yml/runs"):
+            return {"workflow_runs": [{"id": 7, "status": "in_progress"}, {"id": 8, "status": "queued"}]}
+        if path.startswith("actions/workflows/ci.yml/runs"):
+            return {"workflow_runs": []}
+        assert pages and path.startswith("pulls?")
+        return [[]]
+
+    monkeypatch.setattr(cuts.evidence, "api", api)
+
+    held = cuts.schedule(caller="7")
+
+    assert held == {"cut": False, "reason": "release-evidence run 8 is queued"}
+
+
+def test_a_decision_without_a_caller_waits_for_every_unfinished_controller_run(monkeypatch):
+    def api(path, pages=False):
+        assert path.startswith("actions/workflows/release-evidence-automation.yml/runs")
+        return {"workflow_runs": [{"id": 7, "status": "in_progress"}]}
+
+    monkeypatch.setattr(cuts.evidence, "api", api)
+
+    assert cuts.schedule() == {"cut": False, "reason": "release-evidence run 7 is in_progress"}

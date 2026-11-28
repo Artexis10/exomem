@@ -411,7 +411,9 @@ def removed(mechanism: str) -> Iterator[None]:
         return
     if mechanism == "competing_senses":
         with (
-            mock.patch.object(working_set_resolve, "_competing_groups", lambda _resolved: ()),
+            mock.patch.object(
+                working_set_resolve, "_competing_groups", lambda _resolved, **_metadata: ()
+            ),
             mock.patch.object(
                 working_set_resolve, "_narrowed_by_qualifier", lambda anchors: tuple(anchors)
             ),

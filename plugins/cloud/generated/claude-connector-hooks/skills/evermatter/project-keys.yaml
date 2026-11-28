@@ -31,8 +31,8 @@
 #
 # Shipped unset, so a new page takes the `title` style. A captured Source keeps
 # its dated slug name until you set a style. Set the key, or the environment
-# variable EXOMEM_FILENAME_STYLE, to choose one; the environment wins, and
-# `exomem doctor` shows the style in force and where it came from. Nothing on
+# variable EVERMATTER_FILENAME_STYLE, to choose one; the environment wins, and
+# `evermatter doctor` shows the style in force and where it came from. Nothing on
 # disk is renamed when this changes; it governs new names only, so the two
 # styles can coexist in one vault.
 #

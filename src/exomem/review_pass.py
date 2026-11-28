@@ -28,6 +28,9 @@ The held pass holds findings and their coverage only. Everything that decides wh
   renewed, and a failed pass is not tried again until a read asks.
 - A pass runs every review category in one audit, so one failing check fails the pass. A failed
   pass replaces nothing. The gap before the next pass doubles with each failure in a row.
+- A pass runs in the serving process beside requests, so it waits for a request in flight at the
+  units of its work (`foreground_priority.bulk`). It only waits: the findings are those of a pass
+  that no request met.
 - A process with no refresh worker (a stdio server, the CLI, a standby) and a vault with no live
   change generation hold nothing.
 """
@@ -222,7 +225,9 @@ def _compute(vault_root: Path, key: tuple, generation: int) -> _Pass:
     started = time.monotonic()
     now = dt.datetime.now(dt.UTC)
     live = freshness.live_entries(vault_root, _SCOPE) or {}
-    with call_spans.span("review_pass.compute", {"part": part}):
+    fields: dict[str, Any] = {"part": part}
+    # The span's time counts the waits for requests; `waited_ms` lets a later comparison take them apart.
+    with call_spans.span("review_pass.compute", fields), foreground_priority.recording_waits(fields):
         if part == AUDIT:
             from . import attention, audit
 
@@ -423,7 +428,8 @@ def _refresh(worker: _Worker, key: tuple) -> None:
     """Run one pass at background priority; hold it only when it finished in time."""
     from .governance import principal as principal_module
 
-    cancel = threading.Event()
+    # A `StopEvent`, so the limit or a stop ends a pass that waits at a yield now, not at the wait's cap.
+    cancel = foreground_priority.StopEvent()
     timer = threading.Timer(limit_seconds(), cancel.set)
     timer.daemon = True
     with _LOCK:
@@ -436,8 +442,11 @@ def _refresh(worker: _Worker, key: tuple) -> None:
         with (
             principal_module.library_scope(),
             foreground_activity.background_scope(worker.vault_root),
-            foreground_priority.cancellable(cancel),
+            foreground_priority.bulk(stop=cancel),
         ):
+            # A pass that starts beside a request waits for it first. The audit and the scan wait for
+            # requests at their own units; this wait keeps the pass from reading anything before then.
+            foreground_priority.yield_in_bulk()
             generation = freshness.generation(worker.vault_root, _SCOPE)
             # The worker's own caller must be the caller that a pass is held for.
             if generation is not None and _unrestricted(worker.vault_root):
@@ -447,7 +456,11 @@ def _refresh(worker: _Worker, key: tuple) -> None:
             log.warning("review pass took longer than %.0f s; abandoned", limit_seconds())
             fresh = None
     except foreground_priority.BulkCancelled:
-        log.info("review pass abandoned")
+        # The pass now sees the limit at its next unit, so the limit ends it here as often as a stop does.
+        if worker.stop.is_set():
+            log.info("review pass abandoned")
+        else:
+            log.warning("review pass took longer than %.0f s; abandoned", limit_seconds())
     except Exception:  # noqa: BLE001 - a failed pass keeps the held one; a read asks for the next
         log.warning("review pass failed; the held pass stays", exc_info=True)
     finally:

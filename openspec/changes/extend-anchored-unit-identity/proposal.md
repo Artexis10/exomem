@@ -23,7 +23,7 @@ None.
 
 ### Modified Capabilities
 
-- `canonical-vault-store`: anchors for soft references and named units, aliases, unit operations by reference, embeds of compact and rich units, the referenced-unit preflight and review, cross-page visibility, and owner tables that an earlier build ignores. Stage 2's requirement on unit rows splits into three, word for word apart from the cases in which the store itself writes an anchor.
+- `canonical-vault-store`: anchors for soft references and named units, aliases, unit operations by reference, embeds of compact and rich units, the referenced-unit preflight and review, cross-page visibility, and owner tables that an earlier build ignores. The unit requirements retain Stage 2's transaction and derivation rules. This change expands the cases in which the store writes an anchor.
 
 ## Impact
 

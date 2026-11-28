@@ -28,6 +28,7 @@ from . import (
     archive_members,
     cloud_containment,
     cloud_grant,
+    cloud_job_failure,
     import_stage,
     private_state,
     rename_journal,
@@ -37,10 +38,10 @@ from . import (
 from .cell_init import _ensure_private_directory
 from .cloud_cell import CELL_ID_PATTERN
 from .cloud_import import (
-    DEFAULT_MAX_MEMBERS,
     RETRY_OWNER,
     ArchiveRefused,
     flush_to_disk,
+    max_members_from_env,
     reserve_bytes_from_env,
     unpack_stream,
 )
@@ -220,7 +221,7 @@ def run_import(
                     result = unpack_stream(
                         process.stdout, staging, max_bytes=request.declared_bytes,
                         expect_bytes=request.declared_bytes, expect_files=request.declared_files,
-                        max_members=int(os.environ.get("EXOMEM_IMPORT_MAX_MEMBERS", DEFAULT_MAX_MEMBERS)),
+                        max_members=max_members_from_env(),
                         reserve_bytes=reserve_bytes_from_env(),
                         on_file=record_member if request.kind == "adopt" else None,
                     )
@@ -490,7 +491,7 @@ def _write_walk(vault_root: Path, import_id: str, record: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="exomem cell-import")
+    parser = argparse.ArgumentParser(prog="evermatter cell-import")
     parser.add_argument("operation", choices=("prepare", "import", "discard"))
     parser.add_argument("--vault", type=Path, default=Path("/data/vault"))
     parser.add_argument("--import-id", required=True)
@@ -530,7 +531,8 @@ def main(argv: list[str] | None = None) -> int:
             result["retry"] = error.retry
     except cli_fence.StoreFenceRefusal as refused:
         result = {"ok": False, "error": refused.code}
-    except Exception:  # noqa: BLE001 -- errors may contain member names or signed URLs
-        result = {"ok": False, "error": "IMPORT_FAILED"}
+    except Exception as error:  # noqa: BLE001 -- the message may contain member names or signed URLs
+        # The diagnostic keeps the class and function names only, so cellctl can log the cause before it deletes the Job.
+        result = {"ok": False, "error": "IMPORT_FAILED", "diagnostic": cloud_job_failure.failure_diagnostic(error)}
     args.termination_log.write_text(json.dumps(result), encoding="ascii")
     return 0 if result["ok"] else 1

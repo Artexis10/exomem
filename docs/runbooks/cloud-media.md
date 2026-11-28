@@ -134,7 +134,7 @@ Removing a retained restore copy is a separate operator action under the restore
 
 ## Switch an engine on for a cell
 
-Every engine is off in a Cloud cell unless the platform values switch it on, for one cell or for the fleet. A switched-off engine queues no job: the file stays searchable by its name and metadata, and its sidecar stays pending. Runtime status (`exomem status --resources`) and `exomem doctor` show each engine as `enabled`, `disabled` or `unavailable`. A tenant sees no message about a disabled engine.
+Every engine is off in a Cloud cell unless the platform values switch it on, for one cell or for the fleet. A switched-off engine queues no job: the file stays searchable by its name and metadata, and its sidecar stays pending. Runtime status (`evermatter status --resources`) and `evermatter doctor` show each engine as `enabled`, `disabled` or `unavailable`. A tenant sees no message about a disabled engine.
 
 cellctl renders `EXOMEM_MEDIA_ENGINES` into the cells that `cellctl.mediaEngineCellIds` names, and into every cell for an engine in `cellctl.mediaEngineFleetDefault`. A change restarts only the cells whose engine set changed.
 
@@ -142,7 +142,7 @@ cellctl renders `EXOMEM_MEDIA_ENGINES` into the cells that `cellctl.mediaEngineC
 2. Set the chosen engines under `cellctl.mediaEngineCellIds`, including `speech` for transcripts. Expect the intended per-cell selection.
 3. Deploy the platform chart through its normal release path. Expect only changed cells to restart.
 4. Wait for the selected cell's pod to restart. Expect its new engine selection.
-5. Run `exomem status --resources --json` in the cell. Expect the chosen engines under `media_engines` as `enabled`.
+5. Run `evermatter status --resources --json` in the cell. Expect the chosen engines under `media_engines` as `enabled`.
 6. Check `media_brakes`. Expect `"state": "on"`.
 7. Add public fixtures for each chosen engine. Expect the worker to publish searchable text automatically.
 8. For speech, search a known transcript phrase. Expect matching audio and video sidecars.
@@ -177,7 +177,7 @@ Warning: a cell that `mediaEngineCellIds` does not name restarts at the deploy a
 7. Deploy the platform chart through its normal release path.
 8. Repeat the command of step 1 into `/tmp/cells-after.txt`. Run `LC_ALL=C comm -13 /tmp/cells-before.txt /tmp/cells-after.txt`. Each line is a cell created since step 1.
 9. Repeat the command of step 4 into `/tmp/pods-after.txt`, then run `diff /tmp/pods-before.txt /tmp/pods-after.txt`. Expect a changed line only for a cell from step 8: no other cell restarted.
-10. Run `exomem status --resources --json` in a cell from step 8, or in a cell you create, and check that `media_engines` shows each engine as `enabled`.
+10. Run `evermatter status --resources --json` in a cell from step 8, or in a cell you create, and check that `media_engines` shows each engine as `enabled`.
 
 If a cell restarted at step 9, step 2 missed it. That cell now runs the engine and backfills its media. Wait for the backfill, then check `media.memory_blocked_count` and `media.over_budget_count` as for any switch-on.
 
@@ -192,8 +192,9 @@ The brakes stop media from taking the serving process down. They run only in Clo
 - **Hard limit.** The child runs its job under a data-segment limit (`RLIMIT_DATA`): the largest VmData budget among the engines it loads, plus the margin. Tesseract and the other native tools inherit it. An allocation past the limit fails inside the child, not in the serving process.
 - **Pressure stop.** While a child runs, the supervisor reads the `memory.pressure` 10-second averages. Above the threshold, it kills the child and the tools it started, and returns the job to the queue. Where pressure is unreadable, the supervisor stops the child when anonymous memory reaches the admission ceiling.
 - **Watchdog.** The supervisor kills a child that runs longer than the job timeout. A watchdog stop spends the file's time budget, not memory, so it counts apart from memory stops. After the stop limit of watchdog stops, each in a fresh child, the file is over budget. A stop counts only when the job made no progress. A speech job whose transcript advanced since its last stop is re-queued without spending a stop, and continues from its last finished window. So a hang, or a file that is not resumable speech, holds the queue for at most the stop limit times the job timeout, 45 minutes with the defaults. A resumed recording is claimed only when no fresh job waits, so it delays a new upload by at most one job timeout.
+- **Job crash.** On every install, a child that dies while it still holds its runtime record counts one job crash against its job. The cause is a signal other than SIGTERM, SIGINT and SIGHUP, or an exit status other than 0 and 75 to 81. A stop by the supervisor is not a job crash, and neither is a PDF abort that counts as a memory stop. Job crashes add up under one release. At the stop limit the job is blocked as `child_crashed`. A retry returns it; a reprocess, which a retry leaves alone, returns on a new reprocess request. The first start under another release returns it too, with one try left.
 
-The brakes fail closed. When the cgroup does not read as a Cloud cell's (cgroup v1, a missing file, no `anon` entry, an unreadable `memory.max`, or no memory limit), no media child starts. Runtime status shows `media_brakes` as `unavailable` with the reason, and `exomem doctor` warns "media brakes unavailable: <reason>". Media waits until the cgroup reads correctly again. Personal installs have no brakes, and runtime status shows them as `off`.
+The brakes fail closed. When the cgroup does not read as a Cloud cell's (cgroup v1, a missing file, no `anon` entry, an unreadable `memory.max`, or no memory limit), no media child starts. Runtime status shows `media_brakes` as `unavailable` with the reason, and `evermatter doctor` warns "media brakes unavailable: <reason>". Media waits until the cgroup reads correctly again. Personal installs have no brakes, and runtime status shows them as `off`.
 
 Each value is deployment configuration. Set it in the cell's environment.
 
@@ -203,7 +204,7 @@ Each value is deployment configuration. Set it in the cell's environment.
 | `EXOMEM_MEDIA_VMDATA_MARGIN_MIB` | 128 | Covers the allocator's own arenas above the engine's budget. |
 | `EXOMEM_MEDIA_ADMISSION_FRACTION` | 0.80 | The service-v1 profile's 80% cgroup peak gate. |
 | `EXOMEM_MEDIA_PRESSURE_AVG10` | 10.0 | Sustained reclaim, well above an idle cell and below the stalls that come before an OOM kill. |
-| `EXOMEM_MEDIA_STOP_LIMIT` | 3 | Consecutive memory stops before a job leaves the stop cycle. Watchdog stops count apart, against the same limit. |
+| `EXOMEM_MEDIA_STOP_LIMIT` | 3 | One limit for three counts, each kept apart: consecutive memory stops before a job leaves the stop cycle, watchdog stops, and job crashes. Job crashes count on every install. |
 | `EXOMEM_MEDIA_JOB_TIMEOUT_SECONDS` | 900 | Far above the samples' sub-second times, with room for a long scanned PDF. A file costs at most the stop limit times this before it is over budget. |
 
 `EXOMEM_MEDIA_BUDGETS` maps each engine to its budget, for example `{"speech": {"anon_mib": 1024, "vmdata_mib": 4096}, "default": {"anon_mib": 640, "vmdata_mib": 1024}}`.
@@ -288,7 +289,7 @@ Memory stops never count as attempts. A job that the brakes stop moves through t
 - **Memory-blocked.** The job reached the stop limit of memory stops and at least one was a pressure stop, so other work caused it. The tenant sees the job as pending. The supervisor returns it to the queue by itself: at its start, and then on a timer. The timer starts at 60 seconds and doubles to 30 minutes while pressure stays high. It goes back to 60 seconds as soon as pressure clears or a job completes.
 - **Over budget.** The job reached the stop limit of memory stops and every one was a hard-limit failure, so the file itself needs more memory than the engine's budget. Or the job reached the stop limit of watchdog stops, so the file needs more time than the job timeout. The tenant sees "the file exceeds this deployment's processing budget" with no next action, and the sidecar offers no retry. A memory verdict returns to the queue only after the cell's limit or the engine's budget changes. A time verdict returns only after the job timeout grows past the one it exceeded. A manual retry returns neither.
 
-The ledger stores each reason in its `blocked_reason` column. Runtime status reports `media.memory_blocked_count`, `media.over_budget_count` and `media.engine_waiting_count`. `media.counts` counts each job as its own row shows it, so memory-blocked and waiting jobs count as pending. `exomem doctor` reports memory-blocked and over-budget work to the operator, never to the tenant.
+The ledger stores each reason in its `blocked_reason` column. Runtime status reports `media.memory_blocked_count`, `media.over_budget_count` and `media.engine_waiting_count`. `media.counts` counts each job as its own row shows it, so memory-blocked and waiting jobs count as pending. `evermatter doctor` reports memory-blocked and over-budget work to the operator, never to the tenant.
 
 ## Tenant tools
 
@@ -298,7 +299,7 @@ Cloud cells serve the `media.status`, `media.process` and `media.retry` operatio
 - `media.process` queues one file, or a list of files, now instead of waiting for automatic ingestion. Without a path it does bounded work over all media.
 - `media.retry` queues a failed file again after the cause is fixed.
 
-Every operation shows memory-blocked and engine-waiting work only as pending. The reasons, the worker process and the store path stay in `exomem doctor`. The same holds for GPU facts: a busy GPU, the GPU preflight verdict and a crash loop of the media child show in a tool's status on a personal install only.
+Every operation shows memory-blocked and engine-waiting work only as pending. The reasons, the worker process and the store path stay in `evermatter doctor`. The same holds for GPU facts: a busy GPU, the GPU preflight verdict and a crash loop of the media child show in a tool's status on a personal install only.
 
 All three use this cell's queue, memory brakes and engine selection. A file whose engine is off waits, and no operation runs it on an engine the cell does not select. A retry never returns over-budget work (see Job states). A new OCR pack or OCR fix leaves completed text unchanged, and no operation re-extracts it. A cell serves the tool only from the first image release that includes it, so roll that image before you tell a tenant about it.
 
@@ -318,9 +319,9 @@ This changes neither completed OCR text nor the existing explicit retry and reso
 
 OCR first detects each image's script with Tesseract's OSD model. It then reads the image with the installed script models for that script and the installed language packs written in it. Each pack's script comes from the pack's own unicharset, so no code lists languages. A Japanese page reads with both a horizontal and a vertical pass, and OCR keeps the pass with the higher word confidence.
 
-Reading each pack's script means reading every model file, 353 MB in the Cloud image. The image build writes the result to `EXOMEM_OCR_INVENTORY` (`/opt/exomem-ocr/inventory.json`), so a fresh media child reads one small file instead. A personal install keeps the same inventory in `~/.cache/exomem/ocr-inventory.json` and reads the models again when their names, sizes or dates change. Tesseract 4.x does not name its model directory; there OCR reads each image once in Tesseract's default language.
+Reading each pack's script means reading every model file, 353 MB in the Cloud image. The image build writes the result to `EVERMATTER_OCR_INVENTORY` (`/opt/exomem-ocr/inventory.json`), so a fresh media child reads one small file instead. A personal install keeps the same inventory in `~/.cache/exomem/ocr-inventory.json` and reads the models again when their names, sizes or dates change. Tesseract 4.x does not name its model directory; there OCR reads each image once in Tesseract's default language.
 
-The Cloud image installs every Tesseract script model and the language packs that the `EXOMEM_OCR_LANGS` build argument names. The default is `eng+jpn+jpn_vert+est`. The image sets `EXOMEM_OCR_DEFAULT_LANGS` from the same argument; OCR uses it for an image with too little text to detect a script.
+The Cloud image installs every Tesseract script model and the language packs that the `EXOMEM_OCR_LANGS` build argument names. The default is `eng+jpn+jpn_vert+est`. The image sets `EVERMATTER_OCR_DEFAULT_LANGS` from the same argument; OCR uses it for an image with too little text to detect a script.
 
 To add a language:
 
@@ -330,7 +331,7 @@ To add a language:
 
 Expect the new pack to read pages whose script its unicharset names.
 
-A script that OSD names differently from every script model has no route, and its pages read with `EXOMEM_OCR_DEFAULT_LANGS`. Korean is one: OSD reports `Korean`, and the script model is `Hangul`.
+A script that OSD names differently from every script model has no route, and its pages read with `EVERMATTER_OCR_DEFAULT_LANGS`. Korean is one: OSD reports `Korean`, and the script model is `Hangul`.
 
 ## OCR word confidence
 

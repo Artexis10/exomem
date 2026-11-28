@@ -14,6 +14,13 @@ _CONVENTIONAL_HEADER = re.compile(
 _EXPECTED = "<type>[optional scope][!]: <description>"
 
 
+def conventional_type(title: str) -> str | None:
+    """Return the Conventional Commit type of *title*, or None when it is not a valid header."""
+
+    match = _CONVENTIONAL_HEADER.fullmatch(title)
+    return match.group("type") if match else None
+
+
 def validate_pr_title(title: str) -> str | None:
     """Return an explanation when *title* is not a conventional commit header."""
 

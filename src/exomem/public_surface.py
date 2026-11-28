@@ -51,7 +51,7 @@ _AREAS: dict[str, str] = {  # nosemgrep: ep-word-dict -- the closed area names o
     "read_media": "media", "review_memory": "review", "review_item_context": "review",
     "connect_memory": "connections", "adopt_vault": "imports", "adoption_studio": "imports",
     "maintain_memory": "maintenance", "triage_memory": "review", "schema_memory": "schema", "govern_memory": "governance",
-    "record_memory": "records", "plan_memory": "plans", "approve_procedure": "procedures",
+    "record_memory": "records", "plan_memory": "plans", "approve_procedure": "procedures", "manage_faces": "faces",
     "observe_memory": "observations", "bootstrap": "instructions",
     "inspect_captured_sources": "sources",
     "inspect_name_drift": "maintenance",
@@ -71,7 +71,7 @@ _KIND_NAMES: dict[tuple[str, str], str] = {  # nosemgrep: ep-word-dict -- the cl
     ("manage_memory_file", "files"): "list", ("manage_memory_file", "trash-list"): "trash",
     ("manage_memory_file", "propose-reclassification"): "reclassify",
     ("manage_memory_file", "validate-create"): "create", ("manage_memory_file", "validate-append"): "append",
-    ("manage_memory_file", "validate-move"): "move",
+    ("manage_memory_file", "validate-move"): "move", ("manage_memory_file", "validate-classify"): "classify",
     ("adopt_vault", "scan-only"): "scan",
     ("maintain_memory", "collections-store"): "collections", ("maintain_memory", "collections-cutover"): "cutover",
     ("maintain_memory", "maintenance-job"): "job", ("maintain_memory", "maintenance-job-cancel"): "cancel_job",
@@ -476,7 +476,7 @@ def _door_call(
 
 _IMPORT_GUIDE = (
     "Send a folder to a personal server as one archive, in three steps, from a client that can run a shell command or has a networked sandbox. "
-    "A client with neither cannot: give the person `exomem import <folder>`. Evermatter Cloud refuses lane `import`; its folders go through `exomem cloud import <folder>`. "
+    "A client with neither cannot: give the person `evermatter import <folder>`. Evermatter Cloud refuses lane `import`; its folders go through `evermatter cloud import <folder>`. "
     "1. From the folder's parent, pack the folder as one archive, such as `tar -czf folder.tgz folder`, and take its SHA-256. "
     "2. Call upload_files with lane `import` and that expected_sha256, then run the `shell` line of the reply's `next` send step, "
     "with `<token>` and `<archive>` filled in, to send the archive. "
@@ -490,8 +490,8 @@ _FILE_GUIDE = (
     "1. Take the file's SHA-256. "
     "2. Call upload_files with lane `source` (an original) or `evidence` (proof) and that expected_sha256. "
     "The digest holds the upload for this session, so `hold` is optional. The reply is a handoff that stores nothing yet. "
-    "3. Send the bytes: save the reply as JSON and run `exomem attach <file> --handoff-file <json> --root .`, "
-    "or, from a sandbox with no `exomem`, run the `shell` line of the reply's `next` send step with `<token>` and `<file>` filled in. "
+    "3. Send the bytes: save the reply as JSON and run `evermatter attach <file> --handoff-file <json> --root .`, "
+    "or, from a sandbox with no `evermatter`, run the `shell` line of the reply's `next` send step with `<token>` and `<file>` filled in. "
     "The token is a secret: never show it to the person. The send returns a held `file` handle. "
     "4. Call save_source or save_evidence with that handle in `files`. A held upload lasts an hour and only the same session can redeem it. "
     "The save's receipt proves the file is kept: check each row's `hash` against the digest of step 1 before you tell the person it is saved. "
@@ -506,8 +506,40 @@ def _curation_examples() -> list[dict[str, Any]]:
     return examples()
 
 
+def _import_contract() -> dict[str, Any]:
+    from .collection_store.importer import contract
+
+    return contract()
+
+
+def _import_examples() -> list[dict[str, Any]]:
+    """Two worked calls: preview a Markdown table with its own total, then start the same import."""
+    request = {
+        "source_ref": "<the Evidence path that save_evidence returned>",
+        "format": "markdown-table",
+        "mapping": {
+            "table": 0,
+            "fields": {"ref": "Ref", "entry_date": {"from": "Date", "type": "date"}, "entry_date_text": "Date",
+                       "amount": {"from": "Amount", "type": "number"}},
+            "on_invalid": "skip",
+            "coverage": {name: {"classification": None} for name in ("Ref", "Date", "Amount")},
+        },
+    }
+    return [
+        {"name": "preview a Markdown table and check its total", "tool": "inspect_memory",
+         "call": {"operation": "records.import", "arguments": {
+             "collection": "<collection>",
+             "import_request": {"mode": "preview", **request, "check_sum": {"field": "amount"}}}}},
+        {"name": "start the import, then poll with status until the job is complete", "tool": "manage_memory",
+         "call": {"operation": "records.import", "arguments": {
+             "collection": "<collection>", "import_request": {"mode": "start", **request}}}},
+    ]
+
+
 #: Worked examples that read_instructions adds to an operation whose argument is a whole plan.
-_EXAMPLES = {"curation.propose": _curation_examples}
+_EXAMPLES = {"curation.propose": _curation_examples, "records.import": _import_examples}
+#: A contract that read_instructions adds to an operation whose arguments live in a nested request.
+_CONTRACTS = {"records.import": _import_contract}
 
 
 def help_for(topic: str | None, commands: Sequence[Any]) -> dict[str, Any]:
@@ -539,15 +571,24 @@ def help_for(topic: str | None, commands: Sequence[Any]) -> dict[str, Any]:
     if len(served) == 1:
         return _door_help(surface, served[0], commands)
     if served:
-        # An operation that both doors carry reads on one and writes on the other: show each its own arguments.
-        return {"operation": topic, "tools": [_door_help(surface, op, commands) for op in served]}
+        # An operation that both doors carry reads on one and writes on the other: show each its own arguments,
+        # and its teaching once.
+        return {"operation": topic, "tools": [_door_help(surface, op, commands, teach=False) for op in served],
+                **_teaching(topic)}
     names = sorted({*listed, *(op.name for door in DOORS.values()
                                for op in surface.door_operations(door, commands, listed=True))})
     raise OpError("INVALID_OPERATION", f"{topic!r} is not a tool or an operation of this server.",
                   details={"candidates": get_close_matches(topic, names, n=5) or list(listed)[:5]})
 
 
-def _door_help(surface: PublicSurface, op: DoorOp, commands: Sequence[Any]) -> dict[str, Any]:
+def _teaching(name: str) -> dict[str, Any]:
+    """What read_instructions adds to an operation beyond its arguments: a guide, a contract and worked examples."""
+    return {**({"guide": _GUIDES[name]} if name in _GUIDES else {}),
+            **({"contract": _CONTRACTS[name]()} if name in _CONTRACTS else {}),
+            **({"examples": _EXAMPLES[name]()} if name in _EXAMPLES else {})}
+
+
+def _door_help(surface: PublicSurface, op: DoorOp, commands: Sequence[Any], *, teach: bool = True) -> dict[str, Any]:
     from .operation_schema import operation_schema
 
     command = next(c for c in commands if c.name == op.command)
@@ -572,11 +613,7 @@ def _door_help(surface: PublicSurface, op: DoorOp, commands: Sequence[Any]) -> d
             required = result["alternatives"][0].get("required", [])
             result.setdefault("note", "Send the fields of one alternative as `arguments`.")
     result["example"] = {"operation": op.name, "arguments": {key: f"<{key}>" for key in required}}
-    if op.name in _GUIDES:
-        result["guide"] = _GUIDES[op.name]
-    if op.name in _EXAMPLES:
-        result["examples"] = _EXAMPLES[op.name]()
-    return result
+    return {**result, **(_teaching(op.name) if teach else {})}
 
 
 def _without_kind(alternative: Mapping[str, Any]) -> dict[str, Any]:

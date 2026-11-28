@@ -54,7 +54,7 @@ def payload(vault_root: Path) -> dict[str, Any]:
     if not call_ledger.enabled():
         raise _unavailable("the call ledger is disabled on this server")
     try:
-        since, events = _events(_lines_newest_first(call_ledger.ledger_path()), _known_from())
+        since, events = _events(lines_newest_first(call_ledger.ledger_path()), _known_from())
     except (OSError, ValueError) as error:  # ValueError: a tampered row the reader cannot use
         raise _unavailable("the call ledger could not be read") from error
     return {
@@ -73,7 +73,8 @@ def _known_from() -> dt.datetime | None:
     may have lost a call with neither a row nor a marker: on a full or read-only
     volume, or when it was killed between a commit and its append. So a cell
     claims nothing before this writer started; replacing the pod discards the
-    older history anyway.
+    older history anyway. The writer-start bound means something only inside the
+    writer process: another process, such as the doctor, has its own start.
     """
     from . import cloud_cell
 
@@ -236,7 +237,7 @@ class _Listing:
         return [{k: v for k, v in event.items() if k != "_newest"} for event in self.events]
 
 
-def _lines_newest_first(path: Path) -> Iterator[bytes]:
+def lines_newest_first(path: Path) -> Iterator[bytes]:
     """The live ledger file's lines, last first, read in bounded chunks.
 
     The segment after the file's last newline is skipped: it is empty, or a row

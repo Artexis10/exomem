@@ -92,6 +92,29 @@ def test_enforce_mode_stops_an_import_before_it_fetches_the_ciphertext(vault, tm
     assert json.loads(message.read_text()) == {"ok": False, "error": "IMPORT_REQUEST_INVALID"}
 
 
+def test_an_unexpected_failure_names_its_class_and_function_but_never_its_message(vault, tmp_path, monkeypatch):
+    """Defect: every unexpected failure read the same IMPORT_FAILED, so a full disk and a bug looked alike once
+    the Job was gone; the exception text can hold a member name or a signed URL and must stay out."""
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
+
+    def unwritable_member(*_args, **_kwargs):
+        raise PermissionError(13, "canary-member-name.md https://storage.example/canary-signature")
+
+    monkeypatch.setattr(cloud_import_job, "run_import", unwritable_member)
+    import_id = str(uuid.uuid4())
+    request = cloud_import_job.CloudImportRequest(import_id=import_id, cell_id=CELL, kind="adopt", declared_files=2,
+                                                  declared_bytes=999, ciphertext_bytes=10, ciphertext_sha256="0" * 64)
+    message = tmp_path / "termination.json"
+    assert cloud_import_job.main(["import", "--vault", str(vault), "--import-id", import_id,
+                                  "--request", request.model_dump_json(), "--url", "https://storage.example/import",
+                                  "--termination-log", str(message)]) == 1
+    assert json.loads(message.read_text()) == {
+        "ok": False, "error": "IMPORT_FAILED",
+        "diagnostic": {"type": "PermissionError", "function": "unwritable_member", "errno": 13}}
+    assert "canary" not in message.read_text()
+
+
 @pytest.mark.parametrize("failure", ["substitute", "truncated", "wrong-cell"])
 def test_refused_import_leaves_canonical_content(vault, tmp_path, monkeypatch, failure):
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")

@@ -2862,9 +2862,9 @@ def exact_full_status(vault_root: Path, relative: str) -> dict[str, Any]:
 def full_status(vault_root: Path | None) -> dict[str, Any]:
     result = _status(vault_root, table="full_upserts")
     command = (
-        f'exomem index --vault "{vault_root}" --scope vault'
+        f'evermatter index --vault "{vault_root}" --scope vault'
         if vault_root is not None
-        else "exomem index --scope vault"
+        else "evermatter index --scope vault"
     )
     return {
         **result,

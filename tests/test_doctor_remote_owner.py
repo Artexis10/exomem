@@ -58,8 +58,8 @@ def test_unset_binding_passes_and_says_how_to_enable_it(
     check = _binding_check(remote_env, None)
     assert check.status == "pass"
     assert "separate non-owner principal" in check.message
-    assert "EXOMEM_OWNER_OAUTH_SUBJECT=github:" in (check.remediation or "")
-    assert "EXOMEM_GITHUB_USER_ID" in (check.remediation or "")
+    assert "EVERMATTER_OWNER_OAUTH_SUBJECT=github:" in (check.remediation or "")
+    assert "EVERMATTER_GITHUB_USER_ID" in (check.remediation or "")
     _assert_content_free(check)
 
 

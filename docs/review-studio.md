@@ -13,18 +13,18 @@ CDN, Node runtime, frontend daemon, or separate database.
 Start the HTTP service as usual, then print the Studio URL:
 
 ```sh
-exomem --transport http
-exomem studio
+evermatter --transport http
+evermatter studio
 ```
 
-The default is `http://127.0.0.1:8765/studio/`. `exomem studio --open` opts into
+The default is `http://127.0.0.1:8765/studio/`. `evermatter studio --open` opts into
 opening the system browser; the plain command only prints the URL and is safe on
-headless hosts. `EXOMEM_BASE_URL` or `--url https://kb.example.test` selects a
+headless hosts. `EVERMATTER_BASE_URL` or `--url https://kb.example.test` selects a
 remote origin.
 
 The shell is public but inert: it contains no vault titles, paths, counts, note
 text, graph data, or review state. Vault data crosses the boundary only through
-same-origin `/api/*` commands. Set `EXOMEM_REST_API_KEY`, enter that personal key
+same-origin `/api/*` commands. Set `EVERMATTER_REST_API_KEY`, enter that personal key
 in the connection screen, and the browser retains it in memory or
 `sessionStorage` for the current tab session. It is never placed in a URL,
 rendered HTML, persistent cookie, or `localStorage`. On a Cloudflare Access

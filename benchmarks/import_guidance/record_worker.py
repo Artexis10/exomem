@@ -16,8 +16,9 @@ it (`session_seed.py`, the same code a session-close run seeds with), and the re
 `settle_graph` step is refused there, because a throwaway page is one that `recall_context` could then serve.
 `"engagement"` in the plan pins `EXOMEM_PROMINENCE`, as a session-close run does for its case.
 `"ready_graph": true` in the plan builds the relation graph of a seeded vault first, as a live vault has it from its
-writes (`session_seed.py` says how, and writes no page): the arm's own reconcile runs before the server is built, and the
-arm's own graph index proves availability, with a bound, independently of the activation packet. The recording then
+writes (`session_seed.py` says how, and writes no page). The arm's reconcile runs before the server is built.
+Afterward, the process prepares its live recall projection, resolver and inherited graph.
+Its graph index then proves availability independently of the activation packet. The recording then
 holds `ready` with the graph state that was seen. The `warm` poll below still runs after it.
 
 A read step may carry `"warm": {"seconds": N, "ignore": [field, ...], "within": W}`. On a seeded vault the first read
@@ -163,6 +164,7 @@ def main(plan_path: Path, product_root: Path, out_path: Path, seed: Path | None 
     call = session_seed.open_server(vault)
     ready = None
     if plan.get("ready_graph"):
+        session_seed.prepare_recall(vault)
         ready = {"graph": session_seed.wait_for_graph(vault), "seconds": round(time.monotonic() - ready_started, 1)}
 
     # The digest that a session-profile bootstrap needs, from this arm's skill files.

@@ -52,7 +52,7 @@ The initial atomic Source write stores identity and `capture_input_digest`; late
 
 Conflicting original inputs return `SOURCE_IDENTITY_CONFLICT` without a capture write.
 Files or adoption with source identity return `SOURCE_IDENTITY_TEXT_ONLY` before retrieval.
-The local `exomem attach` command supports `--lane source` for file capture without text identity.
+The local `evermatter attach` command supports `--lane source` for file capture without text identity.
 An unreadable or malformed canonical Source candidate returns `SOURCE_IDENTITY_UNAVAILABLE`; indexes cannot prove capture absence.
 The scan checks canonical pages in Sources and Evidence. Verified companion bindings distinguish Markdown originals from canonical pages.
 An original's frontmatter cannot supply a capture receipt or classify another page.
@@ -142,7 +142,7 @@ The reply identifies the embedding `recall_space`, its opaque `recall_space_id` 
 It counts `withheld_chunks` whose indexed text no longer matches their Source.
 Evermatter does not refill withheld hits. A request reads at most `limit` distinct selected Sources; terminal checks can reread those Sources.
 
-`EXOMEM_PASSAGE_MATRIX_BYTES` configures the process-wide numerical ceiling for optional passage matrices and replacement scratch.
+`EVERMATTER_PASSAGE_MATRIX_BYTES` configures the process-wide numerical ceiling for optional passage matrices and replacement scratch.
 Its default is zero. A positive ceiling permits background loading after declared passages are published.
 The platform chart sets it for every cell that `cellctl` provisions, shared-worker cells included, in `cellctl.cellResources.passageMatrixBudget`, next to the cell memory limit.
 Its default is 512 MiB, and `0Mi` turns the matrix off.
@@ -185,15 +185,15 @@ The call refuses with a code that names what to change:
 
 Before its cutoff, the call answers `unknown` with a `failure.code` when Evermatter cannot prove the erase is safe.
 The codes are `custody_missing`, `coverage_incomplete`, `dependency_uncertain`, `canonical_page_unavailable` and `inbound_references_unavailable`.
-An `unknown` component names its `reason`. A reason that a repeat can clear, such as a store that could not be read this time (`page_unreadable`, `heat_unreadable`, `copy_unreadable`, `native_ledger_unreadable`, `generation_unwritable`), leaves the answer unsettled, so the caller repeats. Any other reason settles the answer until something outside the call changes.
+An `unknown` component names its `reason`. A reason that a repeat can clear, such as a store that could not be read this time (`page_unreadable`, `heat_unreadable`, `copy_unreadable`, `native_ledger_unreadable`, `generation_unwritable`, `journal_unwritable`), leaves the answer unsettled, so the caller repeats. Any other reason settles the answer until something outside the call changes.
 Without content-private logging, `host_logs` stays `unknown` with reason `logs_not_content_private`, because process logs can name the page.
-With the graph index disabled (`EXOMEM_DISABLE_GRAPH_INDEX`), `derived` and `caches` stay `unknown` with reason `graph_index_disabled`, because the disabled index keeps its stored rows. Re-enable the index and repeat the call to finish the erase.
+With the graph index disabled (`EVERMATTER_DISABLE_GRAPH_INDEX`), `derived` and `caches` stay `unknown` with reason `graph_index_disabled`, because the disabled index keeps its stored rows. Re-enable the index and repeat the call to finish the erase.
 
 `delete_file`, `move_file` and `delete_directory` refuse an enrolled Source with `SOURCE_ERASE_REQUIRED`.
 A trashed or moved copy would sit outside the copy census that lets an erase report `complete`.
 
 The host erasure policy is off by default.
-A local host enables it with `EXOMEM_SOURCE_ERASURE_POLICY`, for example `{"enabled_systems": ["archive"]}`.
+A local host enables it with `EVERMATTER_SOURCE_ERASURE_POLICY`, for example `{"enabled_systems": ["archive"]}`.
 On Cloud, the operator adds the cell to the platform chart value `cellctl.sourceErasureCellIds` when its owner enables erasure.
 cellctl then renders the policy into that cell only.
 

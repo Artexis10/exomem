@@ -3,7 +3,7 @@
 # The venv lives under the machine-local state root, keyed by the sidecar's lock
 # (see src/exomem/diarizer_sidecar.py). After it is built: set HUGGINGFACE_TOKEN
 # (and accept the conditions for pyannote/speaker-diarization-3.1 and
-# pyannote/segmentation-3.0 on huggingface.co), set EXOMEM_DIARIZE=1, and restart
+# pyannote/segmentation-3.0 on huggingface.co), set EVERMATTER_DIARIZE=1, and restart
 # the service.
 #
 # Usage:

@@ -69,6 +69,7 @@ JOB_FLAGS: dict[str, tuple[str, ...]] = {  # nosemgrep: ep-word-set -- closed ma
     "capture-metadata": ("recover", "originals_root"),
     "convert-originals": (),
     "fix": ("rebuild_embeddings",),
+    "path-variants": (),
     "reconcile": ("rebuild_graph",),
 }
 JOB_MODES = frozenset(JOB_FLAGS)

@@ -54,7 +54,7 @@ CONTEXT_FIELD = 10
 
 STUDIO = (
     "Deeper flows — supersede, compile, accept relations — live in the "
-    "Review Studio: exomem serve http, then /studio/."
+    "Review Studio: evermatter --transport http, then /studio/."
 )
 
 EMPTY_DOCTRINE = (
@@ -178,7 +178,7 @@ def context_lines(item: dict, context: dict, skin: Skin, budget: int) -> Text:
     )
     prose(
         "studio",
-        f"supersede or reconcile {skin.g('arrow')} exomem serve http, then /studio/",
+        f"supersede or reconcile {skin.g('arrow')} evermatter --transport http, then /studio/",
         style_value=skin.secondary,
     )
     return text

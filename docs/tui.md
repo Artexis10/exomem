@@ -1,6 +1,6 @@
 <!-- authority:non-specification -->
 
-# The Evermatter terminal UI (`exomem tui`)
+# The Evermatter terminal UI (`evermatter tui`)
 
 A persistent, keyboard-first surface over the same product commands the CLI,
 MCP, and REST doors expose. One long-lived process (no per-command Python
@@ -19,9 +19,9 @@ retrieval path and never writes vault files directly.
 The UI stack is an optional extra so lean and server installs never carry it:
 
     uv sync --extra tui              # source checkout
-    pip install 'exomem[tui]'        # package install
+    pip install 'evermatter[tui]'        # package install
 
-Without the extra, `exomem tui` prints a one-line install hint and exits
+Without the extra, `evermatter tui` prints a one-line install hint and exits
 non-zero. Snapshot/interaction tests additionally need the dev group:
 
     uv sync --extra tui --group tui-dev
@@ -32,8 +32,8 @@ with status 2.
 
 ## Launch
 
-    exomem tui                       # uses $EXOMEM_VAULT_PATH
-    exomem tui --vault /path/to/vault
+    evermatter tui                       # uses $EVERMATTER_VAULT_PATH
+    evermatter tui --vault /path/to/vault
 
 With no resolvable vault, first run opens.
 
@@ -120,12 +120,12 @@ Saving an insight (`w` on Ask, or Capture's insight kind) writes through
 - a new page without a qualifying typed relation needs an explicit relation
   disposition — the TUI runs the validate→commit draft flow and records your
   confirmation as a `reviewed_none` disposition with an audit reason. Connect
-  the note properly later via `exomem connect` or the Review Studio.
+  the note properly later via `evermatter connect` or the Review Studio.
 
 ## Local vs Hosted
 
 This TUI operates the local engine in-process. A Hosted/remote connection is
-not part of this surface today; `exomem doctor --profile remote` and the
+not part of this surface today; `evermatter doctor --profile remote` and the
 connector docs cover remote posture, and the Status screen shows local install
 provenance and the managed-service version when one is configured.
 
@@ -133,7 +133,7 @@ provenance and the managed-service version when one is configured.
 
 - Long-lived process, no file watcher: out-of-band edits (e.g. Obsidian)
   refresh lexical search via mtime checks, but the semantic sidecar drifts
-  until a server or `exomem index` pass. The Ask screen's refresh action
+  until a server or `evermatter index` pass. The Ask screen's refresh action
   (`u`) clears in-process caches.
 - Binary media import (`/upload`, `media.process`) is not in the TUI yet —
   capture text, or use adoption for markdown folders.
@@ -145,11 +145,11 @@ provenance and the managed-service version when one is configured.
 
 ## Troubleshooting
 
-- `exomem tui` exits 2 with "needs an interactive terminal": stdin/stdout is
+- `evermatter tui` exits 2 with "needs an interactive terminal": stdin/stdout is
   piped or redirected — run it in a real terminal.
 - Install hint on launch: the `tui` extra is missing — `uv sync --extra tui`.
 - "partial results — still warming": the background warm hasn't finished;
-  results are lexical-only until it does. `exomem warm` pre-loads models
+  results are lexical-only until it does. `evermatter warm` pre-loads models
   explicitly.
 - Ask shows skipped lanes on a lean install: expected — without the
   `embeddings` extra retrieval runs keyword/BM25 only, and the TUI disables

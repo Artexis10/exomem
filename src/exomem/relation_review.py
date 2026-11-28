@@ -195,13 +195,30 @@ class ReviewFieldCheck:
     ignored: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, list[str]]:
-        found = {"missing": self.missing, "ignored": self.ignored}
+        found = {"missing": self.missing, "ignored": _named_for_the_caller(self.ignored)}
         return {name: list(fields) for name, fields in found.items() if fields}
 
 
+def _named_for_the_caller(ignored: tuple[str, ...]) -> tuple[str, ...]:
+    """The fields the caller sent: a typed tool sends the whole review as `unlinked_reason`, so a
+    preview names that and not the grouped fields the tool filled in."""
+    return ("unlinked_reason",) if ignored and semantic_contract.spells_unlinked_reason() else ignored
+
+
 def ignored_review_fields_warning(ignored: tuple[str, ...]) -> str:
-    """The one warning a commit returns when it drops the review fields of a page that needs none."""
+    """The one warning a commit returns when it drops the review fields of a page that needs none.
+
+    A typed tool takes the whole decision as `unlinked_reason`, so it names that and not the
+    grouped fields the caller never sent.
+    """
+    if semantic_contract.spells_unlinked_reason():
+        return "No link review applies to this page, so the unlinked reason was not recorded."
     return f"This page needs no relation review, so these fields were ignored: {', '.join(ignored)}."
+
+
+def review_field_warnings(ignored: tuple[str, ...]) -> list[str]:
+    """The warnings a commit owes for the review fields it dropped: none, or the one above."""
+    return [ignored_review_fields_warning(ignored)] if ignored else []
 
 
 def review_applies(disposition_kind: str) -> bool:
@@ -3450,6 +3467,58 @@ StructuralImages = tuple[
 ]
 
 
+def _occupied_destination_refusal(
+    root: Path,
+    destination_path: Path,
+    normalized: str,
+    identity: str,
+    *,
+    artifact: RelationReviewRecord | None,
+) -> RelationReviewError | None:
+    """The refusal that `_attempt` gives a destination holding other bytes, before any corpus.
+
+    Only a destination whose text is exactly the draft can be this draft's own committed page, so
+    a file whose bytes differ is refused whatever the corpus holds. Which refusal applies depends
+    on one more fact: whether a page holds the draft identity. The identity census of the corpus
+    the server already holds answers that; when it is not current, this returns None and the
+    corpus decides.
+    """
+    try:
+        # Read as the corpus reads a page: the store's bytes when the store owns it, else the disk.
+        held = vault.read_bytes_without_pinning(destination_path, root)
+    except OSError:
+        return None
+    if held == normalized.encode("utf-8"):
+        return None
+    id_paths = semantic_contract.current_identity_paths(root, identity)
+    if id_paths is None:
+        return None
+    return _occupancy_refusal(
+        id_paths, artifact=artifact, destination_exists=True, exact_destination=False
+    )
+
+
+def _occupancy_refusal(
+    id_paths: tuple[str, ...],
+    *,
+    artifact: RelationReviewRecord | None,
+    destination_exists: bool,
+    exact_destination: bool,
+) -> RelationReviewError | None:
+    """Which draft refusal an occupied identity or destination gets; the one rule both checks apply."""
+    if exact_destination:
+        return None
+    if id_paths:
+        return RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already in use")
+    if artifact is not None and destination_exists:
+        return RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")
+    if destination_exists:
+        return RelationReviewError(
+            "DRAFT_DESTINATION_OCCUPIED", "draft destination is already occupied"
+        )
+    return None
+
+
 def _attempt(
     root: Path,
     *,
@@ -3538,12 +3607,6 @@ def _attempt(
         corpus_registry, corpus_language = semantic_contract.corpus_registry_overrides(
             root, registry, language
         )
-        before, before_census = semantic_contract.build_corpus_context_with_census(
-            root,
-            registry=corpus_registry,
-            language_registry=corpus_language,
-            status_basis=status_basis,
-        )
         candidate = semantic_contract.build_page_state(
             root,
             destination,
@@ -3559,6 +3622,19 @@ def _attempt(
     fingerprint = semantic_contract.review_content_fingerprint(identity, normalized)
     if candidate.review_fingerprint != fingerprint:
         raise RelationReviewError("INVALID_DRAFT_SOURCE", "draft fingerprint is inconsistent")
+    if reused is None:
+        if destination_exists:
+            occupied = _occupied_destination_refusal(
+                root, destination_path, normalized, identity, artifact=artifact
+            )
+            if occupied is not None:
+                raise occupied
+        before, before_census = semantic_contract.build_corpus_context_with_census(
+            root,
+            registry=corpus_registry,
+            language_registry=corpus_language,
+            status_basis=status_basis,
+        )
     id_paths = before.identity_census.paths_by_identity.get(identity, ())
     exact_destination = False
     if destination_exists and id_paths == (destination,):
@@ -3569,14 +3645,14 @@ def _attempt(
             and state.identity == identity
             and state.source_hash == vault.content_hash(normalized)
         )
-    if id_paths and not exact_destination:
-        raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already in use")
-    if artifact is not None and destination_exists and not exact_destination:
-        raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")
-    if destination_exists and not exact_destination:
-        raise RelationReviewError(
-            "DRAFT_DESTINATION_OCCUPIED", "draft destination is already occupied"
-        )
+    refusal = _occupancy_refusal(
+        id_paths,
+        artifact=artifact,
+        destination_exists=destination_exists,
+        exact_destination=exact_destination,
+    )
+    if refusal is not None:
+        raise refusal
     # `with_candidate` is a pure function of the two inputs a reuse carries, and of the two that the
     # structural evaluation judged: the same corpus object and an equal candidate.
     if reused is not None:

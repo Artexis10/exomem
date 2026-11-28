@@ -61,6 +61,7 @@ from typing import Any, NamedTuple, NoReturn
 
 from . import (
     activation_conventions,
+    build_record,
     context_roles,
     freshness,
     lifecycle_statuses,
@@ -270,9 +271,37 @@ CONTINUITY_THREAD_MAX_NS = 7 * 24 * 3600 * 1_000_000_000
 
 READY = "ready"
 
+#: The longest a recall waits for a fresh process's in-memory warm-up (the identity inventory, the
+#: recall seed) before it answers warming. A small vault warms within it; a mature one keeps warming in
+#: the background and the turn abstains as before.
+FIRST_TURN_WARM_WAIT_SECONDS = 10.0
+
+
+def first_turn_warm_wait_seconds() -> float:
+    """How long this recall may wait for the warm-up, all waits together.
+
+    None without a request budget: the boot warm, background passes and the CLI never wait. With one,
+    the cap, at most a quarter of the budget, so a short door budget keeps most of its time, and at
+    most half of what remains, so the recall the wait makes possible still has time to run.
+    """
+    from . import request_budget
+
+    budget = request_budget.current()
+    if budget is None:
+        return 0.0
+    return max(0.0, min(FIRST_TURN_WARM_WAIT_SECONDS, budget.seconds / 4, budget.remaining() / 2))
+
+
+def background_build_state(vault_root: Path) -> dict[str, object]:
+    """The state of the build in a vault's background slot, for a warming diagnostic."""
+    return _BUILD_RECORD.state(Path(vault_root).absolute(), ready=False)
+
+
 _CACHE_LOCK = threading.Lock()
 _PACKET_CACHE: OrderedDict[tuple, tuple[dict[str, Any], tuple[str, str]]] = OrderedDict()
 _BUILDS: dict[Path, threading.Thread] = {}
+#: When the build in a vault's slot started, which job it runs, and how the last ones failed.
+_BUILD_RECORD = build_record.BuildRecord()
 _BUILD_SHUTDOWNS: dict[Path, threading.Event] = {}
 #: One inline-build lock per vault root. The managed path single-flights through
 #: `_BUILDS` and a background thread; the unmanaged path has no thread to join,
@@ -1091,8 +1120,12 @@ def ensure_index(
     recall_checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
     visible: Callable[[str], bool] | None = None,
     registry_visible: bool = True,
+    warm_wait: Callable[[], float] | None = None,
 ) -> tuple[str, working_set_index.WorkingSetIndex | None, bool]:
     """Return a usable, current index — or say why there is not one yet.
+
+    `warm_wait` gives the seconds a cold process may wait for its identity inventory before it
+    answers warming. Only the recall turn passes one; it is called only when the inventory is cold.
 
     The third element is `index_stale`: True when the catalogue is behind the
     request's freshness key and this runtime could not bring it forward inside
@@ -1121,15 +1154,21 @@ def ensure_index(
         if not reserved_paths.identity_catalogue_ready(root):
             # A cold private-identity inventory is built by a whole-vault walk
             # under the all-domain identity gate, and every governed read below
-            # needs it. An interactive turn abstains and the walk runs in the
-            # background.
+            # needs it. The walk runs in the background. A caller that passes
+            # `warm_wait` (the recall turn) waits that long for it, since a small
+            # vault warms in seconds; every other caller abstains at once.
             reserved_paths.schedule_identity_catalogue_warm(root)
-            return WARMING, None, False
+            if warm_wait is None or not reserved_paths.await_identity_catalogue_warm(root, warm_wait()):
+                build_record.note_warming(
+                    build_record.WAITING_ON_IDENTITY_INVENTORY, reserved_paths.identity_catalogue_warm_state(root)
+                )
+                return WARMING, None, False
     if not index.readable():
         return UNAVAILABLE, None, False
     if not index.anchors():
         if _managed():
             _schedule_build(root, freshness_stamp=freshness_stamp)
+            build_record.note_warming(build_record.WAITING_ON_ACTIVATION_INDEX, background_build_state(root))
             return WARMING, None, False
         with _inline_lock(root.absolute()):
             # Re-check under the lock: the thread that held it may have built the
@@ -1316,17 +1355,38 @@ def pin_lexical_checkpoint(
     (`defer_index_refreshes`), because a catalogue that converged mid-request
     would leave later lanes reading a checkpoint that is no longer current.
     The release decision on each hit stays per request, on the live file.
+
+    Inside `request_catalogue_view` the decided checkpoint also binds the
+    request's read view, and a view the request already holds is the
+    catalogue state the decision compares against.
     """
     request = snapshot.recall_checkpoint("kb")
     from . import lexstore
 
     # A store-mode vault's rows are current at the request's snapshot: no published lag to bridge.
-    if visible is None or lexstore.store_rows_serve(vault_root):
+    if lexstore.store_rows_serve(vault_root):
+        return request
+    decided = _decide_lexical_checkpoint(vault_root, snapshot, visible, request)
+    if _retains_lexical_catalogue(vault_root):
+        lexstore.retain_request_view(vault_root, decided)
+    return decided
+
+
+def _decide_lexical_checkpoint(
+    vault_root: Path, snapshot, visible: Callable[[str], bool] | None,
+    request: freshness.RecallFreshnessCheckpoint,
+) -> freshness.RecallFreshnessCheckpoint:
+    """`pin_lexical_checkpoint`'s decision for a vault whose catalogue is file-built."""
+    from . import lexstore
+
+    if visible is None:
         return request
     from .governance import egress
 
     try:
-        published = lexstore.get_store(vault_root).published_recall_checkpoint("kb")
+        published = lexstore.request_view_checkpoint(vault_root)
+        if published is None:
+            published = lexstore.get_store(vault_root).published_recall_checkpoint("kb")
         # The catalogue's own comparison of what a checkpoint serves: corpus and admission policy.
         if published is None or (
             lexstore.checkpoint_state(published) == lexstore.checkpoint_state(request)
@@ -1343,6 +1403,37 @@ def pin_lexical_checkpoint(
     return published
 
 
+def _retains_lexical_catalogue(vault_root: Path) -> bool:
+    """Whether this request's lexical reads retain the file-built catalogue's SQL snapshot.
+
+    A managed reader with event indexes on and the SQL backend does. The `python` backend reads no catalogue,
+    and a store-mode vault's snapshot is the request's selection already.
+    """
+    from . import lexstore
+
+    return (
+        _managed() and freshness.event_indexes_enabled() and lexstore.backend() != "python"
+        and not lexstore.store_rows_serve(vault_root)
+    )
+
+
+@contextmanager
+def request_catalogue_view(vault_root: Path, snapshot) -> Iterator[None]:
+    """Let the request's exact catalogue reads read one snapshot at its lexical checkpoint.
+
+    Another write can publish to the catalogue while the request runs. A read at the request's checkpoint
+    would then find the catalogue past it and answer stale, so a lane would lose what it holds. The view binds
+    only at the request's checkpoint (`lexstore.retain_request_view`); `pin_lexical_checkpoint` binds it at the
+    pinned one when this first bind found another state. A lag the view showed is repaired after it closes.
+    """
+    from . import lexstore
+
+    with lexstore.request_catalog_view(vault_root, lag_dispatch=_defer_lexical_repair):
+        if snapshot is not None and _retains_lexical_catalogue(vault_root):
+            lexstore.retain_request_view(vault_root, snapshot.lexical_checkpoint("kb"))
+        yield
+
+
 @contextmanager
 def lexical_selection_scope(
     vault_root: Path, recall_checkpoint: freshness.RecallFreshnessCheckpoint | None,
@@ -1351,18 +1442,13 @@ def lexical_selection_scope(
     """Retain lexical reads, bridging only changes withheld from the current caller."""
     from . import lexstore
 
-    if (
-        recall_checkpoint is None or not _managed() or not freshness.event_indexes_enabled()
-        or lexstore.backend() == "python"
-        # The store's snapshot is the request's selection: no file-built catalogue to retain.
-        or lexstore.store_rows_serve(vault_root)
-    ):
+    if recall_checkpoint is None or not _retains_lexical_catalogue(vault_root):
         yield recall_checkpoint
         return
     with (
         lexstore.admitted_catalog_scope(vault_root),
         lexstore.catalog_selection_scope(
-            vault_root, lag_dispatch=_defer_lexical_repair,
+            vault_root, lag_dispatch=_defer_lexical_repair, borrow_request_view=True,
         ) as selection,
     ):
         captured = None if selection is None else selection.checkpoints.get("kb")
@@ -2682,10 +2768,15 @@ def _schedule_build(
                     _warm_index(root, freshness_stamp, stop)
                 else:
                     job()
+            _BUILD_RECORD.succeeded(root, job=label)
         except foreground_priority.BulkCancelled:
-            pass
-        except Exception:  # noqa: BLE001 - the optional stage stays soft-failing
+            _BUILD_RECORD.ended(root)
+        except Exception as error:  # noqa: BLE001 - the optional stage stays soft-failing
+            _BUILD_RECORD.failed(root, error, job=label)
             log.warning("%s background build failed", label, exc_info=True)
+        except BaseException:
+            _BUILD_RECORD.ended(root)
+            raise
         finally:
             with _CACHE_LOCK:
                 _BUILDS.pop(root, None)
@@ -2697,9 +2788,12 @@ def _schedule_build(
         if (stop is not None and stop.is_set()) or root in _BUILDS:
             return
         _BUILDS[root] = thread
+        # Recorded when the slot is taken, so a reader never sees a scheduled build as not started.
+        _BUILD_RECORD.started(root, job=label)
         try:
             thread.start()
-        except Exception:  # noqa: BLE001 - a thread-start failure cannot fail a read
+        except Exception as error:  # noqa: BLE001 - a thread-start failure cannot fail a read
+            _BUILD_RECORD.failed(root, error, job=label)
             _BUILDS.pop(root, None)
             log.warning("%s background build could not start", label, exc_info=True)
 

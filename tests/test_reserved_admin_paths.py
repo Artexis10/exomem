@@ -257,6 +257,7 @@ _PATTERN_SAMPLES = (
     "..review-state.json.abc123_4.tmp",
     "..due-state-candidates.json.abc123_4.tmp",
     "..ownership-rotation.json.abc123_4.tmp",
+    "..app-update-notices.json.abc123_4.tmp",
     f".lexical.sqlite.rebuild-{_HEX32}.tmp-shm",
     ".lexical-staged-0123456789abcdef.sqlite-wal",
     f".lexical.sqlite-shm.quarantine-{_HEX32}",
@@ -337,6 +338,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         deferred_index,
         due_state,
         epistemic_graph,
+        face_store,
         graph_sync,
         index_paths,
         lexstore,
@@ -345,6 +347,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         memory_refs,
         ownership_rotation,
         procedure_approval,
+        release_notes,
         review_state,
         served_context,
         source_custody,
@@ -357,6 +360,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
     from exomem.governance import policy as governance_policy
 
     expected = {
+        "app-update-notices",
         "authorization-projections",
         "batch-workspace",
         "brief-watermarks",
@@ -394,6 +398,9 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "lexical-store",
         "lexical-staged",
         "lexical-staged-lock",
+        "face-deletion",
+        "face-index",
+        "face-people",
         "maintenance-jobs-store",
         "media-jobs-store",
         "media-previews",
@@ -447,6 +454,9 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         (media_jobs.worker_lock_path(root), "media-jobs-store"),
         (state_paths.vault_state_dir(root) / media_previews.STORE / "aa" / ("a" * 64 + ".json"), "media-previews"),
         (voice_profiles.voice_profiles_path(root), "voice-profile-store"),
+        (face_store.index_path(root), "face-index"),
+        (face_store.people_path(root), "face-people"),
+        (face_store.deletion_receipt_path(root), "face-deletion"),
         (procedure_approval.key_path(root), "procedure-approval-key"),
         (
             procedure_approval.entry_path(
@@ -461,6 +471,8 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
             "graph-receipts",
         ),
         (review_state.state_path(root), "review-state"),
+        (release_notes.state_path(root), "app-update-notices"),
+        (release_notes.lock_path(root), "app-update-notices"),
         (served_context.sidecar_path(root), "served-context"),
         (brief_watermarks.sidecar_path(root), "brief-watermarks"),
         (

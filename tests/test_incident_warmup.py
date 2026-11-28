@@ -130,10 +130,10 @@ def test_the_loopback_server_serves_a_declared_method_only_to_a_sign_in_that_act
     """The Claude actor reads what this server serves. A sign-in that is a separate principal gets no task
     context at all, so a unit on it would grade the product on a method that no owner is ever denied."""
     case = incidents.load_cases(["existing-workflow"])[0]
-    incidents.seed_unit(case, REPO_ROOT, tmp_path)
+    _seeded, seed, _work = incidents.seed_unit(case, REPO_ROOT, tmp_path)
     assert case["remote_owner"] is True
     state, items = served_methods(tmp_path, remote_owner=True, turn=case["prompt"])
-    # `ready`, not `partial`: a long-lived vault has its indexes built, so the turn is not graded on a
-    # link graph that a fresh seed never built.
-    assert state == "ready" and len(items) == 1
+    # The owner can read the declared method while startup still adopts the graph for task links.
+    assert state in {"ready", "partial"}
+    assert [item["source_ref"] for item in items] == [seed["collections"][0]["method_page"]]
     assert served_methods(tmp_path, remote_owner=False, turn=case["prompt"]) == ("unavailable", [])

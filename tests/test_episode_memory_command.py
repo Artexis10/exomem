@@ -65,6 +65,7 @@ RESULT_KEYS = {
     "recovery",
     "ledger",
     "about_skipped",
+    "sensitivity",
 }
 
 
@@ -1805,9 +1806,7 @@ def test_the_action_catalog_reaches_the_tool_from_capture() -> None:
 def test_the_scaffold_skill_routes_conversation_recaps_to_the_tool() -> None:
     scaffold = Path(commands.__file__).parent / "_scaffold" / "_Schema"
     skill = (scaffold / "SKILL.md").read_text(encoding="utf-8")
-    routing = (scaffold / "references" / "operation-routing.md").read_text(encoding="utf-8")
     engagement = (scaffold / "references" / "engagement.md").read_text(encoding="utf-8")
 
     assert "`save_episode`" in skill and "`episodes.*`" in skill
-    assert "**save_episode** and **inspect_memory**" in routing
     assert "save_episode" in engagement and "episode_due" in engagement

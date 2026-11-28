@@ -70,18 +70,7 @@ $PyvenvCfg = Join-Path (Split-Path -Parent (Split-Path -Parent $VenvPy)) "pyvenv
 
 function Get-DotenvValue {
     param([string]$Name)
-    $envPath = Join-Path $RepoRoot ".env"
-    if (-not (Test-Path $envPath)) { return $null }
-    foreach ($line in Get-Content $envPath) {
-        if ($line -match "^\s*$([Regex]::Escape($Name))\s*=\s*(.*)\s*$") {
-            $value = $Matches[1].Trim()
-            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
-                $value = $value.Substring(1, $value.Length - 2)
-            }
-            return $value
-        }
-    }
-    return $null
+    return Get-ExomemDotenvValue -RepoRoot $RepoRoot -Name $Name
 }
 
 function Invoke-DoctorGate {
@@ -89,7 +78,7 @@ function Invoke-DoctorGate {
     $args = @("-m", "exomem", "doctor", "--profile", $Profile)
     $vault = Get-DotenvValue "EXOMEM_VAULT_PATH"
     if ($vault) { $args += @("--vault", $vault) }
-    Write-Host "Preflight: exomem doctor --profile $Profile..."
+    Write-Host "Preflight: evermatter doctor --profile $Profile..."
     & $VenvPy @args
     if ($LASTEXITCODE -ne 0) {
         throw "Doctor preflight failed for profile '$Profile'. Install the missing extras (for example: uv sync --frozen --extra embeddings) before restarting."

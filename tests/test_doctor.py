@@ -570,26 +570,22 @@ def test_doctor_cli_loads_cwd_dotenv_and_promotes_loaded_legacy_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("EXOMEM_PROFILE", raising=False)
+    # The loader writes the process environment: have monkeypatch remove what it writes.
+    monkeypatch.setenv("EXOMEM_PROFILE", "removed-below")
+    monkeypatch.delenv("EXOMEM_PROFILE")
     monkeypatch.delenv("KB_MCP_PROFILE", raising=False)
-    calls: list[tuple[object, bool]] = []
+    (tmp_path / ".env").write_text("KB_MCP_PROFILE=remote\n", encoding="utf-8")
     seen: dict[str, str | None] = {}
-
-    def load_env(*, dotenv_path=None, override: bool) -> None:
-        calls.append((dotenv_path, override))
-        monkeypatch.setenv("KB_MCP_PROFILE", "remote")
 
     def fake_doctor(**_kwargs):
         seen["profile"] = os.environ.get("EXOMEM_PROFILE")
         return doctor_module.DoctorReport(profile="remote", checks=[])
 
-    monkeypatch.setattr("dotenv.load_dotenv", load_env)
     monkeypatch.setattr(doctor_module, "doctor", fake_doctor)
 
     code, _out, err = _run(["doctor", "--json"], capsys)
 
     assert code == 0, err
-    assert calls == [(tmp_path / ".env", True)]
     assert seen == {"profile": "remote"}
 
 
@@ -1113,7 +1109,7 @@ def test_orphan_remediation_names_the_command_that_actually_reclaims(
     assert "--reconcile" in check.remediation
     # Order matters as much as the verb: reclaiming under a live rebuild would
     # delete a temporary that is still being written.
-    assert "Stop the exomem service" in check.remediation
+    assert "Stop the Evermatter service" in check.remediation
 
 
 def test_a_fresh_rebuild_temporary_is_not_reported_as_an_orphan(
@@ -1453,7 +1449,7 @@ def test_runtime_process_check_recommends_a_lever_the_reader_can_pull(
     check = doctor_module._check_runtime_processes()
 
     assert check is not None
-    assert "exomem mode quiet" in check.message
+    assert "evermatter mode quiet" in check.message
     assert check.details["mode"] == "performance"
     # Service mode may still be mentioned, but never without its precondition:
     # naming it bare is what sent a laptop user after a public hostname.
@@ -1484,7 +1480,7 @@ def test_runtime_process_check_does_not_recommend_the_mode_already_in_use(
     check = doctor_module._check_runtime_processes()
 
     assert check is not None
-    assert "exomem mode quiet" not in check.message
+    assert "evermatter mode quiet" not in check.message
     assert "already" in check.message
     assert check.details["mode"] == "quiet"
 

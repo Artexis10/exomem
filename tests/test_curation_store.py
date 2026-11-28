@@ -50,6 +50,26 @@ def test_forward_plan_is_create_only_and_collision_refuses(vault: Path) -> None:
         store._create_plan_at(store.plan_path(stored["run_id"]), changed)
 
 
+def test_a_seal_that_fails_for_another_reason_is_not_reported_as_a_collision(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused write reported as a collision hides its cause, so the agent retries for nothing."""
+    from exomem import curation
+
+    def refused(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("a store change names no file")
+
+    monkeypatch.setattr(curation, "batch_atomic_write", refused)
+
+    with pytest.raises(curation.CurationError) as refusal:
+        curation.CurationStore(vault).create_forward(
+            _stored_plan(), binding_manifest=[], registry_ids={}
+        )
+
+    assert refusal.value.code == "CURATION_STORE_WRITE_FAILED"
+    assert "a store change names no file" in refusal.value.reason
+
+
 def test_store_refuses_symlinked_run_ancestors(vault: Path, tmp_path: Path) -> None:
     from exomem import curation
 
@@ -267,3 +287,28 @@ def test_forged_committed_receipt_without_matching_witness_is_refused(vault: Pat
 
     assert state["phase"] == "blocked"
     assert state["error_code"] == "CURATION_OUTCOME_UNCERTAIN"
+
+
+def test_a_target_outside_the_vault_is_refused_without_the_host_path(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The curation reason reaches the agent, so it must not carry the host's absolute path."""
+    from exomem import curation
+
+    runs = vault / "Knowledge Base" / "_Governance" / "curation" / "runs"
+    runs.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "elsewhere-host-dir"
+    outside.mkdir()
+    os.symlink(outside, runs, target_is_directory=True)
+    # The store's own symlink check refuses first; skip it to reach the batch check.
+    monkeypatch.setattr(curation.CurationStore, "_assert_safe", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(curation.CurationError) as refusal:
+        curation.CurationStore(vault).create_forward(
+            _stored_plan(), binding_manifest=[], registry_ids={}
+        )
+
+    assert refusal.value.code == "CURATION_STORE_WRITE_FAILED"
+    assert "WRITE_REFUSED" in refusal.value.reason
+    assert str(tmp_path) not in refusal.value.reason
+    assert str(tmp_path) not in str(refusal.value)

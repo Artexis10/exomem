@@ -10,6 +10,7 @@ import tempfile
 import tomllib
 import zipfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import jsonschema
 
@@ -23,13 +24,23 @@ _SCHEMA_BASE = "https://agent-plugins.org/schemas/1.0.0/"
 # through the repository marketplace. The connector edition carries the same hooks and
 # skills without a server, for an account that already connects Evermatter itself
 # (a self-hosted server or a separately added connector); a bundled server would add a
-# second, unauthenticated connection to the wrong account there.
+# second, unauthenticated connection to the wrong account there. The server edition is a
+# template: hooks, skills and a server at the placeholder origin its definition names (a
+# reserved `.invalid` host), which each self-hosted server replaces with its own before
+# serving it (`self_hosted_plugin`).
 _EDITIONS = {
     "claude": ("claude", False, True),
     "claude-hooks": ("claude", True, True),
     "claude-connector-hooks": ("claude", True, False),
+    "claude-server": ("claude", True, True),
     "openai": ("openai", False, True),
 }
+# An edition whose definition says `packaged` ships inside the Python package, because
+# the wheel, the sdist and the container images take only `src/` as input. It is outside
+# the marketplace, and it keeps the release placeholder in its skills and manifest so a
+# release cut does not change it; the installed server fills in its own release.
+_PACKAGED_SOURCE = Path("src/exomem/_plugins")
+PACKAGED_EDITION_DIR = Path(__file__).parent / "_plugins"
 # Claude's directory policy fixes this closed set of admitted file types; a licence,
 # readme and .gitignore are admitted by name. ICO is omitted: the published checklist
 # holds it for a reviewer although the portal admits it.
@@ -53,6 +64,19 @@ _CLAUDE_PLUGIN_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 _MUTABLE_EXOMEM_INSTALL = re.compile(
     r"(?:evermatter|exomem)@latest|(?:uvx?|pipx?|pip3?)\s+(?:(?:tool\s+)?install\s+)?[\"']?(?:evermatter|exomem)\b(?![\w=@-])"
 )  # nosemgrep: ep-word-search, ep-lexical-intent -- closed set of pip/uv installer names for a submission lint, not a vocabulary.
+
+
+def server_plugin_name(origin: str) -> str:
+    """The plugin name for one self-hosted server, stable across uploads of its plugin."""
+    host = urlsplit(origin).netloc.lower()
+    # Plugin names admit lowercase letters, digits and hyphens: this folds a host's other
+    # characters (dots, a port's colon) into hyphens. It checks shape, not meaning.
+    slug = re.sub(r"[^a-z0-9]+", "-", host).strip("-")
+    name = f"evermatter-{slug}"
+    if len(name) <= 64:
+        return name
+    # A long host keeps a digest, so two hosts that share a prefix keep distinct names.
+    return f"{name[:55].rstrip('-')}-{_sha256(host.encode())[:8]}"
 
 
 def _definition(root: Path) -> dict:
@@ -205,20 +229,29 @@ def _claude_hooks(root: Path, target: Path) -> None:
     )
 
 
-def build_packages(root: Path, output: Path | None = None) -> dict:
+def build_packages(
+    root: Path, output: Path | None = None, package_output: Path | None = None
+) -> dict:
     root = Path(root)
     definition = _definition(root)
     identity = release_identity(root)
     workflow_skills.validate_skill_contract()
     destination = Path(output) if output is not None else root / "plugins/cloud/generated"
     destination.mkdir(parents=True, exist_ok=True)
+    if package_output is None:
+        package_output = root / _PACKAGED_SOURCE if output is None else destination / "package"
+    package_output = Path(package_output)
+    package_output.mkdir(parents=True, exist_ok=True)
+    staging = tempfile.TemporaryDirectory(prefix="exomem-packaged-edition-")
     # The repository's own marketplace lists the hooked Claude edition under this name.
     repository = definition["repository"].removeprefix("https://github.com/")
     full_install = f"/plugin install {definition['name']} --marketplace {repository}"
     for edition, (provider, hooked, bundles_server) in _EDITIONS.items():
         # An edition listed as its own marketplace plugin names itself in the definition.
         identity_override = definition.get("edition_identities", {}).get(edition, {})
-        target = destination / edition
+        packaged = bool(identity_override.get("packaged"))
+        release = package_skills.RELEASE_PLACEHOLDER if packaged else None
+        target = (Path(staging.name) if packaged else destination) / edition
         if target.exists():
             shutil.rmtree(target)
         target.mkdir()
@@ -227,7 +260,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             workflow_skills.CORE_SKILL_NAME,
             *(str(item["name"]) for item in workflow_skills.list_skills()),
         ):
-            for relative, content in package_skills.skill_payload(name).items():
+            for relative, content in package_skills.skill_payload(name, release=release).items():
                 path = skills / name / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(content, encoding="utf-8", newline="\n")
@@ -250,7 +283,9 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             + f"{definition['description']}\n\n"
             "## Getting started\n\n"
             + (
-                "Install the plugin and connect your Evermatter account. Check the account "
+                f"{identity_override['getting_started']} "
+                if identity_override.get("getting_started")
+                else "Install the plugin and connect your Evermatter account. Check the account "
                 "shown on the sign-in page before approving access. "
                 if bundles_server
                 else "Connect Evermatter to your assistant first, as a connector or a custom "
@@ -310,12 +345,18 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
         if hooked:
             _claude_hooks(root, target)
             with (target / "README.md").open("a", encoding="utf-8", newline="\n") as stream:
-                stream.write(
-                    "\n## Claude lifecycle hooks\n\n"
-                    "To install this plugin in Claude Code, run "
+                # A packaged edition is outside the marketplace, so it has no install line.
+                install = (
+                    ""
+                    if packaged
+                    else "To install this plugin in Claude Code, run "
                     f"`/plugin install {identity_override.get('name', definition['name'])} "
                     f"--marketplace {repository}`. "
-                    "On supported Cowork/Claude Code surfaces, trust the plugin's command "
+                )
+                stream.write(
+                    "\n## Claude lifecycle hooks\n\n"
+                    + install
+                    + "On supported Cowork/Claude Code surfaces, trust the plugin's command "
                     "hooks through the normal client approval flow. They invoke canonical "
                     "Python scripts directly and require a real `python3` executable on "
                     "the execution host; Python dependencies are not installed "
@@ -337,7 +378,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 "name": identity_override.get("name", definition["name"]),
                 "displayName": display_name,
                 "description": description,
-                "version": identity["version"],
+                "version": release or identity["version"],
                 "author": definition["author"],
                 "homepage": definition["homepage"],
                 "repository": definition["repository"],
@@ -355,11 +396,12 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             path.write_bytes(_json_bytes(manifest))
             # The Cloud plugin keeps the server key `exomem` for now: renaming it signs every
             # Claude Code install out once, and that move is the operator's decision (tasks 3.1, 3.4).
+            # A new edition names its own key, which signs nobody out.
             if bundles_server:
+                server_key = identity_override.get("server_key", "exomem")
+                resource = identity_override.get("resource", definition["resource"])
                 (target / ".mcp.json").write_bytes(
-                    _json_bytes(
-                        {"mcpServers": {"exomem": {"type": "http", "url": definition["resource"]}}}
-                    )
+                    _json_bytes({"mcpServers": {server_key: {"type": "http", "url": resource}}})
                 )
             if not hooked:
                 _validate_claude_directory(target)
@@ -424,7 +466,8 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 )
             )
             _validate_openai(root, target)
-        _zip_tree(target, destination / f"{edition}.zip")
+        _zip_tree(target, (package_output if packaged else destination) / f"{edition}.zip")
+    staging.cleanup()
     files = {
         path.relative_to(destination).as_posix(): _sha256(path.read_bytes())
         for path in sorted(destination.rglob("*"))
@@ -439,10 +482,14 @@ def check_packages(root: Path, output: Path | None = None) -> dict:
     root = Path(root)
     actual = Path(output) if output is not None else root / "plugins/cloud/generated"
     issues: list[str] = []
+    # A custom output keeps packaged editions in its `package/` folder, which the tree
+    # comparison covers; the repository keeps them in the package source.
+    actual_package = root / _PACKAGED_SOURCE if output is None else None
     with tempfile.TemporaryDirectory(prefix="exomem-cloud-check-") as temporary:
-        expected = Path(temporary)
+        expected = Path(temporary) / "generated"
+        expected_package = Path(temporary) / "package"
         try:
-            build_packages(root, expected)
+            build_packages(root, expected, expected_package if actual_package else None)
         except FileNotFoundError as error:
             name = Path(error.filename).name if error.filename else "build resource"
             return {"ok": False, "issues": [f"missing input: {name}"]}
@@ -473,4 +520,15 @@ def check_packages(root: Path, output: Path | None = None) -> dict:
                 issues.append(f"extra: {name}")
             elif actual_files[name].read_bytes() != expected_files[name].read_bytes():
                 issues.append(f"drift: {name}")
+        packaged = sorted(
+            edition
+            for edition, identity in _definition(root).get("edition_identities", {}).items()
+            if identity.get("packaged")
+        )
+        for edition in packaged if actual_package else ():
+            built = actual_package / f"{edition}.zip"
+            if not built.is_file():
+                issues.append(f"missing: {built.relative_to(root).as_posix()}")
+            elif built.read_bytes() != (expected_package / f"{edition}.zip").read_bytes():
+                issues.append(f"drift: {built.relative_to(root).as_posix()}")
     return {"ok": not issues, "issues": issues}

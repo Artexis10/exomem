@@ -1,82 +1,174 @@
-# Page Types
+# Page types
 
-The page types in the Knowledge Base. Each has a required location, naming
-convention, and content shape. See `frontmatter.md` for the YAML spec per type.
+Each page type has a location, a naming rule, the fields it carries and a body shape.
+This file also defines what each frontmatter field means. You never write YAML: the typed
+tool for the write (`create_note`, `save_source`, `edit_note`) builds the frontmatter, and
+the server fills the generated fields.
 
-For every active compiled-note type below, the fenced content shape includes a
-canonical `## Observations` example. The fence keeps documentation examples from
-becoming indexable units. Observation category is open vocabulary, page `tags`
-remain secondary retrieval labels, and a valid non-empty block headed by a
-governed rich kind is the alternative when richer semantics are intended.
+The note types and statuses are registries, not lists in this file. Read the live set with
+`inspect_memory(operation="schema.inspect", arguments={"subject": "note-types"})` and
+`arguments={"subject": "statuses"}`. A vault adds its own types in its overlay.
+`read_instructions(topic="create_note")` lists the call's fields.
 
-Each `## Relations` line below shows one registered relation that often fits that
-page type; it is an example, not a default. State the meaning the note actually
-has with the registered relation that fits (resolve it with
-`inspect_memory(operation="connections.resolve_relation")`). When none fits, propose a
-new relation type; a plain link is the last resort. A write that adds the generic
-relation is refused. Write no edge when no meaning is known.
+Every compiled-note body shape below shows a canonical `## Observations` example. The fence
+keeps documentation examples from becoming indexable units. Observation category is open
+vocabulary, page `tags` remain secondary retrieval labels, and a valid non-empty block headed
+by a governed rich kind is the alternative when richer semantics are intended.
+
+Each `## Relations` line below shows one registered relation that often fits that page type.
+It is an example, not a default. [Vocabulary](vocabulary.md) and [writing](writing.md) say how
+to choose a relation, and when to write none.
+
+## Fields
+
+Every page carries the first group. The `Set by` column says who writes the value.
+
+| Field | Set by | Meaning |
+|---|---|---|
+| `exomem_id` | server | Immutable identity (a UUID). Legacy pages gain one only through an explicit id backfill |
+| `type` | you | A registered note type |
+| `title` | server, from your `title` | The display title. The canonical H1 repeats it, and it does not depend on the file name |
+| `status` | you | Lifecycle state, from the statuses registry. See Status below |
+| `created`, `updated` | server | UTC instants at second granularity; `created` never changes and `updated` moves on every edit |
+| `tags` | you | Lowercase and dash-separated, with no `#`. Skip catch-alls such as `important` or `todo` |
+| `sources` | you | Wikilinks to the pages this one draws from; `create_note(sources=[...])` |
+| `projects`, `project` | you | Project keys the page serves. A new slug registers itself |
+| `supersedes`, `superseded_by` | server | Set by `supersede_note`; `superseded_by` names the replacement |
+| `summary` | you | One line of context, at most 1024 characters: `fields={"summary": ...}` |
+| `topics` | you | Domain keys that file the page under topics: `fields={"topics": [...]}`. The server resolves aliases, replaces deprecated keys and registers a new key. Invalid keys and directory collisions refuse the write |
+| `sensitivity` | you | Registered sensitivity classes of what the page holds, such as `identity`, `health` or `financial`. See Sensitivity below |
+
+Pages written before second granularity carry a date-only `created` or `updated`. The server
+never rewrites them, because midnight would claim a precision the page never had. Readers accept
+both forms. Two values on the same day are unordered when either is date-only; a tool reports that
+and never guesses an order.
+
+Wikilinks in frontmatter are double-quoted, vault-rooted and carry no `.md`. The server
+normalizes any input form (bare name, `[[ ]]` wrapper, `|alias`, `#anchor`), so write what you have.
+
+A page's project keys can also declare topics through their registry `domain`. The page's own
+`domain` field names a source subject or an experiment folder and files no topic.
+
+Compiled notes may carry the three cross-domain bridge fields. [Governance](governance.md) owns them.
+
+### Status
+
+The statuses registry gives each status a class: live, pending, superseded, retired or
+abandoned. The class decides how a page serves, so read the registry before using a new label.
+
+- `superseded` means a newer page replaced this one, and `superseded_by` must name it.
+- `archived` steps a page out of rotation into `<location>/_archive/`. It is never deletion, and
+  no page carries a `deleted` status.
+- An experiment is `active` while it plans and runs. When it finishes, set `concluded` and record
+  `outcome`. Archive it only when nothing references it any more: a settled result is what later
+  work cites.
+- A refuted experiment is not superseded. Nothing replaced it; the question got an answer. It
+  keeps `concluded`, stays retrievable and carries the evidence that refuted it. A vault that
+  retires its negative results loses the expensive half of what it learned.
+- A production-log's status follows its lifecycle: planned, recorded, edited, published, then
+  reflected. `dropped` and `archived` end it early. The registry holds no order, so this line is
+  the only place that states it.
+
+### Sensitivity
+
+Keep identity documents, health records and financial statements in full, like any other
+material. Governance, not omission, decides who sees them, so never skip, cover or reduce one to
+a pointer to protect it. Only an authenticator is never kept: a payment card number, a security
+code, a password or a live credential. Ask for a copy with it covered, and say why.
+
+`sensitivity` lists the classes you judge the material to hold. The server never infers one from
+content. `save_source`, `save_evidence`, `create_note` and `save_episode` take it, and so does `add_record` when
+the collection's schema declares a `sensitivity` field.
+An unknown key refuses with `SENSITIVITY_CLASS_UNKNOWN`, names the registered keys and writes
+nothing. A Source kind may declare a default class for a Source or Evidence capture that gives
+none; a default key that the registry does not hold is skipped, never a refusal, and the result names
+it in `skipped_defaults`. A page without the field is unclassified.
+
+The class is metadata: it never changes the captured bytes. Each capture result reports
+`sensitivity: {classes, basis, disclosure}`. `basis` is `declared`, `kind-default` or `none`.
+`basis` `collection-floor` marks a row that takes its collection's floor. `disclosure` says what
+governs the page now. With no governance policy, every client signed in as
+the owner reads the page, so never tell the person it is protected unless `disclosure` names a
+policy.
+
+To change a kept page's classes later, preview with
+`inspect_memory(operation="files.classify", arguments={"path": ..., "sensitivity": [...], "reason": ...})`,
+then send the same arguments to `manage_memory(operation="files.classify", ...)`; `[]` clears
+them. Only `sensitivity` changes: the page keeps its path and every other byte. The result returns
+`pointer_write`; pass it back as `revert_record` to undo. An edit or a correction never changes
+`sensitivity` on a Source or Evidence page.
+
+A collection definition may declare `sensitivity` as a floor. Each row of a store collection
+carries those classes and may add more through its own `sensitivity` field, never fewer.
+
+### Fields that do not exist
+
+- `confidence`. A confidence or degree of belief is never a frontmatter field. Trust comes from
+  sources and link counts. An experiment's `outcome` and a unit's `verdict` are lifecycle state in
+  words, and a number, percentage or hedge is never a valid value. A degree of belief that its
+  holder stated is a `## Belief` unit: see Recording a degree of belief below.
+- `decay_at` and `expires_at`. Knowledge does not expire on a schedule. Supersession or archival is
+  explicit.
+- Any `auto_*` field. Nothing reflects a background process; operations on the Knowledge Base are
+  explicit.
 
 ## source
 
-**Location:** `Sources/<Kind>/` — the directory is a *projection* of `source_type`, with `domain` adding one level below it when present, e.g. `Sources/Articles/`, `Sources/Papers/`, `Sources/Reports/Travel/`, `Sources/Invoices/Equipment/`. The semantic metadata is authoritative; the folder is derived from it and is never deeper than `Sources/<Kind>/<Domain>/`.
+**Location:** `Sources/<Kind>/` — the directory is a projection of `source_type`, with `domain` adding one level below it when present, e.g. `Sources/Articles/`, `Sources/Reports/Travel/`. The metadata is authoritative and the folder derives from it.
 **Naming:** `YYYY-MM-DD-<slug>.md` (e.g., `2026-05-09-retrieval-patterns.md`)
-**Mutability:** Append-only in body. Never edit the captured content. The classification is a capture-time judgement and stays correctable: `inspect_memory/manage_memory(operation="files.reclassify", arguments={…})` rewrites `source_type`/`domain`, moves the file to the location the corrected classification projects to, and rewrites every inbound reference, all with the body byte-identical and a stated reason recorded. Nothing reclassifies a source automatically. When a page that a source links to moves, the move repoints that link span and changes no other byte; a registered pointer field such as `project` is corrected the same way, with a reason.
-**Required frontmatter:** `type: source`, `source_type`, `captured`, `url` (if applicable), `tags`, `ingested_into` (initially empty list, updated when compiled into notes). `domain` and `projects` are optional.
+**Mutability:** Append-only in body. Never edit the captured content. The classification is a capture-time judgement and stays correctable: `manage_memory(operation="files.reclassify", arguments={...})` rewrites `source_type` and `domain`, moves the file to the folder the new classification projects to, and repoints every inbound reference. The body stays byte-identical and the reason is recorded. Preview it on `inspect_memory` first. Nothing reclassifies a source automatically. A pointer field such as `project` is corrected the same way, with a reason.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `source_type` | yes | What the artifact is, as a slug-shaped key in the source-kinds registry. An unknown key registers on first use, and `source_kind` is the argument name. Read the registry with `schema.inspect` and subject `source-kinds` |
+| `domain` | optional | What the artifact is about, on an axis independent of `source_type`; the same open vocabulary |
+| `projects` | optional | Project keys the source serves. This never affects where it is filed |
+| `captured` | yes | ISO date; the same as `created` for sources |
+| `url` | conditional | Required for the kinds whose registry entry sets `requires_url` |
+| `author` | optional | |
+| `ingested_into` | yes | Wikilinks to the compiled notes that cite this source. The server fills it when a note cites the source |
+| `source_identity`, `capture_input_digest` | server | Written only at capture, so a repeat capture reconciles |
+
+There is no catch-all kind. Name the closest existing kind, or a new slug. A capture without a kind
+is refused with the vault's known kinds. `unclassified` marks a capture that no agent classified
+(upload form, hosted capture box, legacy import), and `other` is retired. Neither is ever a choice for a
+new capture. Both stay readable and filterable, and `files.reclassify` classifies them.
 
 **Content shape:**
 
 ```markdown
----
-type: source
-source_type: article
-domain: software
-projects: [project-alpha]
-captured: 2026-05-09
-url: https://example.com/retrieval-patterns
-tags: [retrieval, knowledge-base]
-ingested_into: []
----
-
 # <Title>
 
 > Brief one-line description of what this source is.
 
 ## Capture
 
-<full text or substantive excerpt here>
+<the captured content, verbatim>
 
 ## Why captured
 
-<one or two sentences on why this is in the KB>
+<one or two sentences on why this is in the Knowledge Base>
 ```
 
-For long sources, capture an excerpt + URL rather than full text. For Sessions,
-dump the conversation verbatim under `## Capture`.
+Save originals whole through `save_source`. A source takes one of two forms with the same fields: a
+transcript (content as is) or an origination record (a session-reasoning capture whose `ingested_into`
+lists what it produced). A session goes in verbatim under `## Capture`.
 
 ## research-note
 
-**Location:** `Notes/Research/<scope>/` where scope is a registered project key
-(see SKILL.md § Research scope keys and `_Schema/project-keys.yaml`) — an open
-set, **not a closed enum**: new scopes auto-register on first use when you write
-with a new `project:` slug.
-**Naming:** `<Title>.md` — the title as written (a `slug` filename style gives a lowercase dash-separated name instead). No date prefix (research notes evolve).
-**Mutability:** Editable. Replace via supersession when a major rewrite is needed.
-**Required frontmatter:** `type: research-note`, `project`, `status`, `created`, `updated`, `sources`, `tags`. Optional: `supersedes`, `superseded_by`.
+**Location:** `Notes/Research/<scope>/` where scope is a registered project key (see Research scope keys in [writing](writing.md) and `_Schema/project-keys.yaml`). The set is open, not a closed enum: a new `project:` slug registers on first use.
+**Naming:** `<Title>.md`, the title as written. No date prefix, because research notes evolve.
+**Mutability:** Editable. Replace through supersession when a major rewrite is needed.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `project` | yes | The scope key above |
+| `sources` | yes | The pages this note draws from |
+| `tenant` | optional | The tenant the note concerns. Only a project whose registry entry sets `tenant_scoped: true` takes it; audit flags it elsewhere |
 
 **Content shape:**
 
 ```markdown
----
-type: research-note
-project: project-alpha
-status: active
-created: 2026-05-09
-updated: 2026-05-09
-sources:
-  - "[[Knowledge Base/Sources/Articles/2026-05-09-retrieval-patterns]]"
-tags: [agentic-rag, retrieval, knowledge-graph]
----
-
 # <Topic>
 
 ## Question
@@ -85,7 +177,7 @@ What problem or topic this note addresses.
 
 ## Findings
 
-The substance. Multiple subsections OK.
+The substance. Multiple subsections are fine.
 
 ## Observations
 
@@ -101,27 +193,22 @@ The substance. Multiple subsections OK.
 - Things to dig into next
 ```
 
+A research note's `project` reflects the audience and the reuse domain, not the occasion that
+triggered it. A note that fits two scopes is usually an insight or a pattern: promote it. A research
+note has informal subtypes: standard; hub (orients a subsystem and links out, refreshed on major
+ships); and snapshot (point in time, drift is fine, say "snapshot" in the body).
+
 ## insight
 
 **Location:** `Notes/Insights/`
-**Naming:** `<Title>.md` — phrased as a claim or a noun phrase, not a question.
-**Mutability:** Editable; supersession preferred for substantial rewrites.
-**Required frontmatter:** `type: insight`, `status`, `created`, `updated`, `sources`, `tags`. Optional: `projects` (list of projects this insight applies to).
+**Naming:** `<Title>.md`, phrased as a claim or a noun phrase, not a question.
+**Mutability:** Editable. Prefer supersession for a substantial rewrite.
+
+Fields: `sources` (required) and `projects` (optional, the projects the insight applies to).
 
 **Content shape:**
 
 ```markdown
----
-type: insight
-status: active
-created: 2026-05-09
-updated: 2026-05-09
-sources:
-  - "[[Knowledge Base/Notes/Research/Project Alpha/agentic-rag-retrieval-budget]]"
-projects: [project-alpha, project-beta]
-tags: [retrieval, evaluation]
----
-
 # <Insight as a claim>
 
 ## Claim
@@ -130,11 +217,11 @@ One paragraph stating the insight cleanly.
 
 ## Why it holds
 
-The reasoning, evidence, examples.
+The reasoning, evidence and examples.
 
 ## Where it applies
 
-Concrete domains, projects, decisions this should influence.
+Concrete domains, projects and decisions this should influence.
 
 ## Counter-considerations
 
@@ -153,22 +240,13 @@ What could weaken or invalidate this insight.
 
 **Location:** `Notes/Failures/`
 **Naming:** `<Title>.md`
-**Required frontmatter:** `type: failure`, `status`, `created`, `updated`, `sources`, `tags`. Optional: `projects`, `severity` (minor / moderate / serious / critical — qualitative, not numeric).
+
+Fields: `sources` (required), `projects` (optional) and `severity` (optional): a qualitative word
+such as minor, moderate, serious or critical, never a number.
 
 **Content shape:**
 
 ```markdown
----
-type: failure
-status: active
-created: 2026-05-09
-updated: 2026-05-09
-sources: [...]
-projects: [project-alpha]
-severity: moderate
-tags: [...]
----
-
 # <Failure mode as a name>
 
 ## What happened
@@ -177,15 +255,15 @@ The concrete event or pattern.
 
 ## Mechanism
 
-Root cause. Why it happened, not just what.
+Root cause: why it happened, not just what.
 
 ## Detection
 
-How it was noticed (or how it would be noticed earlier next time).
+How it was noticed, or how it would be noticed earlier next time.
 
 ## Mitigation
 
-What changed (or should change) to prevent recurrence.
+What changed, or should change, to prevent recurrence.
 
 ## Observations
 
@@ -200,22 +278,13 @@ What changed (or should change) to prevent recurrence.
 
 **Location:** `Notes/Patterns/`
 **Naming:** `<pattern-name>.md`
-**Required frontmatter:** `type: pattern`, `status`, `created`, `updated`, `sources`, `tags`. Optional: `projects`, `pattern_type` (e.g., architectural, workflow, prompting, pedagogical).
+
+Fields: `sources` (required), `projects` (optional; a pattern that spans projects lists them all) and
+`pattern_type` (optional, for example architectural, workflow, prompting or pedagogical).
 
 **Content shape:**
 
 ```markdown
----
-type: pattern
-status: active
-created: 2026-05-09
-updated: 2026-05-09
-sources: [...]
-projects: [project-alpha, project-beta]
-pattern_type: architectural
-tags: [...]
----
-
 # <Pattern name>
 
 ## Problem
@@ -232,7 +301,7 @@ Conditions where it fits.
 
 ## When NOT to use
 
-Conditions where it's a regression.
+Conditions where it is a regression.
 
 ## Observations
 
@@ -247,26 +316,15 @@ Conditions where it's a regression.
 
 **Location:** `Notes/Procedures/`
 **Naming:** `<procedure-name>.md`
-**Required frontmatter:** `type: procedure`, `status`, `created`, `updated`, `tags`. Optional: `summary`, `sources`, `projects`.
 
-A procedure is a reusable way of working that you write once and follow again.
-Write `summary` as one line that says when to use it. Put each distinct way of
-working in its own `## Procedure` block, so that the block reads on its own, and
+A procedure is a reusable way of working that you write once and follow again. Fields: `summary`
+(recommended, one line that says when to use it), `sources` and `projects` (both optional). Put each
+distinct way of working in its own `## Procedure` block so that the block reads on its own, and
 state in a "Not for" section when the procedure does not apply.
 
 **Content shape:**
 
 ```markdown
----
-type: procedure
-status: active
-created: 2026-05-09
-updated: 2026-05-09
-summary: Use when preparing a release candidate for a library.
-projects: [project-alpha]
-tags: [...]
----
-
 # <Procedure name>
 
 ## Procedure
@@ -291,23 +349,15 @@ Situations where this procedure does not apply, such as a hotfix.
 
 **Location:** `Notes/Profiles/`
 **Naming:** `<domain>.md` for a domain profile, `global.md` for the global profile.
-**Required frontmatter:** `type: profile`, `status`, `created`, `updated`. A domain profile has exactly one `topics` entry. The global profile has none.
 
-A profile holds the owner's standing preferences, one short confirmed line each, and links the
-long note that holds the detail. A governed write to it needs the proof of its preview; read
-[profiles](profiles.md) before seeding or changing one.
+A profile holds the owner's standing preferences, one short confirmed line each, and links the long
+note that holds the detail. A domain profile has exactly one `topics` entry, and the global profile
+has none. A page with two topics is refused, and a topic that no registered domain resolves makes a
+page that supplies nothing. [Profiles](profiles.md) covers seeding and changing one.
 
 **Content shape:**
 
 ```markdown
----
-type: profile
-status: active
-created: 2026-05-09
-updated: 2026-05-09
-topics: [games]
----
-
 # Games
 
 ## Observations
@@ -322,38 +372,27 @@ topics: [games]
 
 ## experiment
 
-**Location:** `Notes/Experiments/<Domain>/`, where the folder is the domain's path
-label (`workflow` lives in `Workflow/`), or another sub-domain that emerges
-(`Research`, `Ops`, etc.). A write reuses a folder that differs only in case or
-Unicode form, and refuses with `AMBIGUOUS_DOMAIN_DESTINATION` while two such folders
-exist. Add a new sub-domain only when the first experiment in that domain is being written.
-**Naming:** `YYYY-MM-<Title>.md` — date-prefixed because experiments are time-bounded events, not evolving notes. Use the **start month**.
-**Mutability:** Editable while ongoing; once concluded, body is read-only except for supersession or follow-up notes that link back.
-**Required frontmatter:** `type: experiment`, `domain`, `status`, `created`, `updated`, `started`, `duration`, `tags`. Optional: `n` (sample size, default 1), `concluded`, `outcome`, `hypothesis`, `sources`, `supersedes`, `superseded_by`.
+**Location:** `Notes/Experiments/<Domain>/`, where the folder is the domain's path label (`workflow` lives in `Workflow/`). Add a new sub-domain only when the first experiment in that domain is written.
+**Naming:** `YYYY-MM-<Title>.md`, date-prefixed by the start month, because an experiment is a time-bounded event and not an evolving note.
+**Mutability:** Editable while ongoing. Once concluded, the body is read-only except for supersession or follow-up notes that link back.
 
-**Status values for experiments:** `draft`, `active`, `concluded`, `archived`.
-`concluded` says the run finished and its result stands; pair it with
-`concluded:` (the date) and `outcome:` (one of `confirmed`, `refuted`,
-`qualified`, `inconclusive`, `abandoned`).
+| Field | Required | Meaning |
+|---|---|---|
+| `domain` | yes | Lowercase key (`workflow`, `research`, `ops`) that names the subfolder |
+| `started` | yes | ISO date the experiment began; it may differ from `created` when planning came first |
+| `duration` | yes | Free text such as `"30 days"` or `"ongoing"` |
+| `concluded` | optional | ISO date the experiment ended; absent while ongoing |
+| `outcome` | optional | How it turned out, as a verdict of the registry. A categorical state, never a score |
+| `n` | optional | Sample size; 1 when absent |
+| `hypothesis` | optional | One line, restated in the body |
+| `sources` | optional | Material that informed the protocol |
+
+`concluded` says the run finished and its result stands. Pair it with `concluded:` (the date) and
+`outcome:` (a verdict such as `confirmed`, `refuted`, `qualified`, `inconclusive` or `abandoned`).
 
 **Content shape:**
 
 ```markdown
----
-type: experiment
-domain: workflow
-status: active
-created: 2026-05-09
-updated: 2026-05-09
-started: 2026-05-09
-duration: "30 days"
-n: 1
-hypothesis: "Batching code review into one daily slot cuts context-switching"
-sources:
-  - "[[Knowledge Base/Sources/Books/2026-04-deep-work]]"
-tags: [workflow, batching, focus]
----
-
 # <Experiment name>
 
 ## Hypothesis
@@ -362,15 +401,15 @@ What you expected to happen, and why.
 
 ## Protocol
 
-How the experiment is run. Specific enough that someone could repeat it.
+How the experiment is run, specific enough that someone could repeat it.
 
 ## Baseline
 
-Starting state. Measurements, observations, qualitative descriptions.
+Starting state: measurements, observations, qualitative descriptions.
 
 ## Intervention
 
-What's actually being changed. The independent variable.
+What is actually being changed. The independent variable.
 
 ## Results
 
@@ -378,7 +417,7 @@ What happened. Updated as the experiment runs; finalized at conclusion.
 
 ## Conclusion
 
-What you learned. May be inconclusive — that's a valid result.
+What you learned. Inconclusive is a valid result.
 
 ## Observations
 
@@ -391,9 +430,9 @@ What you learned. May be inconclusive — that's a valid result.
 
 ### Closing the loop: predictions, check dates, and verdicts
 
-An experiment is worth much more when it recorded what you *expected* before it
-ran. Write that as a rich semantic unit with the governed `prediction` kind, and
-give it the two governed metadata rows that make it checkable:
+An experiment is worth much more when it recorded what you expected before it ran. Write that as a
+rich semantic unit with the governed `prediction` kind and the two metadata rows that make it
+checkable:
 
 ```markdown
 ## Prediction
@@ -409,53 +448,27 @@ Batching review into one daily slot will cut context switches by half.
 Switch count fell 12%, well short of the predicted halving.
 ```
 
-The verdict introduces no new relation kind. Attach the refuting material with
-the governed vocabulary you already have — `contradicts`, `evidenced_by`,
-`supports` — and let `verdict:` carry the judgment itself.
+A verdict introduces no new relation kind. Attach the refuting material with governed relations you
+already have (`contradicts`, `evidenced_by`, `supports`) and let `verdict:` carry the judgment.
 
-- `check_by:` is one exact ISO calendar date (`YYYY-MM-DD`) naming the day the
-  claim should be revisited. It is a due date, not a deadline, and nothing
-  expires when it passes — it just becomes findable as overdue.
-- `verdict:` is exactly one verdict of the vault's registry, as its key or a
-  label. The shipped verdicts are `confirmed`, `refuted`, `qualified`,
-  `inconclusive`, and `abandoned` — the same five words as an experiment's
-  `outcome:`, one altitude down. `inspect_memory(operation="schema.infer",
-  arguments={'subject': 'categories'})` lists the vault's own under `verdicts`. A verdict is a
-  judgment in words, never a number: a claim carries no confidence score, so
-  `verdict: 0.7` is rejected outright.
+- `check_by:` is one ISO date (`YYYY-MM-DD`) for when to revisit the claim. It is a due date, not a
+  deadline: nothing expires when it passes, and the claim becomes findable as overdue.
+- `verdict:` is one verdict of the vault's registry, as its key or a label. A verdict is a judgment in
+  words, never a number, so `verdict: 0.7` is rejected. `inspect_memory(operation="schema.infer",
+  arguments={"subject": "categories"})` lists the vault's verdicts.
 
-Both rows are rich-form only; a compact `- [category] ...` observation carries no
-metadata. Both are also preserved across edits — correcting the wording of a
-prediction never costs you its verdict.
-
-**A refuted prediction stays active and stays ranked.** Refuted is not
-superseded: nothing replaced it, the question simply got an answer. Leave it in
-place with the evidence that refuted it. A vault that quietly retires its
-negative results loses the expensive half of what it learned.
+Both rows exist only in the rich form; a compact `- [category] ...` observation carries no metadata.
+Edits preserve both rows, so correcting a prediction's wording never costs its verdict. A refuted
+prediction stays active and ranked, for the same reason a refuted experiment stays concluded.
 
 ### Recording a degree of belief
 
-A claim carries no confidence score. A degree of belief is its own `## Belief`
-unit: the belief in prose, the unit rows `credence_holder` and `credence`, and an
-`assesses` relation to the claim. `credence` is a unit row, never a frontmatter
-field. It is a belief level or a probability from 0 to 1. A probability needs
-`credence_basis`, and you never invent a number. A belief records what its holder
-stated: never write one on a holder's behalf. `inspect_memory(operation="schema.infer",
-arguments={'subject': 'categories'})` lists the accepted belief levels under
-`belief_levels`.
-
-A level, stated by the holder:
-
-```markdown
-## Belief
-- credence_holder: Dana
-- credence: likely
-- relations: assesses: [[Knowledge Base/Notes/Experiments/Workflow/2026-05-batching]]
-
-Dana thinks the daily review slot will cut context switches.
-```
-
-A probability, with its basis:
+A claim carries no confidence score. A degree of belief is its own `## Belief` unit: the belief in
+prose, the rows `credence_holder` and `credence`, and an `assesses` relation to the claim.
+`credence` is a unit row, never a frontmatter field. It is a belief level or a probability from 0 to
+1. A probability needs `credence_basis`, and you never invent a number. A belief records what its
+holder stated: never write one on a holder's behalf. `schema.infer` with subject `categories` lists
+the accepted levels under `belief_levels`.
 
 ```markdown
 ## Belief
@@ -467,77 +480,54 @@ A probability, with its basis:
 Dana puts the chance that the daily review slot halves context switches at 0.7.
 ```
 
+A level such as `likely` replaces the number and its basis.
+
 ### Experiments are not research notes
 
-A research note synthesizes secondary sources (papers, articles, conversations)
-to compile understanding. An experiment runs a protocol and captures primary
-data. They have different epistemic status: an experiment's `n=1` self-data is
-direct evidence; a research note is filtered through somebody else's frame.
-
-When in doubt, ask: did I just *do* something and observe results, or did I *read
-about* something and synthesize? First → experiment. Second → research-note.
+A research note synthesizes secondary sources to compile understanding. An experiment runs a protocol
+and captures primary data, so an experiment's `n=1` self-data is direct evidence, and a research note is
+filtered through somebody else's frame. Ask: did I just do something and observe results, or did I read
+about something and synthesize? The first is an experiment. The second is a research-note.
 
 ## production-log
 
-**Location:** `Notes/Productions/<medium>/` where medium is `Posts`, `Articles`,
-`PDFs`, `Episodes`, or another medium that emerges. Add a new medium subfolder only
-when the first production in that medium is being written.
-**Naming:** `YYYY-MM-<Title>.md` — date-prefixed by start month.
-**Mutability:** Editable across the production lifecycle (planned → recorded → edited → published → reflected). Once complete and reflection is logged, treat as read-only except for supersession.
-**Required frontmatter:** `type: production-log`, `medium`, `status`, `created`, `updated`, `tags`. Optional but typically present: `projects`, `host`, `editor`, `recorded`, `published`, `sources`, `related`, `supersedes`, `superseded_by`.
+**Location:** `Notes/Productions/<medium>/`, where medium is `Posts`, `Articles`, `PDFs`, `Episodes` or another medium that emerges. Add a new medium folder only when the first production in that medium is written.
+**Naming:** `YYYY-MM-<Title>.md`, date-prefixed by the start month.
+**Mutability:** Editable across the production lifecycle. Once complete and reflected on, treat it as read-only except for supersession.
 
-**Status values for production-logs:**
-
-- `planned` — design / outline phase
-- `recorded` — primary capture done, edit pending
-- `edited` — production assets finalized
-- `published` — live; outcomes accumulating
-- `reflected` — published + reflection complete; no further updates expected
-- `dropped` — abandoned (use `archived` to step it out of active rotation entirely)
+| Field | Required | Meaning |
+|---|---|---|
+| `medium` | yes | `posts`, `articles`, `pdfs`, `episodes`, or another; matches the subfolder |
+| `recorded` | optional | ISO date the primary capture happened |
+| `published` | optional | ISO date, or `null` before publication |
+| `host`, `editor` | optional | Who is on camera or leads, and who edits or produces |
+| `related` | optional | Wikilinks to the notes the production draws on or applies |
+| `projects`, `sources` | optional | As in Fields |
 
 **Content shape:**
 
 ```markdown
----
-type: production-log
-medium: posts
-status: recorded
-created: 2026-05-09
-updated: 2026-05-09
-recorded: 2026-05-09
-published: null
-projects: [project-alpha]
-host: the host
-editor: a teammate
-sources:
-  - "[[Knowledge Base/Sources/Sessions/2026-05-09-launch-planning]]"
-related:
-  - "[[Knowledge Base/Notes/Research/Project Alpha/launch-messaging]]"
-  - "[[Knowledge Base/Notes/Patterns/short-form-post-template]]"
-tags: [posts, launch, batch-01]
----
-
 # <Production batch name>
 
 ## Frame
 
-What this production is, who it's for, why now. The strategic framing.
+What this production is, who it is for, why now.
 
 ## Artifact
 
-The actual creative output — scripts, outlines, assets, links to footage.
+The creative output: scripts, outlines, assets, links to footage.
 
 ## Production session
 
-How the capture/recording/writing actually went. Takes, edits, decisions made on the fly.
+How the capture, recording or writing went. Takes, edits, decisions made on the fly.
 
 ## Outcomes
 
-To be filled across the lifecycle. Engagement metrics, post-publish observations.
+Filled across the lifecycle: engagement metrics, post-publish observations.
 
 ## Reflection
 
-Filled once outcomes have settled. What worked, what to keep / change / drop next time.
+Filled once outcomes settle: what worked, and what to keep, change or drop.
 
 ## Observations
 
@@ -548,88 +538,37 @@ Filled once outcomes have settled. What worked, what to keep / change / drop nex
 - implements [[...]]
 ```
 
-### Production-log vs experiment
+### Production-log vs experiment and research-note
 
-Both are time-bounded with date-prefixed filenames; both have outcomes. The
-difference is the epistemic object:
-
-- **Experiment:** a hypothesis tested under a protocol with primary data.
-  Conclusion confirms / refutes / qualifies the hypothesis. The value is the
-  *finding*.
-- **Production-log:** a creative artifact + the production knowledge around it.
-  Outcomes are engagement metrics, audience response, what to do differently next
-  time. The value is the *thing made*.
-
-### Production-log vs research-note
-
-A research-note is *secondary synthesis* — reading and connecting. A
-production-log captures the production of a primary creative artifact and the
-operational knowledge around making it. The curriculum *informing* a reel batch
-is a research-note; the reel batch itself, with scripts and recording session and
-metrics, is a production-log.
+Both a production-log and an experiment are time-bounded, date-prefixed and outcome-bearing. The
+epistemic object differs. An experiment tests a hypothesis under a protocol with primary data, and
+its value is the finding. A production-log records a creative artifact and the knowledge around making
+it, and its value is the thing made. A research note is secondary synthesis. The curriculum informing
+a reel batch is a research note; the batch itself, with scripts, recording session and metrics, is a
+production-log. Ask whether you set out to learn whether X is true (experiment) or to make a thing the
+world sees (production-log).
 
 ## entity
 
-**Location:** `Entities/<registered-folder>/`, with the folder resolved from the
-active entity registry exposed by `read_instructions`.
+**Location:** `Entities/<registered-folder>/`, with the folder resolved from the active entity
+registry: `inspect_memory(operation="schema.inspect", arguments={"subject": "entity-types"})`.
 **Naming:**
 
-- **People:** the working short used in daily reference — typically the first name
-  for people in your working circle, the full name for public figures. The H1
-  carries the full disambiguating name when it differs from the filename.
-  Disambiguate the filename only when two entities would otherwise collide.
-- **Other registered kinds:** Title Case, the entity's canonical name.
-  `Agentic RAG.md`, `pgvector.md`, `Adopt pgvector for the engine.md`.
+- **People:** the working short used in daily reference: the first name for people in your working
+  circle, the full name for public figures. The H1 carries the full disambiguating name when it
+  differs from the file name. Disambiguate the file name only when two entities would collide.
+- **Other kinds:** Title Case, the entity's canonical name: `Agentic RAG.md`, `pgvector.md`.
 
-**Required frontmatter:** `type: entity`, `entity_type`, `status`, `created`, `updated`, `tags`. Optional fields by entity-type.
-
-Vaults extend the five core kinds through the user-owned
-`_Schema/entity-types.yaml` registry. The governed save operation validates the
-whole proposal before writing it; deprecated types stay recorded rather than
-being deleted. An unregistered-type finding supplies `proposal` and
-`expected_hash`; save those exact values with a `why` through
-`manage_memory(operation="schema.save_entity_types")`. Its `proposed_entry` is only a
-description, not a registry payload. For example:
-
-```yaml
-schema_version: 1
-entity_types:
-  place:
-    folder: Places
-    label: Place
-    aliases: [location]
-    cue_nouns: [venue]
-    optional_frontmatter: [domain]
-    capture_guidance: A stable place identity with reusable context or relations.
-    parent: concept
-    status: active
-```
-
-The `parent` is a one-level roll-up to a core type; it does not create a deeper
-type hierarchy.
-
-Extension `optional_frontmatter` may name only fields supported by the entity
-writer: `affiliation`, `relationship`, `domain`, `language`, `repo`, `license`,
-`used_in`, `decided`, `project`, and `decision_status`. Any other field is a
-registry finding rather than silently inert metadata.
+Fields: `entity_type` (required): a stable id from the registry. Each type's optional fields come from
+the same registry entry (`optional_frontmatter`). A vault extends the core kinds in its own entity-type
+registry; [vocabulary](vocabulary.md) covers saving a new type.
 
 ### People
 
-Optional frontmatter: `affiliation`, `relationship` (e.g., colleague, public-figure, source-author),
-and `aliases` for reviewed alternate spellings or names.
+Optional fields: `affiliation`, `relationship` (for example colleague, public-figure, source-author) and
+`aliases` for reviewed alternate spellings or names.
 
 ```markdown
----
-type: entity
-entity_type: person
-status: active
-created: 2026-05-09
-updated: 2026-05-09
-affiliation: independent researcher
-relationship: public-figure
-tags: [research, methods]
----
-
 # Jordan Lee
 
 ## Summary
@@ -649,52 +588,30 @@ What this person is relevant to in your work.
 - produces [[...]]
 ```
 
-`## Contact` is optional. Keep contact details in `[contact]` units there, never in
-the summary or in `fact` units: activation serves them only when the turn asks to reach
-the person.
+`## Contact` is optional. Keep contact details in `[contact]` units there, never in the summary or in
+`fact` units: activation serves them only when the turn asks to reach the person.
 
-On a topic page, prefer `about_entity [[Entities/People/...]]` for the canonical
-topic-to-person edge. On the entity page, write a specific relation such as
-`member_of` or `produces`; a write that adds the generic relation is refused.
+On a topic page, prefer `about_entity [[Entities/People/...]]` for the canonical topic-to-person edge.
+On the person's own page, write a specific relation such as `member_of` or `produces`.
 
 ### Organizations
 
-Use for a stable company, institution, team, agency, nonprofit, or other
-organization whose facts, history, or relations recur across sources. Keep
-incidental or unresolved names in source/note context instead of creating a
-speculative entity.
+Use for a stable company, institution, team, agency or other organization whose facts, history or
+relations recur across sources. Keep incidental or unresolved names in source or note context instead
+of creating a speculative entity.
 
-### Concepts
+### Concepts, libraries and decisions
 
-Optional frontmatter: `domain` (e.g., retrieval, infrastructure, governance).
-
-### Libraries
-
-Optional frontmatter: `language`, `repo`, `license`, `used_in` (list of projects).
-
-### Decisions
-
-These are essentially lightweight ADRs.
-Optional frontmatter: `decided` (date), `project`, `decision_status` (proposed / accepted / superseded).
+A concept anchors conclusions across sources. A library or package carries durable project context.
+A decision (`entity_type: decision`) is a lightweight record of one choice, with `decided` (date), `project` and
+`decision_status` fields, and a body that answers four questions:
 
 ```markdown
----
-type: entity
-entity_type: decision
-status: active
-created: 2026-05-09
-updated: 2026-05-09
-decided: 2026-05-09
-project: project-alpha
-decision_status: accepted
-tags: [retrieval]
----
-
 # <Decision title>
 
 ## Context
 
-What was the situation that forced a decision.
+The situation that forced a decision.
 
 ## Decision
 
@@ -713,54 +630,28 @@ What this commits us to and what it forecloses.
 - resolves [[...]]
 ```
 
-## Naming conventions summary
+## Naming conventions
 
-The filename is a stable machine address; `title:` and the canonical H1 are the
-human display identity. Titles support arbitrary Unicode. By default a new note
-or entity takes its title as its filename, keeping case, diacritics and spaces and
-dropping only what a filesystem or a link cannot carry; a captured Source keeps
-its dated lowercase slug name. A vault chooses a style with `filename_style` or
-`EXOMEM_FILENAME_STYLE`. Callers may pass an explicit lowercase ASCII kebab-case
-`slug` (maximum 100 characters) for a new source, note, or entity: it overrides
-the derived name under every style and does not change the stored title. Evermatter
-does not attempt language-aware transliteration, and it never renames existing
-pages on upgrade or reconcile.
+The file name is a stable machine address. `title:` and the canonical H1 are the human display
+identity, and a title can use any Unicode. By default a new note or entity takes its title as its file
+name, keeping case, diacritics and spaces and dropping only what a file system or a link cannot carry.
+A captured source keeps its dated lowercase slug name. A vault chooses a style with `filename_style`
+or `EVERMATTER_FILENAME_STYLE`. The server does no language-aware transliteration, and it never renames an
+existing page on upgrade or reconcile.
 
-These examples show the `slug` style. The default `title` style names a note, an
-experiment, a production log or an entity by its title instead, after the same date
-prefix where it has one: an experiment becomes `2026-05-Day low-carb.md`. A Source
-keeps its slug name until the vault sets a style.
-
-- Sources: date-prefixed, dash-slug, lowercase: `2026-05-09-retrieval-patterns.md`
-- Notes (research, insight, failure, pattern, procedure): no date prefix, dash-slug, lowercase: `agentic-rag-retrieval-budget.md`
-- Experiments: date-prefixed (start month), dash-slug, lowercase: `2026-05-30-day-low-carb.md`
-- Production-logs: date-prefixed (start month), dash-slug, lowercase: `2026-05-launch-recap.md`
-- Entities: the Unicode canonical name is stored in `title:` and the H1; an
-  explicit ASCII slug may be used for the filename.
-
-Sources, experiments, and production-logs are dated because their value is partly
-temporal. Notes are not dated because they evolve. Entities are named after the
-thing they are. Filenames are stable addresses; renaming them churns wikilinks
-across the graph without information gain.
+Sources, experiments and production-logs carry a date because their value is partly temporal. Notes
+carry none because they evolve. Entities are named after the thing they are. Renaming churns links
+without information gain, so leave a file name alone until a title change makes the page misleading
+([writing](writing.md) covers the rename suggestion).
 
 ## `_attachments/` convention
 
-Any location holding compiled notes or source captures may have a sibling
-`_attachments/` folder for binary outputs or originals that need to live near the
-parent note. The underscore prefix marks it as not-a-primary-content folder
-(a common convention; Obsidian also treats `_`-prefixed folders this way).
+Any location that holds compiled notes or source captures may have a sibling `_attachments/` folder for
+binary outputs or originals that need to live near the parent note. The underscore marks it as not a
+primary-content folder.
 
-**Discipline:**
-
-- **Append-only.** Binaries are not edited after placement. Revisions go in as new files (e.g., `protocol_v2.docx`).
-- **No frontmatter** on binary files (none possible).
+- **Append-only.** Binaries are not edited after placement. A revision goes in as a new file, such as `protocol_v2.docx`.
+- **No frontmatter**, because a binary has none.
 - **Referenced from the parent note**, never standalone.
-- **Filename = description.** Date prefix where temporal anchoring matters; otherwise descriptive slug.
-- **Not Evidence.** If the artifact came from a third party and must be preserved as-received without analytical processing, it belongs in `Evidence/<scope>/<category>/` instead. See `write-scope.md` § binary placement.
-
-## Research-note scope heuristic
-
-A research-note's `project` field reflects *audience and reuse domain*, not
-*triggering occasion*. When a note feels like it could go in two scopes, that's
-usually a signal it's an insight or pattern (cross-cutting) and should be promoted
-accordingly.
+- **File name is the description.** Add a date prefix where the time anchors the file.
+- **Not Evidence.** An artifact from a third party that must stay as received belongs in `Evidence/<scope>/<category>/`. [Write scope](write-scope.md) covers binary placement.

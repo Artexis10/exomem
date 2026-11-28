@@ -643,6 +643,8 @@ def evaluate_rows(
             agg: Any = _profile_payload(matched_rows, cols, format, path)
         else:
             agg = _aggregate(matched_rows, aggregate, date_col)
+            if project_values is not None and isinstance(agg.get("row"), dict):
+                agg = {**agg, "row": project_values(agg["row"])}  # a `latest` answer returns its row
         return present_aggregate(
             agg, path=path, format=format, total_rows=total_rows, total_matched=total_matched,
             columns=cols, warnings=warnings, provenance=provenance, overhead=overhead,
@@ -717,12 +719,16 @@ def present_rows(
     """The bounded result of one page: ``window`` holds its ``(row index, row)`` pairs in answer order."""
     truncated = (offset + len(window)) < total_matched
 
-    if project_values is not None:
-        window = [(i, project_values(r)) for i, r in window]
     if columns:
+        if project_values is not None:
+            # The projector is field-independent, so the columns' own fields project as they would in the whole row.
+            roots = {str(c).split(".", 1)[0] for c in columns}
+            window = [(i, project_values({k: v for k, v in r.items() if k in roots})) for i, r in window]
         out_rows = [{c: _get_field(r, c) for c in columns} for _, r in window]
         out_cols = list(columns)
     else:
+        if project_values is not None:
+            window = [(i, project_values(r)) for i, r in window]
         out_rows = [r for _, r in window]
         out_cols = available
     row_indices = [i for i, _ in window] if provenance is not None else None

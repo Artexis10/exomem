@@ -21,6 +21,8 @@ from types import SimpleNamespace
 import pytest
 from test_activate_context_request_path import TURN, _seed_live_recall
 from test_governance_egress import _external, write_rule, write_scope
+from test_managed_collections_migration import coordinator_url as coordinator_url  # noqa: F401
+from test_vault_store_migration import vault as store_profile_vault  # noqa: F401
 from test_working_set_carry import CARRY_PAGE, CARRY_TURN, _seed_carry_pages
 from test_working_set_index import _seed_planning, _seed_structure
 from test_working_set_topic_turns import CLEANING, _seed_workshop_vault
@@ -1196,7 +1198,10 @@ def test_a_visible_write_holds_the_restricted_map_back_as_warming(mapped: Simple
         page.read_text(encoding="utf-8") + "\nAn added line.\n",
     )
 
-    assert _map_activation(mapped.vault)["abstention"] == {"reason": "index_warming"}
+    abstention = _map_activation(mapped.vault)["abstention"]
+    assert abstention["reason"] == "index_warming"
+    # The restricted caller waits on the catalogue to fold the write, and the answer says so.
+    assert abstention["diagnostics"]["waiting_on"] == "context_catalogue"
 
 
 def test_a_withheld_write_marks_the_owner_map_stale(mapped: SimpleNamespace) -> None:
@@ -1213,7 +1218,7 @@ def test_deleting_a_visible_page_holds_the_restricted_map_back_as_warming(
 
     _delete_as_the_service_does(mapped.vault, VISIBLE_HUB)
 
-    assert _map_activation(mapped.vault)["abstention"] == {"reason": "index_warming"}
+    assert _map_activation(mapped.vault)["abstention"]["reason"] == "index_warming"
 
 
 def test_deleting_a_page_held_as_withheld_leaves_the_restricted_map_served(
@@ -1261,4 +1266,49 @@ def test_a_released_registry_edit_holds_the_restricted_map_back_as_warming(
 
     _edit_registry(mapped.vault)
 
-    assert _map_activation(mapped.vault)["abstention"] == {"reason": "index_warming"}
+    assert _map_activation(mapped.vault)["abstention"]["reason"] == "index_warming"
+
+
+def test_a_stored_profile_keeps_one_revision_across_preparation_and_its_lanes(
+    store_profile_vault: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811 - imported pytest fixture
+) -> None:
+    """A concurrent commit must not replace the units of a profile that already began reading."""
+    from test_context_views import _ask
+    from test_vault_store_migration import build_indexes, migrate_apply
+    from test_vault_store_read_write import put
+    from test_vault_store_rederive import store_writer
+
+    from exomem.vault_store import read, write
+
+    root = store_profile_vault
+    path = "Knowledge Base/Notes/Stored profile.md"
+    before = (
+        "---\ntype: insight\nstatus: active\ntags: [hub]\n---\n# Stored profile\n\n"
+        "## Decision\n- id: plan\n\nThe launch keeps its original plan.\n"
+    )
+    after = before.replace("original", "revised")
+    (root / path).write_text(before, encoding="utf-8")
+    build_indexes(root)
+    working_set_index.WorkingSetIndex(root).rebuild()
+    context_catalogue.ContextCatalogue(root).rebuild()
+    assert migrate_apply(root) == 0
+    lanes = working_set.run_lanes
+    revisions = []
+    with store_writer(root) as writer:
+        def concurrent_commit(*args, **kwargs):
+            revisions.append(read.current_revision(root))
+            write.commit(writer, put(path, after.encode()))
+            result = lanes(*args, **kwargs)
+            revisions.append(read.current_revision(root))
+            return result
+
+        monkeypatch.setattr(working_set, "run_lanes", concurrent_commit)
+        profile = _ask(root, context_views.anchor_profile_ref(path))
+
+    assert profile["state"] == "ready", profile
+    texts = [item["text"] for item in profile["items"] if item["kind"] == "units"]
+    assert "The launch keeps its original plan." in texts
+    assert "The launch keeps its revised plan." not in texts
+    assert len(revisions) == 2 and revisions[0] == revisions[1]
+    assert read.current_revision(root) > revisions[0]
+    assert read.owned_bytes(root, path) == after.encode()

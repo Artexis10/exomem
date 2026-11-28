@@ -75,6 +75,10 @@ OBSERVED_COLUMNS = (
 # migration can still read and retire every cell: each call that reads or writes them says so.
 MEDIA_KEY_COLUMNS = ("media_key_wrapped", "media_key_version")
 MEDIA_KEY_MIGRATION = "0081_exomem_cloud_media_keys"
+# add-cloud-media-store D10 task 4.9, the Substrate media usage migration: the cell's vault and media storage figures,
+# the allowance they are counted against, and when cellctl read them. Written only where the schema has them, and
+# never read: a cellctl whose schema predates the migration must still read and update every cell.
+MEDIA_USAGE_COLUMNS = ("vault_used_bytes", "media_used_bytes", "media_allowance_bytes", "media_usage_observed_at")
 # add-cloud-media-store D9, D12: the custody observation's key for a cell's media store record. Substrate
 # has no column for it, and a new one needs a Substrate migration; the observation is cellctl's to write.
 MEDIA_STORE_RECORD = "media_store"
@@ -94,8 +98,8 @@ CELL_COLUMNS = (
     "created_at",
 )
 
-# The columns cellctl writes. A media key write reaches the server only on a schema that has them.
-WRITABLE_COLUMNS = (*OBSERVED_COLUMNS, *MEDIA_KEY_COLUMNS)
+# The columns cellctl writes. A media key or media usage write reaches the server only on a schema that has them.
+WRITABLE_COLUMNS = (*OBSERVED_COLUMNS, *MEDIA_KEY_COLUMNS, *MEDIA_USAGE_COLUMNS)
 
 NOTIFY_CHANNEL = "exomem_cloud_cells"
 
@@ -143,6 +147,18 @@ async def has_media_key_columns(connection: asyncpg.Connection) -> bool:
         "SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() "
         "AND table_name = 'exomem_cloud_cells' AND column_name = ANY($1::text[])", list(MEDIA_KEY_COLUMNS))
     return present == len(MEDIA_KEY_COLUMNS)
+
+
+async def has_media_usage_columns(connection: asyncpg.Connection) -> bool:
+    """Whether all four media usage columns exist and cellctl's role may update them. cellctl reads the whole table,
+    so a column that a migration added before its grant lists in the information schema yet refuses every write;
+    counting it as present would fail each backup pass until the grant lands."""
+    writable = await connection.fetchval(
+        "SELECT count(*) FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = 'exomem_cloud_cells' AND column_name = ANY($1::text[]) "
+        "AND has_column_privilege(current_user, format('%I.%I', table_schema, table_name), column_name, 'UPDATE')",
+        list(MEDIA_USAGE_COLUMNS))
+    return writable == len(MEDIA_USAGE_COLUMNS)
 
 
 async def has_deletion_grant_column(connection: asyncpg.Connection) -> bool:

@@ -310,6 +310,21 @@ def test_a_plan_above_the_export_bound_refuses_as_too_large(vault: Path, tmp_pat
     assert not (staging / cloud_export_steps.EXPORT_DIR / cloud_export_steps.PLAN_NAME).exists()
 
 
+def test_a_folder_split_by_case_refuses_the_pause_before_any_copy(vault: Path, tmp_path_factory):
+    """Defect: a split folder failed the export only in the pack, after the hold and every copy."""
+    notes = vault / kb_dirname() / "Notes"
+    (notes / "Garden").mkdir(parents=True)
+    (notes / "Garden" / "roses.md").write_text("# Roses\n", encoding="utf-8")
+    (notes / "garden").mkdir()
+    (notes / "garden" / "tulips.md").write_text("# Tulips\n", encoding="utf-8")
+    staging = tmp_path_factory.mktemp("staging")
+    with _owner(), pytest.raises(vault_portability.PortabilityError) as refused:
+        cloud_export_steps.pause(vault, staging, export_id=str(uuid.uuid4()), cell_id=CELL, media_mode=None,
+                                 max_bytes=PLENTY)
+    assert refused.value.code == "CASE_COLLISION"
+    assert not (staging / cloud_export_steps.EXPORT_DIR).exists()
+
+
 def test_an_evicted_original_above_the_librarys_per_file_default_passes_the_planned_bound(
         vault: Path, selected_store, storage, tmp_path_factory, monkeypatch):  # noqa: F811
     """Defect: the pause, the pack or the Cloud verifier keeps the library's 2 GiB per-file default, so an evicted

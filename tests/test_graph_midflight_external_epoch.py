@@ -545,7 +545,7 @@ def test_the_superseded_refusal_carries_the_runnable_reconcile_command(
     error = raised.value
     assert error.code == "GRAPH_SYNC_PUBLICATION_UNAVAILABLE"
     assert 'maintain_memory(mode="reconcile")' in error.remediation
-    assert "exomem maintain --reconcile" in error.remediation
+    assert "evermatter maintain --reconcile" in error.remediation
 
 
 def test_the_publication_exhaustion_names_a_runnable_reconcile_command(
@@ -571,4 +571,4 @@ def test_the_publication_exhaustion_names_a_runnable_reconcile_command(
     assert f"after {epistemic_graph.REBUILD_PUBLICATION_ATTEMPTS} attempts" in str(error)
     assert "run reconcile to recover the derived graph" not in error.remediation
     assert 'maintain_memory(mode="reconcile")' in error.remediation
-    assert "exomem maintain --reconcile" in error.remediation
+    assert "evermatter maintain --reconcile" in error.remediation

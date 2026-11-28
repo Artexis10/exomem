@@ -118,12 +118,13 @@ if (-not $serviceAppDirectory) {
     throw "Could not resolve the service AppDirectory; the shared dotenv state-root authority is unavailable."
 }
 $resolvedVault = if ($Vault) { $Vault } else { Get-ExomemDotenvValue -RepoRoot $serviceAppDirectory -Name "EXOMEM_VAULT_PATH" }
-if (-not $resolvedVault) { $resolvedVault = $env:EXOMEM_VAULT_PATH }
+if (-not $resolvedVault) { $resolvedVault = Get-ExomemProcessSetting -Name "EXOMEM_VAULT_PATH" }
 if (-not $resolvedVault) {
-    throw "No vault resolved (-Vault, .env, or EXOMEM_VAULT_PATH); offline state migration is required before upgrade."
+    throw "No vault resolved (-Vault, .env, or EVERMATTER_VAULT_PATH); offline state migration is required before upgrade."
 }
 $bindingPath = Join-Path $serviceAppDirectory ".env"
 $managedStateRoot = Resolve-ExomemDotenvStateRootBinding -AppDirectory $serviceAppDirectory
+Assert-ExomemHostedStateRootUnambiguous -AppDirectory $serviceAppDirectory
 $endpoint = Get-ExomemServiceEndpoint -ServiceName $ServiceName
 $targetPort = [int]$endpoint.Port
 $transitionIdentity = @{
@@ -175,7 +176,7 @@ Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "stopped"
 $managedStateRoot = Ensure-ExomemDotenvStateRootBinding `
     -AppDirectory $serviceAppDirectory `
     -ExpectedStateRoot $transitionReceipt.state_root
-[Environment]::SetEnvironmentVariable("EXOMEM_STATE_ROOT", $managedStateRoot, "Process")
+Set-ExomemProcessSetting -Name "EXOMEM_STATE_ROOT" -Value $managedStateRoot
 Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "bound"
 
 # --- Upgrade --------------------------------------------------------------------
@@ -199,7 +200,7 @@ if ($migration.ExitCode -ne 0) {
     throw "Offline state migration failed; the service remains stopped."
 }
 Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "migrated"
-Write-Host "Preflight: exomem doctor --profile $Profile..."
+Write-Host "Preflight: evermatter doctor --profile $Profile..."
 & $ServicePy @doctorArgs
 if ($LASTEXITCODE -ne 0) {
     throw "Doctor preflight failed for profile '$Profile'. The target is installed but the service remains stopped; fix the findings and re-run."

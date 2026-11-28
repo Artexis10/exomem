@@ -71,10 +71,13 @@ EVENT_CATALOG: dict[str, EventSpec] = {
     "lexical_repair_finished": EventSpec(),
     "lexical_catalogue_materialized": EventSpec(),
     "staged_catalogue_adoption": EventSpec(),
+    "adoption_apply_opening": EventSpec(),
     "passage_search_abandoned": EventSpec(),
     "cloud_request_credential": EventSpec(),
     "cloud_operation_check": EventSpec(),
     "cloud_service_notice_ignored": EventSpec(),
+    "release_notes_unreadable": EventSpec(),
+    "app_update_state_unwritable": EventSpec(),
 }
 
 

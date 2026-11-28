@@ -109,6 +109,17 @@ def _saved_preference() -> dict:
 
 
 CANON = ("off", "light", "balanced", "maximal")
+
+
+def engages_any_subject(level: str | None) -> bool:
+    """Whether a level engages on any subject of the user's life or work without being asked.
+
+    `off` waits for the user's request and `light` for clear relevance; `balanced` and
+    `maximal` engage on any subject. The set ranges over the closed `CANON` enum.
+    """
+    # nosemgrep: ep-word-membership -- a closed subset of the CANON level enum.
+    return level in {"balanced", "maximal"}
+
 _ALIASES = {
     "none": "off",
     "silent": "off",
@@ -168,7 +179,7 @@ LEARNING_INSTRUCTION = (
     "claims as unverified. A file that proves something, such as a label, receipt or "
     "warranty, goes in Evidence in the same turn, cited in what you write about it. "
     "Files you work on in my own repositories are not handed files. Files that hold "
-    "secrets, such as keys, tokens, a .env file, a card number or a code, are not kept; "
+    "secrets, such as keys, tokens, a .env file, a payment card number or a security code, are not kept; "
     "ask me for a copy with the secret covered."
 )
 
@@ -270,14 +281,13 @@ CAPTURE_RULES_KEY = "rules"
 #: kind of claim the agent judges, never a word the server matches.
 _CAPTURE_RULES = (
     "Save what a later session will need, at its true strength: never write a claim more certain, more "
-    "general or more settled than its source made it. A held view, interpretation or working hypothesis "
-    "that the evidence does not settle is saved attributed to whoever holds it, with its uncertainty; a "
-    "remark made in passing is not a held view. A person's unsure report that later work could use is "
-    "saved as unsure and attributed, with its doubt, never as fact or as a baseline. A question the work "
-    "leaves open is saved as open, including whether something happened at all. Values a task settled, "
-    "such as times, prices, terms, contacts and limits, are saved in full, never as a pointer to a working "
-    "file. Trivia and one-offs get no note, because nothing later needs them. A write never mentions what "
-    "stays unwritten."
+    "general or more settled than its source made it. What the person tells you about their aims, "
+    "priorities, people they know, belongings and past is saved when said, even as an aside, whatever the task. A held view or "
+    "hypothesis the evidence does not settle is saved attributed to its holder, with its doubt. A person's unsure report that later work could use is saved as unsure, attributed, never "
+    "as fact or baseline. An open question the work leaves is saved as open, even whether something "
+    "happened. Values a task settled (times, prices, contacts, limits) are saved in full, never "
+    "as a pointer to a file. Trivia, one-offs and momentary reactions get no note: nothing later "
+    "needs them. A write never mentions what stays unwritten."
 )
 
 #: The recognition cue for recurring structured work, appended to `_CAPTURE_RULES` in the per-turn
@@ -905,7 +915,7 @@ def resolved(surface: str | None = None) -> dict:
         "context": context,
         "contract": CONTRACTS[level].as_dict(gate),
         "levels": list(CANON),
-        "change_with": "exomem prominence <level>",
+        "change_with": "evermatter prominence <level>",
     }
     cadence = _hook_cadence_for_context(context)
     if cadence is not None:
@@ -958,7 +968,7 @@ def _hook_cadence_for_context(context: str) -> dict | None:
         # everything, which would undo the identity-scoped preference the
         # agent-accessible control exists to offer.
         "change_with": (
-            "exomem prominence <level> on the client machine "
+            "evermatter prominence <level> on the client machine "
             "(changes hook cadence only; a saved preference still decides what is served)"
         ),
     }

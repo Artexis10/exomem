@@ -563,6 +563,88 @@ def test_a_descending_window_is_charged_its_index_interval_and_pages_in_source_o
     assert pages(numeric) == descending([row for row in source if row.get("numeric", -1) >= 3])
 
 
+def _legacy_read(writer, **arguments):
+    """One record_memory query with the legacy arguments, as query_records sends them."""
+    with request_scope(owner_principal(surface="mcp")), preview_store(writer.root, writer.handle):
+        return commands.op_record_memory(writer.root, action="query", collection=DERIVED, **arguments)
+
+
+def _mixed_source():
+    """Each row of the mixed export as the import keeps it: a string value never reaches the number column."""
+    return [{"day": day["day"], "position": position, **({"numeric": value} if type(value) is not str else {})}
+            for day in MIXED_DOCUMENT["days"] for position, value in enumerate(day["values"])]
+
+
+def test_the_legacy_query_arguments_read_a_derived_collection_through_the_typed_engine(derived):
+    """Defect: query_records refused every filter, column, sort and date window on a derived collection with
+    COLLECTION_DERIVED, so an agent could read its rows only by writing a typed query object. The arguments
+    must select, order, limit and project the rows as the same typed query does."""
+    writer, job = derived("legacy-read", {"samples/mixed.json": MIXED_DOCUMENT},
+                          text=_mixed_manifest(location_key=False), mapping=MIXED_MAPPING)
+    finish(writer, job)
+    source = _mixed_source()
+
+    found = _legacy_read(writer, filters=[{"column": "numeric", "op": "gte", "value": 3}], columns=["day", "position", "numeric"],
+                         sort_by="position", descending=True, limit=3)
+    matching = sorted((row for row in source if row.get("numeric", -1) >= 3), key=lambda row: row["position"], reverse=True)
+    assert found["rows"] == matching[:3] and found["has_more"] is True and found["query_version"] == 1
+
+    second_day = _legacy_read(writer, date_from="2026-11-02", date_column="day", columns=["day", "position"], sort_by="position")
+    assert [(row["day"], row["position"]) for row in second_day["rows"]] == [
+        ("2026-11-02", 0), ("2026-11-02", 1), ("2026-11-02", 2)]
+
+
+def test_a_legacy_negation_on_a_derived_collection_keeps_the_rows_that_lack_the_field(derived):
+    """Defect: the typed engine lets a missing cell satisfy no comparison, so `ne` and `nin` on a derived
+    collection dropped every row without the field, which the same filter on a stored collection returns."""
+    writer, job = derived("legacy-negation", {"samples/mixed.json": MIXED_DOCUMENT},
+                          text=_mixed_manifest(location_key=False), mapping=MIXED_MAPPING)
+    finish(writer, job)
+    expected = sorted(row["position"] for row in _mixed_source() if row.get("numeric") != 7)
+
+    for op, value in (("ne", 7), ("nin", [7])):
+        found = _legacy_read(writer, filters=[{"column": "numeric", "op": op, "value": value}], columns=["position"])
+        assert sorted(row["position"] for row in found["rows"]) == expected
+
+
+def test_a_legacy_continuation_pages_a_derived_collection_to_its_last_row(derived):
+    """Defect: a legacy query that names a continuation on a derived collection cannot resume, so a read of more
+    rows than one page holds stops at the first page or repeats it. The pages must hold every row once."""
+    writer, job = derived("legacy-pages", {"samples/mixed.json": MIXED_DOCUMENT},
+                          text=_mixed_manifest(location_key=False), mapping=MIXED_MAPPING)
+    finish(writer, job)
+
+    rows, more = [], None
+    while True:
+        page = _legacy_read(writer, columns=["day", "position"], sort_by="position", limit=3,
+                            **({"continuation": more} if more else {}))
+        rows += [(row["day"], row["position"]) for row in page["rows"]]
+        if not page["has_more"]:
+            break
+        more = page["next_cursor"]
+    assert sorted(rows) == sorted((row["day"], row["position"]) for row in _mixed_source())
+    assert [position for _, position in rows] == sorted(position for _, position in rows)
+
+
+@pytest.mark.parametrize("arguments", [
+    {"aggregate": "count"},
+    {"item_key": "x"},
+    {"date_from": "2026-11-02"},
+], ids=["aggregate", "one row with its body", "date bounds without a date column"])
+def test_a_legacy_query_with_no_typed_spelling_refuses_and_names_the_typed_query(derived, arguments):
+    """Defect: the refusal of what the typed engine cannot spell named no way forward, or the way forward never
+    reached the agent (its repair rode in a detail that the agent's refusal drops). The refusal must carry the
+    typed query call as its remediation."""
+    writer, job = derived("legacy-refused", {"samples/mixed.json": MIXED_DOCUMENT},
+                          text=_mixed_manifest(location_key=False), mapping=MIXED_MAPPING)
+    finish(writer, job)
+
+    with pytest.raises(OpError) as refused:
+        _legacy_read(writer, **arguments)
+    assert refused.value.code == derived_rows.COLLECTION_DERIVED
+    assert "query=" in refused.value.remediation
+
+
 def test_a_revision_13_store_upgrades_its_derived_collection_as_hashed_without_touching_its_rows(derived):
     """Defect: the upgrade to revision 14 re-keys or rebuilds a derived collection made before ordered keys,
     or marks it ordered, so its stored UUID keys no longer match the keys its imports compute.
@@ -1235,3 +1317,20 @@ def test_a_preview_refuses_what_a_start_refuses_for_a_source_without_members(der
             agent(writer, mode=mode, **request)
         refusals.append((refused.value.code, refused.value.details["at"]))
     assert refusals == [(derived_rows.COLLECTION_DERIVED, "import_request.members")] * 2
+
+
+def test_a_derived_preview_and_import_agree_on_rows_with_sensitivity_values(derived):
+    """Defect: a derived preview refused rows whose `sensitivity` names a class the registry does not hold, while the
+    derived import, which keeps no governance metadata and must replay its log, imports them."""
+    text = TEXT.replace(FIELDS, FIELDS + "    sensitivity: {type: array, items: {type: string}}\n")
+    days = {"samples/2026-11-01.json": {"device": "unit-1", "days": [{"date": "2026-11-01", "samples": [
+        {"t": "2026-11-01T08:00:00", "v": 1, "cls": ["passport-ish"]},
+        {"t": "2026-11-01T09:00:00", "v": 2, "cls": ["Health"]}]}]}}
+    mapping = {**SAMPLES, "fields": {**SAMPLES["fields"], "sensitivity": "cls"}}
+    writer, job = derived("classed", days, text=text, mapping=mapping)
+    preview = agent(writer, mode="preview", source_ref=_preserve(writer.root, _archive(days))["path"],
+                    format="json-document", members="samples/*", mapping=mapping)
+    status = finish(writer, job)
+
+    assert preview["would_reject"] == {}, preview
+    assert status["state"] == "complete" and status["rows"]["imported"] == 2, status

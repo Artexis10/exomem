@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import json
 import os
 import threading
 import time
@@ -39,6 +40,7 @@ from exomem import (
 )
 from exomem import find as find_module
 from exomem import vault as vault_module
+from exomem.asr_facts import AsrFacts
 from exomem.vault import content_hash
 
 
@@ -2619,6 +2621,41 @@ def test_recovered_speech_request_keeps_its_diarization_choice(
     assert binary.read_bytes() == b"FAKEBYTES"
 
 
+def test_the_tracks_an_owner_declared_on_a_sidecar_reach_the_engine_and_outlive_the_extraction(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saved = _preserve_media_stub(vault, filename="panel.wav")
+    sidecar = vault / saved.sidecar_path
+    declared = [{"name": "Host", "channel": 0, "single_voice": True}, {"name": "Guest", "channel": 1}]
+    # A unit fixture: no door writes `speech_tracks` yet, so the test sets the field with the private setter.
+    sidecar.write_text(
+        preserve._set_frontmatter_field(sidecar.read_text(encoding="utf-8"), "speech_tracks", json.dumps(declared)),
+        encoding="utf-8",
+    )
+    asked: list[object] = []
+
+    def transcribe(_path, *, media_type, tracks=None, **_options):
+        asked.append(tracks)
+        return extract.ExtractResult(
+            text="[0:00] [Host]: hello", media_type=media_type, engine="test+tracks+timed",
+            asr=AsrFacts(
+                language="en", tracks_policy="tracks-policy-test",
+                tracks_skipped="Ghost: the file has 1 audio streams; stream 3 does not exist",
+            ),
+        )
+
+    monkeypatch.setattr(extract, "extract_text", transcribe)
+
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+    worker._process(media_worker._Job(binary_path=vault / saved.path, sidecar_path=sidecar, media_type="audio"))
+
+    published = _parsed_frontmatter(sidecar)
+    assert asked == [declared]
+    assert published["speech_tracks"] == declared, "a new extraction keeps what the owner declared"
+    assert published["asr_tracks_policy"] == "tracks-policy-test"
+    assert published["asr_tracks_skipped"] == "Ghost: the file has 1 audio streams; stream 3 does not exist"
+
+
 @pytest.mark.parametrize("awaiting_dependency", [False, True])
 def test_a_disabled_speech_engine_retains_the_accepted_choice(vault, monkeypatch, awaiting_dependency) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
@@ -2920,6 +2957,45 @@ def test_worker_clip_embeds_image(vault, monkeypatch: pytest.MonkeyPatch) -> Non
         )
     )
     assert embeddings.ClipIndex(vault).has(res.path)
+
+
+def test_an_image_processed_with_faces_off_acquires_and_loads_no_face_model(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Faces off must not download or load a biometric model, nor create the face store."""
+    from exomem import embedding_backend, face_models, face_store, media_models
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    res = preserve.preserve_bytes(
+        vault, scope="Rental", category="photos", filename="picnic.jpg", data=b"\xff\xd8\xff", text="picnic"
+    )
+    monkeypatch.setattr(embeddings, "embed_image", lambda p: np.ones(embeddings.CLIP_DIM, dtype=np.float32))
+    acquired: list[str] = []
+
+    def refuse_acquisition(model_name, served):
+        acquired.append(model_name)
+        raise embedding_backend.ModelFilesUnavailable(f"{model_name}: not fetched in this test")
+
+    monkeypatch.setattr(embedding_backend, "ensure_artifact", refuse_acquisition)
+    loaded: list[bool] = []
+    monkeypatch.setattr(face_models, "load", lambda: loaded.append(True))
+
+    media_worker.MediaWorker(vault)._process(
+        media_worker._Job(
+            binary_path=vault / res.path,
+            sidecar_path=vault / res.sidecar_path,
+            media_type="image",
+            do_ocr=False,
+            do_clip=True,
+        )
+    )
+
+    assert embeddings.ClipIndex(vault).has(res.path)
+    face_models_named = {media_models.model_spec(kind)["model"] for kind in (face_models.DETECT, face_models.EMBED)}
+    assert not face_models_named & set(acquired)
+    assert loaded == []
+    assert not face_store.store_dir(vault).exists()
 
 
 def test_a_clip_job_queued_before_clip_was_disabled_skips_clip(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3837,6 +3913,77 @@ def test_a_pdf_child_aborted_under_its_data_limit_ends_the_job_over_budget(
         assert media_jobs.status(vault)["child_crashes"]["signal"] == "SIGABRT"
 
 
+@pytest.mark.parametrize(
+    ("returncode", "death"),
+    [(-11, "with SIGSEGV"), (-40, "with signal 40"), (3, "with exit status 3"), (-15, None)],
+    ids=["native-fault", "unnamed-signal", "native-exit", "asked-to-stop"],
+)
+def test_a_file_that_keeps_killing_the_media_process_is_blocked_and_the_queue_moves_on(
+    vault, monkeypatch: pytest.MonkeyPatch, returncode: int, death: str | None
+) -> None:
+    # A file that kills the media process returned to the head of the queue after every death,
+    # so a new process started on it for ever and the files queued behind it never ran. A PDF:
+    # a stopped speech job already yields its place to fresh work, which would hide the loop.
+    # A process told to stop (`death` None) says nothing about its file: a service restart
+    # during a long file must not block it.
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    deadly = _preserve_media_stub(vault, filename="kills-its-child.pdf")
+    for result in (deadly, _preserve_media_stub(vault, filename="queued-behind.pdf")):
+        worker.enqueue(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type="pdf")
+    now = [1000.0]
+    claims: list[str] = []
+
+    class _ExitedChild:
+        pid = 2_147_483_644
+
+        def __init__(self, returncode: int) -> None:
+            self.returncode = returncode
+
+        def poll(self):
+            return self.returncode
+
+    def launch():
+        job = worker._store.claim_next()
+        worker._store.set_worker(_ExitedChild.pid, 30.0)  # as the child records itself
+        if job is None:
+            return _ExitedChild(0)
+        claims.append(job.binary_path.name)
+        if job.binary_path.name == "queued-behind.pdf":
+            worker._store.complete(job)
+            return _ExitedChild(0)
+        # Dies with the job claimed and no cleanup run, as a native fault or `os._exit` ends it.
+        return _ExitedChild(returncode)
+
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    monkeypatch.setattr(worker, "_launch_child", launch)
+
+    def poll(_timeout):
+        if worker._child is None:
+            now[0] += 10
+            if "queued-behind.pdf" in claims or now[0] >= 3000.0:
+                worker._stop_event.set()
+        return False
+
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    worker._supervise()
+
+    stop_limit = media_brakes.settings().stop_limit
+    if death is None:
+        assert len(claims) > stop_limit and set(claims) == {"kills-its-child.pdf"}
+        kept = worker._store.get_by_binary(vault / deadly.path, media_type="pdf")
+        assert kept is not None and kept.state == media_jobs.PENDING
+        return
+    assert claims == ["kills-its-child.pdf"] * stop_limit + ["queued-behind.pdf"]
+    [row] = media_jobs.status(vault)["jobs"]
+    assert (row["path"], row["state"], row["retryable"]) == (deadly.path, media_jobs.BLOCKED, True)
+    assert row["next_action"] == media_jobs.CHILD_CRASHED_ACTION
+    assert death in row["error"] and f"(release {media_worker.__version__})" in row["error"]
+    # The tenant sees the same verdict on the file's sidecar.
+    shown = _parsed_frontmatter(vault / deadly.sidecar_path)
+    assert (shown["processing_state"], shown["processing_retryable"]) == (media_jobs.BLOCKED, True)
+
+
 def test_child_blocks_ambiguous_sidecar_boundary_without_writing_it(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4479,7 +4626,7 @@ def test_transcript_index_refresh_failure_is_durable_and_retryable_without_asr(
     assert "transcript survives index failure" in sidecar.read_text(encoding="utf-8")
     status = deferred_index.full_status(vault)
     assert status["count"] == 1
-    assert status["next_action"] == f'exomem index --vault "{vault}" --scope vault'
+    assert status["next_action"] == f'evermatter index --vault "{vault}" --scope vault'
 
     monkeypatch.setattr(
         index_sync,

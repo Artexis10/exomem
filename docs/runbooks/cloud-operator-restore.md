@@ -17,10 +17,10 @@ The exercise did not invoke the current top-level `drill` wrapper.
 The reviewed helper, its tests and the deployed-image recovery support repeatable comparison of both roots.
 This proof does not close in-place failure recovery, historical rollback or acceptance of a new runtime image.
 
-This runbook covers two operator tools for cells on Hetzner network volumes (storage class `exomem-cloud-encrypted`). One script, `infra/scripts/cloud_restore.sh`, runs both:
+This runbook covers two operator tools for cells on Hetzner network volumes: the shared `exomem-cloud-encrypted` class and the per-cell key class that the live cellctl configures. One script, `infra/scripts/cloud_restore.sh`, runs both:
 
 - **Restore drill.** It restores a cell's restic snapshot from object storage into a scratch namespace.
-  It hashes each backup root and compares the hashes with an independently captured reference.
+  It hashes each backup root and judges the hashes against an independently captured reference.
   The cell keeps serving: the drill never stops it, mounts its volume in a new pod or writes it.
 - **In-place restore.** It replaces a live cell's contents with a chosen snapshot, after a corrupted volume or a bad change. The cell is down from the stop to the start.
 
@@ -35,7 +35,7 @@ A reference must represent the selected snapshot's canonical version.
 For canonical host proof, use a frozen reference from the selected snapshot's stopped backup interval.
 Record how that reference corresponds to the snapshot; a prior run ID alone does not prove correspondence.
 Capture both roots before restoring anything. The drill captures its reference before it starts the scratch restore.
-Record the snapshot time, each root's entry counts, exact matches, downtime and verified scratch-resource absence.
+Record the snapshot time, each root's count line, the verdict, downtime and verified scratch-resource absence.
 Keep the result scoped to the paths and properties actually compared.
 Repeat after each relevant release and backup-policy change and at the agreed recovery-check cadence.
 Today's successful backup row alone does not satisfy this drill.
@@ -84,7 +84,7 @@ The cell can run on another node than the server:
 - An in-place restore works for a cell on any node. Its helper pod and its restore Job take the cell's own placement, so the cell's volume stays on the cell's node during the downtime.
 - The scratch restore and its verify pod run on a node with no taint, as the export does, so they stay off a dedicated cell's node.
 
-The renderer is `infra/scripts/cloud_restore_manifests.py`, which the [export runbook](cloud-operator-export.md) also uses. It calls cellctl's own `render_cell_manifests` and `render_restore_job` from the same checkout, and it renders the helper pods. The hasher is `infra/scripts/cloud_vault_digest.py`. It hashes a regular file by content, a symlink by its target text without following it, and stops on any unreadable directory. The helper pod runs `infra/scripts/cloud_restore_volume.sh` to move the backed-up paths aside and to move them back.
+The renderer is `infra/scripts/cloud_restore_manifests.py`, which the [export runbook](cloud-operator-export.md) also uses. It calls cellctl's own `render_cell_manifests` and `render_restore_job` from the same checkout, and it renders the helper pods. The hasher and the drill's judge are in `infra/scripts/cloud_vault_digest.py`. It hashes a regular file by content, a symlink by its target text without following it, and stops on any unreadable directory. The helper pod runs `infra/scripts/cloud_restore_volume.sh` to move the backed-up paths aside and to move them back.
 
 Each backup root must exist as a directory itself. A missing, unreadable or linked root fails hashing.
 An empty host directory can pass; an empty vault cannot.
@@ -96,7 +96,8 @@ Both tools refuse to start in these cases:
 - the script does not run on the K3s server;
 - the time is inside the nightly backup window that the live cellctl Deployment is configured with (`cells.backupWindow`, 02:00-05:00 UTC by default);
 - the node has less than 2 GiB of memory available;
-- the cell's volume is not in the `exomem-cloud-encrypted` class.
+- the cell's volume is not in a Hetzner class that the live cellctl configures, or it is in the local class;
+- the cell has no stored object-store key and no `cell-object-store-key` Secret.
 
 The backup window check runs at the start and again just before the stop. It does not stop a run that goes on into the window. A restore that runs into the window keeps cellctl paused, so no cell backs up until cellctl resumes. Start a restore early enough to finish before the window opens.
 
@@ -131,10 +132,42 @@ Run the steps below on the node, as root, in `/root/exomem-release-$COMMIT`.
 4. Show progress with `infra/scripts/cloud_restore.sh follow "$RUN_ID"`. Repeat until `ActiveState=inactive`.
 5. Read the last log line. Expect `verdict=pass scratch_cleanup=yes rc=0`.
 
-A drill against `live` passes only when both roots match the selected snapshot.
-Background runtime work can change host state while the cell serves, even without a governed write.
-The capture timestamps describe a sequential scan; they do not prove an atomic view of a running cell.
-A mismatch reports divergence from the captured reference. It does not alone prove that the backup or restore is defective.
+A drill judges what the reference has not changed since the snapshot.
+It reads the snapshot's time from the restore Job's log, and each reference entry's change time (ctime) from the capture.
+Each entry with a ctime before that time must be in the restore with the same content.
+A later change, and an entry that the reference no longer has, are reported and do not fail the drill.
+A serving cell writes runtime state after a backup, so a `live` drill passes when the backup holds what the cell held then.
+
+Each root prints a count line, then its verdict:
+
+```
+== judge /data/vault
+judged=11709 changed_since=0 removed_since=0 moved_since=0 excluded=0 missing=0 differ=0
+/data/vault verdict=pass judge_exit=0
+```
+
+- `judged`: the reference entries that the rule compared with the restore.
+- `changed_since`: reference entries with a ctime at or after the snapshot's time, not judged.
+- `removed_since`: restored entries that the reference lacks, not judged.
+- `moved_since`: pairs of a reference entry and a restored entry with the same content and file name at different paths. A directory renamed after the snapshot gives one pair for each file, because a rename does not change its files' ctimes. Each pair counts in `judged` and does not fail the drill.
+- `excluded`: entries that match the backup's exclude patterns, not judged.
+- `missing` and `differ`: judged entries that the restore lacks or holds with other content. Any of them fails the drill.
+
+The verdict is `pass`, `fail` or `inconclusive`:
+
+- `fail`: a judged entry is missing or different, or the judge could not run. A judge that could not run logs `judge failed: <error class>`. A bad judge argument exits 2 with a usage message, and the verdict is still `fail`.
+- `inconclusive`: the vault root judged no entry, so the drill proved nothing. The run ends with `rc=1`.
+  This happens when the snapshot is older than every entry, or after a recursive ownership change that moved every ctime.
+  Run the drill again with a newer snapshot.
+- The host root may judge nothing and still pass.
+
+The log holds counts only. The names behind each count are in `/var/lib/exomem-restore/<run ID>/hashes/judge-<root>/`, one file per count.
+Before you treat a `fail` as a defective backup, check one listed entry by hand.
+Compare its ctime with the snapshot's time, and look for a same-named file under `removed_since.txt` that the cell may have renamed or deleted.
+A clock difference between the backup node and the cell node can misjudge an entry changed close to the snapshot's time.
+When the restore Job's log has no snapshot time, the drill logs `!! the restore Job's log has no snapshot time` and ends `verdict=fail`.
+A drill supports only cells whose backup reads the stopped cell's volume, which is every cell that this runbook covers.
+The capture timestamps describe a sequential scan, not an atomic view of a running cell.
 
 A drill against `prior:<id>` reads both roots that an earlier restore kept in `/data/.restore-prior-<id>`.
 Use it when independent capture evidence shows that those roots correspond to the selected snapshot.
@@ -146,7 +179,7 @@ An owner import that kept only a vault cannot provide the missing host reference
 
 **Warning:** do not deploy the platform chart (the `helm upgrade` in [platform deploy](cloud-platform-deploy.md)) while a restore runs. The chart sets cellctl back to one replica, and cellctl then starts the cell on a half-restored volume. The script cannot prevent this.
 
-1. Run a drill against `live` first. Expect separate vault and host divergence counts.
+1. Run a drill against `live` first. Expect `verdict=pass` and a count line for each root.
 2. Start the restore: `infra/scripts/cloud_restore.sh restore "$CELL_ID" "$SNAPSHOT"`.
 3. Note the `run_id` it prints.
 4. Show progress with `infra/scripts/cloud_restore.sh follow "$RUN_ID"`. Repeat until `ActiveState=inactive`.
@@ -183,7 +216,7 @@ The last log line names the phase where the run stopped. The script recovers by 
 
 To abort a run, stop its unit: `systemctl stop exomem-restore-<run ID>`. The script starts the recovery for its phase when its current command returns, within five minutes. A second stop does not interrupt the recovery. A run also stops this way when it outlasts its time limit: 50 minutes for a drill, 150 minutes for a restore.
 
-A failed run keeps its hash lists in `/var/lib/exomem-restore/<run ID>/hashes` for diagnosis.
+A failed or inconclusive run keeps its hash lists in `/var/lib/exomem-restore/<run ID>/hashes` for diagnosis.
 Delete that directory after recording the evidence. The restore Job's reason appears after `!! restore Job did not succeed`.
 
 ### Recover by hand
@@ -257,7 +290,7 @@ The cell keeps serving throughout.
 3. Set `CELL_ID`, `SNAPSHOT`, `ORIGINAL` (the vault-relative path), `KIND` and `EXPECTED` (the SHA-256).
 4. Set `CELLCTL_PYTHON` as the export runbook does, and run every block from the reviewed release's checkout root.
 5. Restore the snapshot into scratch, as the export runbook's "Render and apply only scratch resources" does. Expect the Job to complete.
-   If the command prints `scratch: 'b2-key-id'; stop` or `scratch: the cell's volume is not in the exomem-cloud-encrypted class; stop`, stop. The command does not yet support that cell (issue #2670).
+   The scratch volume takes the cell volume's storage class and passphrase. For a cell that the key custodian provisioned, the command copies the cell's `cell-object-store-key` Secret into the scratch namespace.
    The Job runs `restic restore <snapshot> --target / --delete --include /data/vault --include /data/host` on the scratch volume.
 6. Set `SCRATCH` to that scratch namespace, then run the first block. Expect `hash matches the binding`.
 7. Run the second block. It writes the original outside the vault, checks its hash, then moves it into place. Expect `original restored`.

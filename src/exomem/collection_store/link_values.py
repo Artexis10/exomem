@@ -125,13 +125,15 @@ def for_write(writer, manifest) -> LinkValues | None:
     return LinkValues(writer, manifest, fields) if fields and not manifest.derived else None
 
 
-def with_notes(result: dict[str, Any], notes: Mapping[str, Any]) -> dict[str, Any]:
-    """``result`` with a request's link notes added; its warnings join the reply's own, never replace them."""
-    if not notes:
+def with_notes(result: dict[str, Any], *requests: Mapping[str, Any]) -> dict[str, Any]:
+    """``result`` with each note set of a request added; the warnings join the reply's own, never replace them."""
+    if not any(requests):
         return result
-    merged = {**result, **{key: value for key, value in notes.items() if key != "warnings"}}
-    if "warnings" in notes:
-        merged["warnings"] = [*result.get("warnings", ()), *notes["warnings"]]
+    merged = dict(result)
+    for notes in requests:
+        merged.update({key: value for key, value in notes.items() if key != "warnings"})
+        if notes.get("warnings"):
+            merged["warnings"] = [*merged.get("warnings", ()), *notes["warnings"]]
     return merged
 
 

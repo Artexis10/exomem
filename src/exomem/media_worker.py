@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    __version__,
     asr_runtime,
     backoff,
     capture_metadata,
@@ -61,7 +62,7 @@ from . import (
     runtime_resources,
     scene_frames,
     semantic_segments,
-    temporal,
+    speech_tracks,
 )
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .backfill import iter_kb_files
@@ -89,7 +90,6 @@ from .vault import (
     PlannedWrite,
     batch_atomic_write,
     content_hash,
-    parse_frontmatter,
     post_commit_batch_fanout,
     read_guarded_text,
 )
@@ -132,6 +132,7 @@ _PREVIEW_SETTLEMENT_ATTEMPTS = 3
 _RETURNED = "returned"
 _RENDERER_ACTION = "check the timestamp renderer, then retry"
 _FAILED_ACTION = "repair or replace the media artifact, then retry"
+_TRACKS_ACTION = "reprocess the recording with its tracks"
 _LANGUAGE_ACTION = (
     "choose a language the speech model supports and process the file again with reprocess, "
     "or correct EXOMEM_ASR_LANGUAGE"
@@ -165,6 +166,24 @@ _SLOT_TOO_SMALL_EXIT_CODE = 80
 #: The child found the GPU busy for the speech engine and left only speech work pending. The
 #: jobs are still pending: nothing is blocked, and the supervisor starts the next child later.
 _GPU_BUSY_EXIT_CODE = 81
+#: The exit statuses of the parent-child protocol above. A child that exits with one decided
+#: what happens to its job itself; any other non-zero status ends the job as a crash does.
+_PROTOCOL_EXIT_CODES = frozenset({
+    _TRANSIENT_EXIT_CODE,
+    _LOCK_UNAVAILABLE_EXIT_CODE,
+    _MEMORY_RECYCLE_EXIT_CODE,
+    _MEMORY_WAIT_EXIT_CODE,
+    _AUTHORITY_UNAVAILABLE_EXIT_CODE,
+    _SLOT_TOO_SMALL_EXIT_CODE,
+    _GPU_BUSY_EXIT_CODE,
+})
+#: The POSIX signals that ask a process to end: a service manager's stop, an operator's kill,
+#: a closed terminal. A child that dies by one was told to stop, which says nothing about its
+#: job. SIGKILL is not one: the kernel's out-of-memory kill also sends it, and a file that drives
+#: the child into it every time is a file that kills it. Windows has no SIGHUP.
+_STOP_REQUEST_SIGNALS = frozenset(
+    {signal.SIGTERM, signal.SIGINT, *((signal.SIGHUP,) if hasattr(signal, "SIGHUP") else ())}
+)
 #: Relaunch delay after consecutive authority refusals: from the follower cadence,
 #: doubling to this ceiling, so a lease that frees up still starts work within it.
 _AUTHORITY_BACKOFF_MAX_SECONDS = 60.0
@@ -517,7 +536,7 @@ class MediaWorker:
         if selected not in {"process", "inline"}:
             raise ValueError("media worker mode must be process or inline")
         self._execution_mode = selected
-        self._idle_seconds = idle_seconds if idle_seconds is not None else _idle_seconds()
+        self._idle_seconds = idle_seconds if idle_seconds is not None else idle_seconds_setting()
         self._q: queue.Queue[_Job | None] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -580,6 +599,17 @@ class MediaWorker:
                     log.info(
                         "media worker: recovered %d sidecar sharing failure(s)",
                         sharing_recovered,
+                    )
+                # A file that killed the media process under another release gets one more
+                # try under this one, which may carry the fix.
+                crash_returns = self._store.recover_crash_blocks(
+                    __version__, stop_limit=media_brakes.settings().stop_limit
+                )
+                if crash_returns:
+                    log.info(
+                        "media worker: returned %d file(s) that crashed the media process under "
+                        "another release to the queue",
+                        crash_returns,
                     )
                 # Read here, converged on the supervisor thread: presenting a dropped
                 # job as pending writes its sidecar, which must not hold up startup.
@@ -905,6 +935,22 @@ class MediaWorker:
             return self._publication_outcome(
                 committed, BLOCKED, self._asr_runtime_failure
             )
+        if job.tracks_unreadable is not None:
+            # The stored row is wrong, not the media: every retry reads the same row,
+            # so only a new declaration repairs it. The error names that remedy as well,
+            # because a reprocess over a complete transcript keeps only the error, on the job row.
+            unreadable = f"{job.tracks_unreadable}; {_TRACKS_ACTION}"
+            committed = self._commit_processing_failure(
+                job,
+                expected_sidecar=expected_sidecar,
+                expected_evidence_version=expected_evidence_version,
+                expected_binary=expected_binary,
+                state=FAILED,
+                error=unreadable,
+                next_action=_TRACKS_ACTION,
+                retryable=False,
+            )
+            return self._publication_outcome(committed, FAILED, unreadable)
         try:
             if job.diarize is not None and not media_engines.stage_enabled(job.media_type):
                 raise extract.EngineDisabled(media_engines.SPEECH, "the speech engine is switched off")
@@ -920,6 +966,10 @@ class MediaWorker:
                 kwargs["multilingual"] = True
             if diarize is not None:
                 kwargs["diarize"] = diarize
+            # A request's declaration wins over the one the sidecar records; the commit then records it.
+            tracks = speech_tracks.as_data(job.tracks) if job.tracks is not None else preserve.speech_tracks_pin(claimed_content)
+            if tracks is not None:
+                kwargs["tracks"] = tracks
             with media_store.logical_view(self._vault_root, job.binary_path) as view:
                 result = extract.extract_text(view, **kwargs)
         except extract.TimestampRenderingUnavailable as e:
@@ -1196,6 +1246,26 @@ class MediaWorker:
             # try again, so the sidecar must not offer a retry the ledger refuses.
             retryable=False,
             blocked_reason=media_jobs.OVER_BUDGET,
+            blocked_context=context,
+        )
+
+    def publish_crash_block(self, job: _Job, error: str, context: str) -> bool:
+        """Show that the file crashed the media process the stop limit of times.
+
+        `error` and `context` are the `media_jobs.crash_verdict` pair the ledger recorded.
+        """
+        expected_sidecar = _content_digest(job.sidecar_path)
+        expected_binary = self._identity(job)
+        if expected_sidecar is None or expected_binary is None:
+            return False
+        return self._commit_processing_failure(
+            job,
+            expected_sidecar=expected_sidecar,
+            expected_binary=expected_binary,
+            state=BLOCKED,
+            error=error,
+            next_action=media_jobs.CHILD_CRASHED_ACTION,
+            blocked_reason=media_jobs.CHILD_CRASHED,
             blocked_context=context,
         )
 
@@ -1485,6 +1555,49 @@ class MediaWorker:
         self._allocation_abort_of = child_pid
         return True
 
+    def _record_crash_stops(self, returncode: int | None) -> None:
+        """Count a death of the media child that the supervisor did not cause against each job it ran.
+
+        The caller passes only a child that died without its own cleanup, so it still owns the runtime
+        record and the running jobs are its own. The recovery after this returns each job to run again,
+        so without the count a file that kills its child would start a child for ever at the head of
+        the queue. After the stop limit of crashes under one release the job is blocked as crashed and
+        the jobs behind it run. A preview job keeps its own attempt limit. A recorded stop takes the job
+        out of running, so a replayed exit counts it once.
+        """
+        assert self._store is not None
+        if returncode is None or returncode == 0 or returncode in _PROTOCOL_EXIT_CODES:
+            return
+        stop_requested = returncode < 0 and -returncode in _STOP_REQUEST_SIGNALS
+        if self._child_stopped or self._stop_event.is_set() or stop_requested:
+            return
+        signal_name = cuda_containment.signal_name(-returncode) if returncode < 0 else None
+        stop_limit = media_brakes.settings().stop_limit
+        error, context = media_jobs.crash_verdict(
+            signal_name=signal_name,
+            exit_status=None if returncode < 0 else returncode,
+            release=__version__,
+        )
+        for job in self._store.running_jobs():
+            if job.media_type == media_jobs.PREVIEW_MEDIA_TYPE:
+                continue
+            verdict = self._store.record_crash_stop(
+                job,
+                release=__version__,
+                stop_limit=stop_limit,
+                error=error,
+                context=context,
+                progress=self._speech_progress(job),
+            )
+            if verdict == media_jobs.CHILD_CRASHED:
+                log.error(
+                    "media worker: the media process kept dying while it ran %s (last %s); "
+                    "blocked until a retry or another release",
+                    job.binary_path.name,
+                    signal_name or f"exit status {returncode}",
+                )
+                self.publish_crash_block(job, error, context)
+
     def _record_stop(self) -> None:
         """Record the stop that `_stop_child` made for each job its child ran, once.
 
@@ -1629,6 +1742,8 @@ class MediaWorker:
         handoff, receipts, surplus, epoch_published = committed
         self._complete_deferred_graph_completion(handoff, receipts, epoch_published=epoch_published)
         self._retire_surplus_parts(surplus)
+        # The transcript is published: a multitrack recording's track records are no longer needed to resume.
+        self._discard_speech_progress(job)
         return True
 
     def _extraction_writes(
@@ -1646,69 +1761,25 @@ class MediaWorker:
         capture: CaptureFacts | None,
         reprocessing: bool,
     ) -> tuple[tuple[PlannedWrite, ...], tuple[Path, ...]]:
-        """The writes for a finished extraction, and the part pages to retire once they commit.
-
-        The first write is the sidecar. It holds the first part of the text; the rest is on
-        part pages in the same batch. A reprocess adds the pages for the old extraction, with its
-        parts, so the sidecar always holds one extraction, and a rejected batch leaves the old
-        text where it was.
-        """
-        from . import media_processing
-
-        fields = dict(
+        """The writes for a job's finished extraction (`prior_extraction.extraction_writes`)."""
+        return prior_extraction.extraction_writes(
+            self._vault_root,
+            job.sidecar_path,
+            before,
+            guard,
+            binary_path=job.binary_path,
+            text=text,
             engine=engine,
             speakers=speakers,
             speaker_verification=speaker_verification,
             diarize=job.diarize,
+            speech_tracks=job.tracks,
             attempts=max(1, job.attempts),
             asr=asr,
             ocr=ocr,
             capture=capture,
-            # Both callers have just revalidated the original; a page stored with it records these.
-            binary_hints=media_processing.read_timestamp_hints(
-                media_processing.held_path(self._vault_root, job.binary_path)
-            ),
+            reprocessing=reprocessing,
         )
-        if not reprocessing:
-            plan, write = preserve.sidecar_extraction_writes(
-                self._vault_root, job.sidecar_path, before, guard, text=text, **fields
-            )
-            return (write, *plan.writes), plan.surplus
-        page, ordinal = prior_extraction.next_page(
-            job.sidecar_path, prior_extraction.links_of(before)
-        )
-        date_iso = temporal.stamp(temporal.now())
-        old_pieces = extraction_parts.split(
-            extraction_parts.text_with_gaps(self._vault_root, job.sidecar_path, before)
-        )
-        old_plan = extraction_parts.plan(
-            self._vault_root, page, old_pieces,
-            inherited=parse_frontmatter(before)[0], date_iso=date_iso,
-        )
-        prior_page = prior_extraction.render(
-            before,
-            artifact_name=job.sidecar_path.name.removesuffix(".md"),
-            sidecar_link=prior_extraction.link_to(self._vault_root, job.sidecar_path),
-            ordinal=ordinal,
-            date_iso=date_iso,
-            text=old_pieces[0],
-            parts=extraction_parts.layout(page, old_pieces),
-        )
-        plan, write = preserve.sidecar_extraction_writes(
-            self._vault_root, job.sidecar_path, before, guard, text=text,
-            prior_extractions=(
-                *prior_extraction.links_of(before),
-                prior_extraction.link_to(self._vault_root, page),
-            ),
-            reset_speakers=True,
-            **fields,
-        )
-        return (
-            write,
-            PlannedWrite(page, prior_page, expected_hash=MISSING_CONTENT_HASH),
-            *old_plan.writes,
-            *plan.writes,
-        ), plan.surplus
 
     def _reprocesses_completed(self, job: _Job) -> bool:
         """Whether this job re-extracts a transcript that is complete, so it must not touch the sidecar."""
@@ -2010,11 +2081,15 @@ class MediaWorker:
             return
         if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
             return
-        from . import media_processing, media_store
+        from . import face_scan, face_store, media_processing, media_store
 
         is_video = job.media_type == "video"
         scene_pairs: list | None = None
         parent_clip_samples: tuple[projected_retrieval.ProjectionClipSample, ...] | None = None
+        # The face step reads the pictures this step decodes: each video keyframe it embeds, or the image.
+        faces_on = face_store.active(self._vault_root)
+        keyframes: list[tuple[float, object]] | None = [] if faces_on and is_video else None
+        faces = None
         expected_binary = self._identity(job)
         if expected_binary is None:
             log.warning("CLIP skip %s: media identity unavailable", job.binary_path.name)
@@ -2026,10 +2101,18 @@ class MediaWorker:
                     # representative images to persist (EXOMEM_VIDEO_SCENE_FRAMES).
                     frames, scene_pairs = embeddings.embed_video_scenes(view)
                     parent_clip_samples = scene_frames.projection_clip_samples(frames)
+                    if keyframes is not None:
+                        keyframes.extend((float(scene.rep_ts), image) for scene, image in scene_pairs)
+                elif is_video and keyframes is not None:
+                    frames = embeddings.embed_video_frames(view, keyframes_out=keyframes)
                 elif is_video:
                     frames = embeddings.embed_video_frames(view)
                 else:
                     vec = embeddings.embed_image(view)
+                if faces_on:
+                    # Never raises: a face failure leaves the CLIP result as it is.
+                    faces = face_scan.detect(self._vault_root, view, keyframes)
+                    keyframes = None
         except embeddings.ClipUnavailable as e:
             log.warning("CLIP unavailable for %s: %s", job.binary_path.name, e)
             return
@@ -2045,6 +2128,7 @@ class MediaWorker:
             self._vault_root, operation="background_media_clip_commit"
         )
         persist_scene_frames = False
+        face_page: tuple[str, float] | None = None
         with clip_guard:
             if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
                 return
@@ -2067,6 +2151,12 @@ class MediaWorker:
             else:
                 self._clip_index.upsert(rel, vec, mtime)
                 log.info("CLIP-indexed %s", job.binary_path.name)
+            face_page = (rel, mtime)
+        # The faces commit after the guard is released, so a foreground write never waits for grouping. They
+        # carry the scanned bytes' mtime; a change since then has its own CLIP job, which scans them again.
+        # Without faces the commit only drops faces of changed bytes, by mtime, so it needs no identity check.
+        if face_page is not None and (faces is None or self._identity(job) == expected_binary):
+            face_scan.commit(self._vault_root, face_page[0], faces, mtime=face_page[1])
         if persist_scene_frames:
             # The frames take their own hold once the projection guard is released: encoding them
             # runs with no boundary held, and only the commit of their files holds it.
@@ -2362,6 +2452,9 @@ class MediaWorker:
                         self._record_stop()
                         aborted = brakes and self._record_allocation_abort(child_pid, returncode)
                         owns_runtime = self._store.worker_pid() == child_pid
+                        if owns_runtime and not aborted:
+                            # A child that still owns the runtime died without its own cleanup.
+                            self._record_crash_stops(returncode)
                         recovered = self._store.recover_interrupted() if owns_runtime else 0
                         if owns_runtime:
                             self._store.clear_worker(child_pid)
@@ -3028,6 +3121,8 @@ class MediaWorker:
             self._store.finalize_result(
                 item.result, requeue_remaining=item.result.kind in {"extraction", "pending"}
             )
+            if item.result.kind == "extraction":
+                self._discard_speech_progress(item.result.job)
             ended.append(item.result)
         return ended
 
@@ -3291,7 +3386,8 @@ def _join_with_timeout(q: queue.Queue, timeout: float) -> None:
         time.sleep(0.02)
 
 
-def _idle_seconds() -> float:
+def idle_seconds_setting() -> float:
+    """How long a media child waits without work before it exits and closes every file it holds."""
     try:
         return max(0.1, float(os.environ.get("EXOMEM_MEDIA_IDLE_SECONDS") or "300"))
     except ValueError:
@@ -3323,13 +3419,20 @@ def _claimable_job(vault_root: Path) -> _Job | None:
 
 
 def _drain(vault_root: Path) -> None:
-    """Hydrate a turned-off store's evicted originals that fit and count the rest, on the same tick (D12)."""
-    from . import media_store
+    """Hydrate a turned-off store's evicted originals that fit and count the rest, on the same tick (D12).
+
+    The same tick refreshes a served store's storage record.
+    """
+    from . import media_storage_record, media_store
 
     try:
         media_store.drain_tick(vault_root, claimable=lambda: _claimable_job(vault_root))
     except Exception:  # noqa: BLE001 - the next tick tries again
         log.warning("media worker: drain deferred", exc_info=True)
+    try:
+        media_storage_record.refresh(vault_root)  # The backup Job copies it for Home (task 4.9); it is due every quarter hour.
+    except Exception:  # noqa: BLE001 - the record ages out and the report says unknown; the next tick tries again
+        log.warning("media worker: storage record deferred", exc_info=True)
 
 
 def run_child(

@@ -13,14 +13,14 @@ The store supports WSL-mounted Windows drives that provide hard links and direct
 Eviction removes plaintext from the vault and its current mirrors. Keep the store and the exported key for recovery.
 
 Place the vault's media store configuration in `media-store.json` in its state directory.
-Keep the existing `vaults` object and store descriptors. Remove `EXOMEM_MEDIA_STORE_CONFIG` from the process environment before using the owner commands.
+Keep the existing `vaults` object and store descriptors. Remove `EVERMATTER_MEDIA_STORE_CONFIG` from the process environment before using the owner commands.
 
 The following commands use the example vault `/srv/archive` and a configured store named `disk`.
 
-1. Run `exomem media-replicas declare-store disk --vault /srv/archive`. The store gets an identity marker.
+1. Run `evermatter media-replicas declare-store disk --vault /srv/archive`. The store gets an identity marker.
 2. Export the decryption key outside the machine. You can then record that export.
-3. Run `exomem media-replicas confirm-key-export --vault /srv/archive`. The ledger records the current key version.
-4. Run `exomem media-replicas enable-eviction disk --vault /srv/archive --free-bytes 10737418240`. Eviction targets 10 GiB of free space.
+3. Run `evermatter media-replicas confirm-key-export --vault /srv/archive`. The ledger records the current key version.
+4. Run `evermatter media-replicas enable-eviction disk --vault /srv/archive --free-bytes 10737418240`. Eviction targets 10 GiB of free space.
 
 The store must have no replica entries. A switch also requires the previous store to have no remaining pointers, including pointers in Trash.
 The store must be on a different device from the vault. Declaration writes its marker through the open store directory.
@@ -39,7 +39,7 @@ On personal installs, eviction starts and stops using the disk space available t
 Use `--eviction-settle-seconds` to set that time. An unknown publication time keeps the original local.
 Reading an evicted original verifies and decrypts it from the store. A missing store reports `MEDIA_STORE_UNAVAILABLE`.
 
-Run `exomem media-replicas disable-eviction --vault /srv/archive` to stop eviction.
+Run `evermatter media-replicas disable-eviction --vault /srv/archive` to stop eviction.
 The worker restores originals that fit. You can still read the remaining originals from the store.
 
 The owner’s `process_media` status has a `replicas.eviction` section. It reports bound physical originals and plaintext bytes from the last complete inventory.
@@ -111,12 +111,12 @@ A read of unknown size after a store starts work counts toward the cap conservat
 At 500,000 similarly sized replicas and 25 TB in one store, the calculation gives 116 replicas and 5.4 GiB in about 216 seconds per round.
 Two such stores use about 432 seconds per round. At this distribution and cadence, both cover their replicas within 30 days.
 Larger or unevenly sized objects and slow or unavailable stores can lengthen the cycle.
-Raise `EXOMEM_REPLICA_CHECK_READ_MIB_PER_SECOND` if the read cap is the limiting factor.
+Raise `EVERMATTER_REPLICA_CHECK_READ_MIB_PER_SECOND` if the read cap is the limiting factor.
 The store that has waited longest goes first in each round.
 Set these two environment variables on the service to change them:
 
-- `EXOMEM_REPLICA_CHECK_CYCLE_DAYS`: the days between two checks of one replica.
-- `EXOMEM_REPLICA_CHECK_READ_MIB_PER_SECOND`: the read rate of a content check.
+- `EVERMATTER_REPLICA_CHECK_CYCLE_DAYS`: the days between two checks of one replica.
+- `EVERMATTER_REPLICA_CHECK_READ_MIB_PER_SECOND`: the read rate of a content check.
 
 ## Set the sample budget of a store
 
@@ -176,7 +176,7 @@ A later failed attempt on the same replica replaces it with that attempt's findi
 
 List the findings with the command line:
 
-1. Run `exomem media-replicas findings --vault <vault path>`.
+1. Run `evermatter media-replicas findings --vault <vault path>`.
 2. Read each entry: `path`, `store`, `failed_level`, `failure`, `found_at` and `recopy`.
 3. When the result has a `next_after` value, run the command again with `--after-path` and `--after-store` set to its two parts.
 

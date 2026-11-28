@@ -10,14 +10,15 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 
 from . import private_state, state_migration, state_paths, vault
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
 
     from . import held_fs
 
@@ -37,10 +38,23 @@ RESIDUAL_VERSION = 1
 RENAMES_PENDING_KEY = "renames_pending"
 # Where a discard that walked the stage writes its record, when the receipt could not be read.
 WALK_RECORDS = "cloud-import-walks"
+EXPANSION_RECORDS = "import-expansion"
+# The two files of a stage's expansion folder: the rows, appended one per item, and the state that caches what they say.
+EXPANSION_ROWS = "rows.jsonl"
+EXPANSION_STATE = "state.json"
+_TAIL_BLOCK = 64 * 1024
 # The code of a walked member: the receipt that would have said why it stayed was unreadable.
 UNREADABLE_CODE = "receipt_unreadable"
 # The file at a window's stage root that lists the whole series; it is never a member to file.
 SERIES_FILE = ".exomem-series.json"
+# The `filing` value of a series file that asks the cell to file the stage itself, a closed value of the file's format.
+FILING_CELL = "cell"
+# The keys of a series file's `origin` envelope, fixed by the file's format: the person's own label is free text, and the
+# two families are short lowercase tokens that the sender derived. The cell stores what it is given and never reads a meaning.
+ORIGIN_LABEL, ORIGIN_DEVICE, ORIGIN_BROWSER = "label", "device_family", "browser_family"
+_ORIGIN_TOKENS = (ORIGIN_DEVICE, ORIGIN_BROWSER)  # nosemgrep: ep-word-set -- the envelope keys that the series file's format fixes.
+_ORIGIN_LABEL_CHARS = 200
+_ORIGIN_TOKEN_CHARS = 32
 # Members that the person cleared from a residual record (D12): the same entry plus the time, kept beside `members`.
 ACKNOWLEDGED_KEY = "acknowledged"
 # What `window_record` finds, and which file holds a residual record; the status protocol's words.
@@ -106,13 +120,30 @@ class Stage:
     """A stage with a manifest: `members` maps each listed path to its (size, SHA-256).
 
     `identities` holds the identity of each member that has a well-formed one; a member without
-    one is hashed before adoption trusts it.
+    one is hashed before adoption trusts it. `derived` holds the files that the cell wrote into the stage from
+    an app export (see `export_expansion`), which are no members: the manifest stays what the sender staged.
     """
 
     import_id: str
     proof: str
     members: dict[str, tuple[int, str]]
     identities: dict[str, Identity] = field(default_factory=dict)
+    derived: dict[str, Derived] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class Derived:
+    """A file that the cell wrote into a stage from one item of an app export, with the bytes it wrote.
+
+    `created` is the time that the item states for itself, as an ISO 8601 UTC string, or None when it states none.
+    `timed` says the item stated its last update, which is then the file's modified time; an untimed file has the
+    time that it was written, which says nothing about the item.
+    """
+
+    size: int
+    sha256: str
+    created: str | None
+    timed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,10 +153,16 @@ class Series:
     The file is a JSON object `{"label": ..., "paths": [...]}`. A series file that omits either, or holds the
     wrong type for it, says nothing of it: `label` is None, and `paths` is empty. The paths are names only:
     adoption compares them as strings and never opens one.
+
+    It may also say `"filing": "cell"`, which asks the cell to file the stage itself, and carry an `origin` envelope
+    that states who sent the stage (`ORIGIN_*`). A value of another type, an unknown `filing` value and an origin
+    value of the wrong shape are each ignored, so a series file of another version reads as before.
     """
 
     label: str | None
     paths: tuple[str, ...]
+    filing: str | None = None
+    origin: dict[str, str] = field(default_factory=dict)
 
     def listing(self, members: Iterable[str]) -> tuple[str, ...]:
         """The path list when it names every one of `members` but the series file, else none.
@@ -139,6 +176,24 @@ class Series:
         wanted = [path for path in members if path != SERIES_FILE]
         named = set(self.paths)
         return self.paths if wanted and all(path in named for path in wanted) else ()
+
+
+def origin_values(document: object) -> dict[str, str]:
+    """The envelope's values that have the right shape, by envelope key; a value of another shape is left out, not refused."""
+    if not isinstance(document, dict):
+        return {}
+    values: dict[str, str] = {}
+    label = document.get(ORIGIN_LABEL)
+    if (isinstance(label, str) and label.strip() and len(label.strip()) <= _ORIGIN_LABEL_CHARS
+            and all(character.isprintable() for character in label)):
+        values[ORIGIN_LABEL] = label.strip()
+    for key in _ORIGIN_TOKENS:
+        token = document.get(key)
+        # A format check on a sender-supplied token (short, lowercase, letters, digits and hyphens), never a reading of it.
+        if (isinstance(token, str) and 0 < len(token) <= _ORIGIN_TOKEN_CHARS and token.isascii()
+                and token == token.lower() and token.replace("-", "").isalnum()):
+            values[key] = token
+    return values
 
 
 def is_series_file(path: str) -> bool:
@@ -155,10 +210,12 @@ def read_series(vault_root: Path, import_id: str) -> Series | None:
     document = None if path.is_symlink() else _load(path)
     if document is None:
         return None
-    label, paths = document.get("label"), document.get("paths")
+    label, paths, filing = document.get("label"), document.get("paths"), document.get("filing")
     return Series(
         label.strip() if isinstance(label, str) and label.strip() else None,
         tuple(paths) if isinstance(paths, list) and all(isinstance(path, str) for path in paths) else (),
+        FILING_CELL if filing == FILING_CELL else None,
+        origin_values(document.get("origin")),
     )
 
 
@@ -219,12 +276,20 @@ def _cloud_stage(import_id: str, receipt: dict) -> Stage | None:
     return Stage(import_id, CLOUD_PROOF, *manifest) if manifest is not None else None
 
 
-def read(vault_root: Path, import_id: str) -> Stage | None:
+def read(vault_root: Path, import_id: str, *, derived: bool = True) -> Stage | None:
     """The stage's manifest and what vouches for it, or None when it has none.
 
     Nothing here raises: a missing, unreadable or malformed manifest leaves the stage unrecorded,
-    which only means adoption keeps its staged copies.
+    which only means adoption keeps its staged copies. The stage carries what the cell derived from its
+    app exports, read from the expansion rows in one pass; a caller that needs only the manifest passes `derived=False`.
     """
+    stage = _manifest_stage(vault_root, import_id)
+    if stage is None or not derived:
+        return stage
+    return dataclasses.replace(stage, derived=derived_files(vault_root, import_id))
+
+
+def _manifest_stage(vault_root: Path, import_id: str) -> Stage | None:
     if not vault.is_import_id(import_id):
         return None
     receipt = read_receipt(vault_root, import_id)
@@ -239,6 +304,141 @@ def read(vault_root: Path, import_id: str) -> Stage | None:
         if manifest is not None:
             return Stage(import_id, LOCAL_PROOF, *manifest)
     return None
+
+
+def expansion_dir(vault_root: Path, import_id: str) -> Path:
+    """Where the cell keeps what it derived from the stage's app exports; raises ValueError when the vault has no state placement."""
+    return state_paths.vault_state_dir(vault_root) / EXPANSION_RECORDS / import_id
+
+
+def _expansion_store(vault_root: Path, import_id: str) -> Path:
+    """The stage's expansion folder, created owner-only; raises OSError when it is not a plain folder of this user."""
+    if not vault.is_import_id(import_id):
+        raise ValueError(f"not an import id: {import_id!r}")
+    folder = private_state.store(vault_root, EXPANSION_RECORDS) / import_id
+    folder.mkdir(mode=0o700, exist_ok=True)
+    info = os.lstat(folder)
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError(f"the expansion record of {import_id} is not a folder")
+    return folder
+
+
+def read_expansion_state(vault_root: Path, import_id: str) -> dict | None:
+    """The stage's expansion state (see `export_expansion`), or None when it has none or cannot be read."""
+    try:
+        return _load(expansion_dir(vault_root, import_id) / EXPANSION_STATE)
+    except ValueError:
+        return None
+
+
+def write_expansion_state(vault_root: Path, import_id: str, state: dict) -> None:
+    """Replace the expansion state whole and durably, as the Job writes a receipt."""
+    folder = _expansion_store(vault_root, import_id)
+    private_state.write_record(folder, EXPANSION_STATE.removesuffix(".json"), state, temp_suffix=".tmp", durable=True)
+    private_state.sync_directory(folder)
+
+
+def expansion_rows_size(vault_root: Path, import_id: str) -> int:
+    """The bytes of the stage's expansion rows file; zero when it has none."""
+    try:
+        return (expansion_dir(vault_root, import_id) / EXPANSION_ROWS).stat().st_size
+    except (OSError, ValueError):
+        return 0
+
+
+def read_expansion_rows(vault_root: Path, import_id: str, *, offset: int = 0) -> Iterator[tuple[int, dict]]:
+    """The complete rows of the stage's expansion from byte `offset`, each with the offset that follows it.
+
+    A last line that lacks its newline is a row that a crash cut in two, and is not read. A line that is not a JSON
+    object is left out: a file that no row vouches for is never consumed, so a damaged row only keeps its staged copy.
+    """
+    try:
+        stream = open(expansion_dir(vault_root, import_id) / EXPANSION_ROWS, "rb")  # noqa: SIM115 -- closed in the finally below
+    except (OSError, ValueError):
+        return
+    try:
+        stream.seek(offset)
+        position = offset
+        for line in stream:
+            if not line.endswith(b"\n"):
+                return
+            position += len(line)
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict):
+                yield position, row
+    finally:
+        stream.close()
+
+
+def append_expansion_rows(vault_root: Path, import_id: str, rows: list[dict]) -> int:
+    """Append rows to the stage's expansion and make them durable; the bytes of the file now.
+
+    A torn last line from an earlier crash is cut off first, so a row never starts in the middle of another.
+    """
+    folder = _expansion_store(vault_root, import_id)
+    path = folder / EXPANSION_ROWS
+    created = not path.exists()
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(descriptor, "r+b") as sink:
+        _cut_torn_row(sink)
+        sink.seek(0, os.SEEK_END)
+        sink.write(b"".join(json.dumps(row, separators=(",", ":")).encode("utf-8") + b"\n" for row in rows))
+        sink.flush()
+        os.fsync(sink.fileno())
+        size = sink.tell()
+    if created:
+        private_state.sync_directory(folder)
+    return size
+
+
+def _cut_torn_row(sink: BinaryIO) -> None:
+    """Truncate a rows file after its last newline, so that a row cut in two by a crash is gone."""
+    size = sink.seek(0, os.SEEK_END)
+    end = size
+    while end:
+        start = max(0, end - _TAIL_BLOCK)
+        sink.seek(start)
+        block = sink.read(end - start)
+        newline = block.rfind(b"\n")
+        if newline >= 0:
+            if start + newline + 1 != size:
+                sink.truncate(start + newline + 1)
+            return
+        end = start
+    if size:
+        sink.truncate(0)
+
+
+def derived_files(vault_root: Path, import_id: str) -> dict[str, Derived]:
+    """What the cell derived into the stage from its app exports, by path in the stage; empty when it derived nothing.
+
+    One pass over the rows. A path that two rows carry counts once, so a row that a crash repeated is no duplicate.
+    """
+    derived: dict[str, Derived] = {}
+    for _after, row in read_expansion_rows(vault_root, import_id):
+        derived.update(derived_of(row))
+    return derived
+
+
+def derived_of(row: dict) -> dict[str, Derived]:
+    """The derived files of one row by their path in the stage; a file that is not well-formed is left out.
+
+    Every file of an item carries the item's own created time. A file that no row vouches for is never consumed.
+    """
+    created = row.get("created")
+    if row.get("status") != "derived" or not (created is None or isinstance(created, str)):
+        return {}
+    derived: dict[str, Derived] = {}
+    for file in row.get("files") or ():
+        if not isinstance(file, dict):
+            continue
+        path, size, digest = file.get("path"), file.get("size"), file.get("sha256")
+        if isinstance(path, str) and isinstance(size, int) and not isinstance(size, bool) and isinstance(digest, str):
+            derived[path] = Derived(size, digest, created, file.get("timed") is True)
+    return derived
 
 
 def write_local_record(vault_root: Path, import_id: str, members: list[dict]) -> bool:
@@ -453,7 +653,7 @@ def read_residual(vault_root: Path, import_id: str) -> list[dict] | None:
     return list(record.members) if record is not None and record.kind == WINDOW_DISCARDED else None
 
 
-def _stems(directory: Path) -> set[str]:
+def stems(directory: Path) -> set[str]:
     """The import IDs that name a record file in `directory`; a missing folder holds none, an unreadable one raises."""
     try:
         with os.scandir(directory) as entries:
@@ -468,7 +668,7 @@ def window_ids(vault_root: Path) -> list[str]:
         state = state_paths.vault_state_dir(vault_root)
     except ValueError:
         return []  # A vault with no state placement has no receipt and no walk file, as `read_receipt` finds.
-    return sorted(_stems(state / CLOUD_RECEIPTS) | _stems(state / WALK_RECORDS))
+    return sorted(stems(state / CLOUD_RECEIPTS) | stems(state / WALK_RECORDS))
 
 
 def clear_residual(vault_root: Path, import_id: str, paths: set[str], at: str) -> list[str] | None:

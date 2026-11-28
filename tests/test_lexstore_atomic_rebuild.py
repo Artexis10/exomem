@@ -40,8 +40,10 @@ Building the normal-table catalog needs no FTS5, so these run everywhere.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -1549,6 +1551,94 @@ def test_foreground_delta_after_temp_target_rebases_replacement(
     assert not any("deletedcontent" in c for c in contents)
 
 
+def test_a_source_erasure_during_the_build_declines_the_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The temp copied a page's rows before a Source erasure; publishing it after would name the page again.
+
+    The erasure advances the retirement generation while the build runs, so the
+    rebuild declines and the live catalogue stays the one the eraser cleaned.
+    """
+    from exomem import source_custody
+
+    kept = _kb_file(tmp_path, "kept.md", "- [config] keptcontent ^u1")
+    erased = _kb_file(tmp_path, "erased.md", "- [config] erasedcontent ^u2")
+    _seed(tmp_path, [kept, erased])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    live_inode = store.path.stat().st_ino
+
+    real_fold = lexstore.LexicalStore._fold_to_single_file
+    state = {"erased": False}
+
+    def fold_then_erase(conn: Any) -> bool:
+        if not state["erased"]:
+            state["erased"] = True
+            erased.unlink()
+            freshness.on_files_changed(tmp_path, changed=[], deleted=[erased])
+            with writer_lease.active_manager().mutation_guard(tmp_path):
+                assert source_custody.advance_retirement_generation(tmp_path)
+        return real_fold(conn)
+
+    monkeypatch.setattr(store, "_fold_to_single_file", fold_then_erase)
+    published = store.rebuild_atomic()
+    monkeypatch.undo()
+
+    assert state["erased"]
+    assert published is False
+    assert store.path.stat().st_ino == live_inode
+
+
+@pytest.mark.parametrize("deleted", ["before the build", "during the build"])
+def test_a_rebuild_keeps_no_revision_or_journal_history_of_a_deleted_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deleted: str
+) -> None:
+    """A page deleted before the build (the copy's reconcile drops it) or during it (the replay drops it)
+    leaves no unit revision in the replacement, and the copied journal history does not survive it: a
+    Source erasure may have restarted the live journal since the copy."""
+    kept = _kb_file(tmp_path, "kept.md", "- [config] keptcontent ^u1")
+    gone = _kb_file(tmp_path, "deleted.md", "- [config] deletedcontent ^u2")
+    _seed(tmp_path, [kept, gone])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    kept_rel = kept.relative_to(tmp_path).as_posix()
+    deleted_rel = gone.relative_to(tmp_path).as_posix()
+    with sqlite3.connect(store.path) as live:
+        assert live.execute(f"SELECT count(*) FROM {lexstore.CHANGE_JOURNAL} WHERE path = ?", (kept_rel,)).fetchone()[0]
+    live.close()
+
+    def delete_page() -> None:
+        gone.unlink()
+        freshness.on_files_changed(tmp_path, changed=[], deleted=[gone])
+
+    if deleted == "before the build":
+        delete_page()  # The live catalogue keeps the page: no read has applied the deletion to it.
+    else:
+        real_fold = lexstore.LexicalStore._fold_to_single_file
+        state = {"deleted": False}
+
+        def fold_then_delete(conn: Any) -> bool:
+            if not state["deleted"]:
+                state["deleted"] = True
+                delete_page()
+            return real_fold(conn)
+
+        monkeypatch.setattr(store, "_fold_to_single_file", fold_then_delete)
+    published = store.rebuild_atomic()
+    monkeypatch.undo()
+
+    assert published is True
+    with sqlite3.connect(store.path) as live:
+        assert live.execute("SELECT count(*) FROM pages WHERE path = ?", (deleted_rel,)).fetchone() == (0,)
+        assert live.execute(
+            "SELECT count(*) FROM unit_revisions WHERE parent_path = ?", (deleted_rel,)
+        ).fetchone() == (0,)
+        assert live.execute(
+            f"SELECT count(*) FROM {lexstore.CHANGE_JOURNAL} WHERE path = ?", (kept_rel,)
+        ).fetchone() == (0,)
+    live.close()
+
+
 def test_live_blessed_inside_the_replayed_span_does_not_veto_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1906,6 +1996,255 @@ def test_await_repairs_idle_waits_for_an_in_flight_repair() -> None:
 
     # Idle on a key nobody ever registered.
     assert lexstore.await_repairs_idle(root, timeout=30.0) is True
+
+
+def _a_page(root: Path, n: int) -> Path:
+    return _kb_file(root, f"page-{n:03d}.md", " ".join(f"word{n}x{k}" for k in range(150)))
+
+
+def _a_catalogue_of_several_megabytes(root: Path, pages: int = 250) -> lexstore.LexicalStore:
+    """A built, current live catalogue large enough that a second copy of it dwarfs the build's other files."""
+    _seed(root, [_a_page(root, n) for n in range(pages)])
+    lexstore.ensure_fresh(root)
+    return lexstore.get_store(root)
+
+
+def _bytes_beside(path: Path) -> int:
+    """The total size of the files that share a name prefix with `path`: the catalogue, its logs and any temp."""
+    total = 0
+    for member in path.parent.glob(f"{path.name}*"):
+        with contextlib.suppress(OSError):  # a member may go between the listing and the stat
+            total += member.stat().st_size
+    return total
+
+
+@contextmanager
+def _watching_bytes_beside(path: Path) -> Any:
+    """Collect the largest `_bytes_beside(path)` that a sampler sees while the block runs."""
+    peak = [0]
+    stop = threading.Event()
+
+    def sample() -> None:
+        while not stop.is_set():
+            peak[0] = max(peak[0], _bytes_beside(path))
+            time.sleep(0.001)
+
+    sampler = threading.Thread(target=sample, daemon=True)
+    sampler.start()
+    try:
+        yield peak
+    finally:
+        stop.set()
+        sampler.join(_OBSERVE_SECONDS)
+
+
+@pytest.mark.parametrize("shape", ["unchanged", "new_release", "grown"])
+def test_a_full_rebuild_holds_one_extra_copy_of_the_catalogue_not_two(
+    shape: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A build that writes pages into the temp in one transaction must keep that transaction out of a
+    write-ahead log: the log holds the pages beside the main file that the checkpoint fills from them.
+    A copy of the live catalogue (`unchanged`), a first build after a release changed how pages derive
+    (`new_release`) and a build that adds pages to a smaller live catalogue (`grown`) are three branches
+    of the build. The temp holds the new catalogue once, plus a journal of the old pages that the build rewrites,
+    so its bytes stay near one copy, where a write-ahead log makes them two."""
+    store = _a_catalogue_of_several_megabytes(tmp_path, pages=60 if shape == "grown" else 250)
+    if shape == "grown":
+        _seed(tmp_path, [_a_page(tmp_path, n) for n in range(250)])
+    if shape == "new_release":
+        monkeypatch.setattr(lexstore, "__version__", "99.0.0")
+    before = _bytes_beside(store.path)
+
+    with _watching_bytes_beside(store.path) as volume_peak:
+        assert store.rebuild_atomic() is True
+
+    published_bytes = store.path.stat().st_size
+    assert published_bytes > 2_000_000, "too small for a second copy to outweigh the temp's fixed files"
+    extra = volume_peak[0] - before
+    assert extra < 1.5 * published_bytes, (
+        f"the build held {extra} bytes beside {before} bytes of live catalogue that became {published_bytes}"
+    )
+    with sqlite3.connect(store.path) as published:
+        assert published.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+@pytest.mark.parametrize("shape", ["reconciled_copy", "first_build"])
+def test_a_rebuild_stops_when_the_volume_drops_below_the_reserve_while_it_runs(
+    shape: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rebuild that parses every page again, or an import chunk that starts while it runs, can take the room
+    that the start check found. The build checks again where it already yields, and declines to wait."""
+    store = _a_catalogue_of_several_megabytes(tmp_path)
+    live = store.path.read_bytes()
+    if shape == "first_build":
+        monkeypatch.setattr(lexstore, "__version__", "99.0.0")
+    real_usage = shutil.disk_usage
+    reads = []
+
+    def room_goes_after_the_start_check(path: Any) -> Any:
+        usage = real_usage(path)
+        reads.append(path)
+        return usage if len(reads) == 1 else usage._replace(free=0)
+
+    monkeypatch.setattr(lexstore.shutil, "disk_usage", room_goes_after_the_start_check)
+
+    assert store.rebuild_atomic() is False
+
+    assert store._last_rebuild_result == "waiting_for_space"
+    assert len(reads) >= 2, "the start check did not run, or the build never checked again"
+    assert store.path.read_bytes() == live
+    assert not list(store.path.parent.glob("*rebuild*")), "the declined build left its temp"
+
+
+def test_a_rebuild_that_a_filling_volume_stopped_waits_for_the_room_it_had_before_it_copies_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A build that adds pages to a smaller live catalogue grows its temp past one copy, so a volume can pass the
+    start check and still stop the build at the reserve. The retry must not copy the live catalogue again to stop
+    at the same place: it waits until the volume holds what the stopped build had written, plus the reserve."""
+    store = _a_catalogue_of_several_megabytes(tmp_path, pages=60)
+    _seed(tmp_path, [_a_page(tmp_path, n) for n in range(250)])
+    reserve = 200_000
+    monkeypatch.setenv("EXOMEM_IMPORT_RESERVE_BYTES", str(reserve))
+    live = _bytes_beside(store.path)
+    # Room for the start check's one extra copy, but not for the temp to reach the grown catalogue's size.
+    capacity = [reserve + 3 * live]
+    real_usage = shutil.disk_usage
+
+    def room_left_beside_the_catalogue(path: Any) -> Any:
+        return real_usage(path)._replace(free=max(0, capacity[0] - _bytes_beside(store.path)))
+
+    monkeypatch.setattr(lexstore.shutil, "disk_usage", room_left_beside_the_catalogue)
+    copies = []
+    real_connect = store._connect_build_temp
+
+    def counting_connect(temp_path: Path) -> Any:
+        copies.append(temp_path)
+        return real_connect(temp_path)
+
+    monkeypatch.setattr(store, "_connect_build_temp", counting_connect)
+
+    assert store.rebuild_atomic() is False
+    assert store._last_rebuild_result == "waiting_for_space"
+    assert len(copies) == 1, "the first attempt did not start a build and stop it mid-way"
+    needed, free = store._last_space_wait
+    assert needed > free
+
+    assert store.rebuild_atomic() is False
+    assert store._last_rebuild_result == "waiting_for_space"
+    assert len(copies) == 1, "the retry copied the catalogue again before the volume had more room"
+
+    capacity[0] += 10 * live
+    assert store.rebuild_atomic() is True
+
+
+def test_a_rebuild_that_an_import_stopped_waits_for_its_own_footprint_not_for_the_room_the_import_took(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An import that fills the volume while the build runs takes bytes that the build never held. The retry
+    must wait for the reserve plus what the build's own temp had written, so a volume that has grown to
+    many times the catalogue publishes it; counting the import's bytes would keep search stale there."""
+    store = _a_catalogue_of_several_megabytes(tmp_path)
+    reserve = 200_000
+    monkeypatch.setenv("EXOMEM_IMPORT_RESERVE_BYTES", str(reserve))
+    live = _bytes_beside(store.path)
+    real_usage = shutil.disk_usage
+    reads: list[Any] = []
+    volume_has_grown = [False]
+
+    def an_import_takes_the_room_after_the_start_check(path: Any) -> Any:
+        reads.append(path)
+        if volume_has_grown[0]:
+            free = 100 * live - _bytes_beside(store.path)
+        else:
+            free = 1_000_000_000 if len(reads) == 1 else reserve - 50_000
+        return real_usage(path)._replace(free=free)
+
+    monkeypatch.setattr(lexstore.shutil, "disk_usage", an_import_takes_the_room_after_the_start_check)
+
+    assert store.rebuild_atomic() is False
+    assert store._last_rebuild_result == "waiting_for_space"
+    assert len(reads) == 2, "the build did not start, or the volume was not read where the import took its room"
+    needed, free = store._last_space_wait
+
+    volume_has_grown[0] = True
+    assert store.rebuild_atomic() is True, "the retry waited for room that the import took, not the build"
+    assert store._last_rebuild_result == "published"
+    assert reserve < needed < reserve + 3 * live, f"the need {needed} is not the reserve plus one copy of {live}"
+    assert free < reserve
+
+
+def test_a_killed_build_leaves_no_rollback_journal_behind_after_the_next_sweep(tmp_path: Path) -> None:
+    """The build's temp is in rollback-journal mode, so a killed build leaves a hot `-journal` beside its temp.
+    The journal is as big as the pages the build rewrote, and the sweep takes it with the temp."""
+    store = _a_catalogue_of_several_megabytes(tmp_path, pages=10)
+    temp = store.path.with_name(f"{store.path.name}.rebuild-{uuid.uuid4().hex}.tmp")
+    temp.write_bytes(b"a half-built catalogue")
+    journal = temp.with_name(f"{temp.name}-journal")
+    journal.write_bytes(b"the originals of the pages it rewrote")
+
+    store._sweep_orphan_rebuild_temps(boot=True)
+
+    assert not temp.exists() and not journal.exists()
+
+
+def test_a_full_rebuild_waits_for_space_instead_of_starving_writes_and_runs_once_there_is_room(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A volume that cannot hold a second copy of the catalogue plus the import reserve leaves its last bytes
+    to canonical writes: the repair says so, writes nothing, and runs on its next flight once space returns.
+    The byte figures reach the log, not the unauthenticated readiness route."""
+    store = _a_catalogue_of_several_megabytes(tmp_path)
+    live = store.path.read_bytes()
+    monkeypatch.setenv("EXOMEM_IMPORT_RESERVE_BYTES", str(1 << 50))  # more than any volume holds
+
+    with caplog.at_level("INFO", logger="exomem.lexstore"):
+        lexstore._schedule_repair(tmp_path)
+        assert lexstore.await_repairs_idle(tmp_path, timeout=_OBSERVE_SECONDS)
+
+    waiting = lexstore.repair_progress(tmp_path)
+    assert waiting is not None and waiting["last_result"] == "waiting_for_space"
+    assert set(waiting) == {"phase", "age_seconds", "last_duration_seconds", "last_result"}
+    logged = [r.fields for r in caplog.records if getattr(r, "event", "") == "lexical_repair_finished"]
+    assert logged[-1]["result"] == "waiting_for_space"
+    assert logged[-1]["space_needed_bytes"] >= (1 << 50) + len(live)
+    assert logged[-1]["space_free_bytes"] < logged[-1]["space_needed_bytes"]
+    assert store.path.read_bytes() == live
+    assert not list(store.path.parent.glob("*rebuild*")), "the pass wrote a temp before it waited"
+
+    monkeypatch.delenv("EXOMEM_IMPORT_RESERVE_BYTES")
+    lexstore._schedule_repair(tmp_path)
+    assert lexstore.await_repairs_idle(tmp_path, timeout=_OBSERVE_SECONDS)
+
+    published = lexstore.repair_progress(tmp_path)
+    assert published is not None and published["last_result"] == "published"
+
+
+def test_a_targeted_pass_after_a_space_wait_leaves_the_wait_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deferred write that lands after a waiting full pass must not turn readiness to `targeted` while the
+    full repair is still owed."""
+    store = lexstore.get_store(tmp_path)
+    page = _kb_file(tmp_path, "later.md")
+
+    def waits_while_a_write_defers() -> bool:
+        store._last_rebuild_result = "waiting_for_space"
+        lexstore._schedule_repair(tmp_path, deferred_paths=[page])
+        return False
+
+    monkeypatch.setattr(store, "rebuild_atomic", waits_while_a_write_defers)
+    monkeypatch.setattr(store, "retry_deferred_upsert", lambda paths, **_kw: True)
+    monkeypatch.setattr(
+        lexstore,
+        "runtime_retrieval_catalog_proof",
+        lambda *_args, **_kwargs: {"kb": object(), "vault": object()},
+    )
+    lexstore._schedule_repair(tmp_path)
+    assert lexstore.await_repairs_idle(tmp_path, timeout=_OBSERVE_SECONDS)
+
+    finished = lexstore.repair_progress(tmp_path)
+    assert finished is not None and finished["last_result"] == "waiting_for_space"
 
 
 def test_repair_progress_reports_bounded_phase_duration_and_result(
@@ -2890,8 +3229,9 @@ def test_a_catalogue_from_another_release_is_rebuilt_whole(
 
 
 @pytest.mark.skipif(not lexstore.fts5_available(), reason="searches the FTS5 lane")
+@pytest.mark.parametrize("table", ["fts", "title_fts"])
 def test_a_catalogue_missing_a_full_text_row_is_rebuilt_whole(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, table: str,
 ) -> None:
     _kb_file(tmp_path, "lost.md", "- [config] lostword ^u1")
     _kb_file(tmp_path, "other.md", "- [config] steadyword ^u1")
@@ -2902,11 +3242,12 @@ def test_a_catalogue_missing_a_full_text_row_is_rebuilt_whole(
     conn = sqlite3.connect(store.path)
     with conn:
         conn.execute(
-            "DELETE FROM fts WHERE rowid = (SELECT rowid FROM pages WHERE path = ?)",
+            f"DELETE FROM {table} WHERE rowid = (SELECT rowid FROM pages WHERE path = ?)",
             ("Knowledge Base/lost.md",),
         )
     conn.close()
-    assert lexstore.search_bm25(tmp_path, "lostword", k=5, scope="kb") == []
+    if table == "fts":
+        assert lexstore.search_bm25(tmp_path, "lostword", k=5, scope="kb") == []
     parsed = _record_parsed_pages(store, tmp_path, monkeypatch)
     assert store.rebuild_atomic() is True
 
@@ -2948,3 +3289,57 @@ def test_a_census_refuses_when_the_registry_holds_two_spellings_of_one_page(
         lexstore.LexicalStore._census_agrees_outside_replay(start, replayed, after_walk, view)
         is None
     )
+
+
+def test_a_shared_read_opens_the_replaced_sidecar_and_never_answers_from_the_one_it_replaced(
+    tmp_path: Path,
+) -> None:
+    """A plan loop shares one connection for many lookups. A sidecar that a rebuild replaces in the middle of
+    the loop leaves that connection on the unlinked file, so every later lookup would answer from the old one."""
+    page = _kb_file(tmp_path, "a.md", "- [config] before ^u1")
+    _seed(tmp_path, [page])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    rel = "Knowledge Base/a.md"
+    # The replacement is a copy of the live sidecar that stores another hash for the page, as a rebuild's would.
+    replacement = store.path.with_name("replacement.sqlite")
+    live, copy = sqlite3.connect(store.path), sqlite3.connect(replacement)
+    try:
+        live.backup(copy)
+        copy.execute("UPDATE pages SET content_hash = 'replaced' WHERE path = ?", (rel,))
+        copy.commit()
+    finally:
+        copy.close()
+        live.close()
+
+    with lexstore.shared_reads(tmp_path):
+        before = store.page_content_hashes([rel])[rel]
+        for sibling in (store.path.with_name(store.path.name + suffix) for suffix in ("-wal", "-shm")):
+            sibling.unlink(missing_ok=True)  # a published sidecar is one folded file
+        os.replace(replacement, store.path)
+        after = store.page_content_hashes([rel])[rel]
+
+    assert before not in (None, "replaced") and after == "replaced"
+
+
+def test_a_shared_read_lets_a_whole_catalogue_rebuild_publish_instead_of_declining_it(tmp_path: Path) -> None:
+    """A rebuild folds the live sidecar out of WAL mode only when no other connection is open. A plan loop's
+    held connection would make every publication decline, and a declined pass queues the whole build again."""
+    page = _kb_file(tmp_path, "a.md", "searchable committed payload")
+    _seed(tmp_path, [page])
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    rel = "Knowledge Base/a.md"
+    key = tmp_path.resolve()
+
+    with lexstore.shared_reads(tmp_path):
+        assert store.page_content_hashes([rel])[rel]  # the loop holds its connection
+        lexstore._FULL_REBUILDS_IN_FLIGHT.add(key)  # the repair worker marks a whole pass this way
+        try:
+            assert store.page_content_hashes([rel])[rel]  # the loop's next read yields the connection
+            published = store.rebuild_atomic()
+        finally:
+            lexstore._FULL_REBUILDS_IN_FLIGHT.discard(key)
+        assert store.page_content_hashes([rel])[rel]  # the loop reads on from the published sidecar
+
+    assert published, "the held connection made the rebuild decline its publication"

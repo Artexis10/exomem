@@ -50,7 +50,8 @@ ADVISORY_KIND = "activation-naming"
 #: way `corpus_aware._WRITE_ADVISORY_KINDS` registers the write advisories.
 _ADVISORY_KINDS = frozenset({ADVISORY_KIND})
 _REF_PREFIX = f"exomem://review/{ADVISORY_KIND}/"
-MAX_ADVISORY_CHARS = 900
+# Room for one naming and one cue option, each carrying its whole call (about 200 characters each).
+MAX_ADVISORY_CHARS = 1000
 MAX_TURN_TERMS = 8
 #: The recent-context top the `cue` class looks in (U1's eight entries).
 RECENT_TOP = 8
@@ -407,6 +408,9 @@ def build_advisory(
     if state in {"dismissed", "snoozed"}:
         return None
 
+    from . import capabilities
+
+    # Each option carries the exact call, spelled for the surface serving this request.
     options: list[dict[str, Any]] = []
     if row.klass == "naming":
         frontmatter, _body, _raw = vault_module.parse_frontmatter(text)
@@ -414,21 +418,23 @@ def build_advisory(
         options.append(
             {
                 "family": "name",
-                "tool": "edit_note",
-                "path": path,
-                "field": "learned_aliases",
-                "current": [str(item) for item in current] if isinstance(current, list) else [],
-                "expected_hash": page_hash,
+                # The value is the page's current aliases; the agent adds the user's name to it.
+                "call": capabilities.active_call_route("edit_memory", {
+                    "path": path,
+                    "operation": {"kind": "patch_frontmatter", "field": "learned_aliases",
+                                  "value": [str(item) for item in current] if isinstance(current, list) else [],
+                                  "expected_hash": page_hash},
+                }),
             }
         )
     if row.klass == "cue" or observation.cue_also:
         options.append(
             {
                 "family": "referential_cue",
-                "tool": "schema_memory",
-                "subject": "activation-conventions",
-                "operation": "save-conventions",
-                "expected_hash": conventions_registry.content_hash,
+                "call": capabilities.active_call_route("schema_memory", {
+                    "subject": "activation-conventions", "operation": "save-conventions",
+                    "expected_hash": conventions_registry.content_hash,
+                }),
             }
         )
     advisory = _bounded(

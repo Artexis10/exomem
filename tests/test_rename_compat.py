@@ -7,7 +7,17 @@ import subprocess
 import sys
 import warnings
 
+import pytest
+
 from exomem import env_compat
+
+
+@pytest.fixture(autouse=True)
+def _isolated_settings():
+    """Promotion writes `os.environ`: remove the names it creates for these probes."""
+    yield
+    for name in [name for name in os.environ if "_RENAME_PROBE" in name]:
+        os.environ.pop(name)
 
 
 def _subprocess_env() -> dict[str, str]:
@@ -19,8 +29,9 @@ def _subprocess_env() -> dict[str, str]:
 def test_kb_mcp_alias_is_the_same_module_object() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        import exomem.find
         import kb_mcp.find
+
+        import exomem.find
     assert kb_mcp.find is exomem.find  # single module state, not a re-import
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
@@ -48,22 +59,21 @@ def test_python_dash_m_kb_mcp_still_runs() -> None:
 
 
 def test_promote_legacy_fills_unset_canonical(monkeypatch) -> None:
-    # promote_legacy writes os.environ directly (that's its job) — pop what it
-    # creates ourselves; monkeypatch can't restore keys that were absent.
     monkeypatch.delenv("EXOMEM_RENAME_PROBE", raising=False)
     monkeypatch.setenv("KB_MCP_RENAME_PROBE", "legacy-value")
-    try:
-        promoted = env_compat.promote_legacy()
-        assert "EXOMEM_RENAME_PROBE" in promoted
-        assert os.environ["EXOMEM_RENAME_PROBE"] == "legacy-value"
-    finally:
-        os.environ.pop("EXOMEM_RENAME_PROBE", None)
+
+    promoted = env_compat.promote_legacy()
+
+    assert "EXOMEM_RENAME_PROBE" in promoted
+    assert os.environ["EXOMEM_RENAME_PROBE"] == "legacy-value"
 
 
 def test_promote_legacy_never_clobbers_explicit_new_name(monkeypatch) -> None:
     monkeypatch.setenv("EXOMEM_RENAME_PROBE2", "new-wins")
     monkeypatch.setenv("KB_MCP_RENAME_PROBE2", "legacy-loses")
+
     env_compat.promote_legacy()
+
     assert os.environ["EXOMEM_RENAME_PROBE2"] == "new-wins"
 
 
@@ -100,3 +110,283 @@ def test_legacy_env_reaches_a_real_reader(monkeypatch) -> None:
         assert embeddings.scene_frames_enabled()
     finally:
         os.environ.pop("EXOMEM_VIDEO_SCENE_FRAMES", None)
+
+
+def test_evermatter_prefix_alone_fills_the_internal_name_and_leaves_no_alias(monkeypatch) -> None:
+    monkeypatch.delenv("EXOMEM_RENAME_PROBE3", raising=False)
+    monkeypatch.setenv("EVERMATTER_RENAME_PROBE3", "product-value")
+
+    promoted = env_compat.promote_legacy()
+
+    assert "EXOMEM_RENAME_PROBE3" in promoted
+    assert os.environ["EXOMEM_RENAME_PROBE3"] == "product-value"
+    assert "EVERMATTER_RENAME_PROBE3" not in os.environ
+
+
+def test_evermatter_prefix_beats_the_legacy_prefix(monkeypatch) -> None:
+    monkeypatch.delenv("EXOMEM_RENAME_PROBE4", raising=False)
+    monkeypatch.setenv("EVERMATTER_RENAME_PROBE4", "product-value")
+    monkeypatch.setenv("KB_MCP_RENAME_PROBE4", "legacy-value")
+
+    env_compat.promote_legacy()
+
+    assert os.environ["EXOMEM_RENAME_PROBE4"] == "product-value"
+
+
+def test_a_later_write_of_the_internal_name_wins_and_a_child_process_sees_one_name(
+    monkeypatch,
+) -> None:
+    # The failure: an alias left in the environment beats a value that code writes after import,
+    # or a child process inherits two names for one setting and picks the wrong one.
+    monkeypatch.delenv("EXOMEM_RENAME_PROBE8", raising=False)
+    monkeypatch.setenv("EVERMATTER_RENAME_PROBE8", "from-alias")
+    env_compat.promote_legacy()
+    os.environ["EXOMEM_RENAME_PROBE8"] = "written-later"
+    env_compat.promote_legacy()  # a later loader maps the environment again
+
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os; print(sorted((k, v) for k, v in os.environ.items() if k.endswith('RENAME_PROBE8')))",
+        ],
+        capture_output=True, text=True, timeout=60, check=True,
+    )
+
+    assert child.stdout.strip() == "[('EXOMEM_RENAME_PROBE8', 'written-later')]"
+
+
+def test_a_conflict_in_a_non_placement_setting_warns_naming_both_variables_and_exomem_wins(
+    monkeypatch, caplog
+) -> None:
+    monkeypatch.setenv("EXOMEM_RENAME_PROBE5", "explicit-secret")
+    monkeypatch.setenv("EVERMATTER_RENAME_PROBE5", "alias-secret")
+
+    with caplog.at_level("WARNING", logger=env_compat.log.name):
+        env_compat.promote_legacy()
+        env_compat.promote_legacy()  # a later loader maps the same environment again
+
+    assert os.environ["EXOMEM_RENAME_PROBE5"] == "explicit-secret"
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and "RENAME_PROBE5" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "EXOMEM_RENAME_PROBE5" in warnings[0] and "EVERMATTER_RENAME_PROBE5" in warnings[0]
+    assert "explicit-secret" not in warnings[0] and "alias-secret" not in warnings[0]
+
+
+def test_a_conflict_in_a_placement_setting_refuses_the_command_with_exit_code_2(tmp_path) -> None:
+    # The failure: the CLI acts on the wrong vault because two names disagree about where it is.
+    env = _subprocess_env()
+    env["EXOMEM_VAULT_PATH"] = str(tmp_path / "explicit-vault")
+    env["EVERMATTER_VAULT_PATH"] = str(tmp_path / "alias-vault")
+
+    out = subprocess.run(
+        [sys.executable, "-m", "exomem", "doctor"],
+        capture_output=True, text=True, env=env, cwd=tmp_path, timeout=120,
+    )
+
+    assert out.returncode == 2, out.stderr
+    assert "EVERMATTER_VAULT_PATH" in out.stderr and "EXOMEM_VAULT_PATH" in out.stderr
+    assert "explicit-vault" not in out.stderr and "alias-vault" not in out.stderr
+
+
+def test_a_dotenv_that_sets_only_evermatter_gives_the_internal_name(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("EXOMEM_RENAME_PROBE9", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("EVERMATTER_RENAME_PROBE9=dotenv-value\n", encoding="utf-8")
+
+    env_compat.load_dotenv(env_file)
+
+    assert os.environ["EXOMEM_RENAME_PROBE9"] == "dotenv-value"
+    assert "EVERMATTER_RENAME_PROBE9" not in os.environ
+
+
+def test_a_dotenv_that_sets_both_prefixes_keeps_its_own_exomem_value(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_RENAME_PROBE6", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "EVERMATTER_RENAME_PROBE6=alias-value\nEXOMEM_RENAME_PROBE6=explicit-value\n",
+        encoding="utf-8",
+    )
+
+    env_compat.load_dotenv(env_file, override=True)
+
+    assert os.environ["EXOMEM_RENAME_PROBE6"] == "explicit-value"
+
+
+def test_a_dotenv_that_sets_only_evermatter_beats_an_exported_value_like_its_own_exomem_line(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_RENAME_PROBE7", "exported-value")
+    env_file = tmp_path / ".env"
+    env_file.write_text("EVERMATTER_RENAME_PROBE7=dotenv-value\n", encoding="utf-8")
+
+    env_compat.load_dotenv(env_file, override=True)
+
+    assert os.environ["EXOMEM_RENAME_PROBE7"] == "dotenv-value"
+
+
+def test_a_dotenv_that_disagrees_with_itself_about_a_placement_setting_is_refused(tmp_path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "EVERMATTER_STATE_ROOT=/alias-root\nEXOMEM_STATE_ROOT=/explicit-root\n", encoding="utf-8"
+    )
+
+    with pytest.raises(env_compat.SettingsConflict) as refused:
+        env_compat.load_dotenv(env_file)
+
+    assert "EVERMATTER_STATE_ROOT" in str(refused.value) and "EXOMEM_STATE_ROOT" in str(refused.value)
+    assert "alias-root" not in str(refused.value) and "explicit-root" not in str(refused.value)
+
+
+def _run_module(tmp_path, module_arguments: list[str], **conflict) -> subprocess.CompletedProcess[str]:
+    env = _subprocess_env()
+    env.update(conflict)
+    return subprocess.run(
+        [sys.executable, "-m", *module_arguments],
+        capture_output=True, text=True, env=env, cwd=tmp_path, timeout=120,
+    )
+
+
+@pytest.mark.parametrize(
+    "module_arguments",
+    [
+        # Port 0 asks the OS for a free port: a regression that starts the supervisor cannot take the default 8765.
+        ["exomem.service_manager", "serve", "--runtime-dir", "managed", "--worker-python", sys.executable,
+         "--unit-name", "exomem-probe.service", "--port", "0"],
+        ["exomem.catalogue_prewarm"],
+    ],
+    ids=["the managed supervisor", "a module run as a job"],
+)
+def test_a_module_run_as_a_program_refuses_a_placement_conflict_in_its_environment(
+    tmp_path, module_arguments
+) -> None:
+    # The failure: the supervisor and its children run on without a refusal, because only the CLI had one.
+    out = _run_module(
+        tmp_path, module_arguments,
+        EXOMEM_STATE_ROOT=str(tmp_path / "explicit-root"),
+        EVERMATTER_STATE_ROOT=str(tmp_path / "alias-root"),
+    )
+
+    assert out.returncode == 2, out.stderr
+    assert "not run" in out.stderr  # a warning that names both variables and runs on is no refusal
+    assert "EVERMATTER_STATE_ROOT" in out.stderr and "EXOMEM_STATE_ROOT" in out.stderr
+    assert "explicit-root" not in out.stderr and "alias-root" not in out.stderr
+
+
+@pytest.mark.parametrize(
+    ("orig_argv", "refused"),
+    [
+        (["python", "-m", "exomem.catalogue_prewarm"], True),
+        (["python", "-mexomem.catalogue_prewarm"], True),
+        (["python", "-Im", "exomem.catalogue_prewarm"], True),
+        (["python", "-Imexomem.catalogue_prewarm"], True),
+        (["python", "-W", "ignore", "-m", "exomem.catalogue_prewarm"], True),
+        (["python", "-m", "exomem.catalogue_prewarm", "--help"], False),
+        (["python", "-m", "exomem"], False),
+        (["python", "-m", "pytest", "exomem.catalogue_prewarm"], False),
+        (["python", "-c", "import exomem", "-m", "exomem.catalogue_prewarm"], False),
+        (["python", "script.py", "-m", "exomem.catalogue_prewarm"], False),
+    ],
+)
+def test_the_program_entry_refusal_reads_every_way_the_interpreter_takes_a_module(
+    orig_argv, refused, monkeypatch
+) -> None:
+    """The failure: `python -Im exomem.<module>` runs a module past the refusal that `-m` meets."""
+    conflict = env_compat.Conflict("EVERMATTER_STATE_ROOT", "EXOMEM_STATE_ROOT")
+    monkeypatch.setattr(env_compat, "_process_conflicts", [conflict])
+
+    if refused:
+        with pytest.raises(SystemExit) as exit_:
+            env_compat.refuse_program_entry_conflicts(orig_argv)
+        assert exit_.value.code == 2
+    else:
+        env_compat.refuse_program_entry_conflicts(orig_argv)
+
+
+def test_help_runs_under_a_placement_conflict(tmp_path) -> None:
+    for module_arguments in (["exomem", "--help"], ["exomem.service_manager", "--help"]):
+        out = _run_module(
+            tmp_path, module_arguments,
+            EXOMEM_STATE_ROOT=str(tmp_path / "explicit-root"),
+            EVERMATTER_STATE_ROOT=str(tmp_path / "alias-root"),
+        )
+
+        assert out.returncode == 0, (module_arguments, out.stderr)
+        assert "usage:" in out.stdout.lower()
+
+
+def test_the_credential_hook_finds_a_key_that_service_env_names_with_the_product_prefix(
+    monkeypatch, tmp_path
+) -> None:
+    from exomem._hooks import exomem_local_credentials
+
+    service_env = tmp_path / "service.env"
+    service_env.write_text("EVERMATTER_REST_API_KEY=synthetic-key\n")
+    monkeypatch.delenv("EXOMEM_REST_API_KEY", raising=False)
+    monkeypatch.delenv("EVERMATTER_REST_API_KEY", raising=False)
+    monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(service_env))
+
+    assert exomem_local_credentials.rest_key() == ("synthetic-key", "file")
+
+
+def test_the_credential_hook_sends_no_key_when_service_env_names_two_different_ones(
+    monkeypatch, tmp_path
+) -> None:
+    from exomem._hooks import exomem_local_credentials
+
+    service_env = tmp_path / "service.env"
+    service_env.write_text("EVERMATTER_REST_API_KEY=alias-key\nEXOMEM_REST_API_KEY=explicit-key\n")
+    monkeypatch.delenv("EXOMEM_REST_API_KEY", raising=False)
+    monkeypatch.delenv("EVERMATTER_REST_API_KEY", raising=False)
+    monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(service_env))
+
+    assert exomem_local_credentials.rest_key() == ("", "")
+
+
+def test_a_writer_persists_the_public_name_and_a_rewrite_reaches_every_spelling() -> None:
+    assert env_compat.emitted_name("EXOMEM_VAULT_PATH") == "EVERMATTER_VAULT_PATH"
+    assert env_compat.emitted_name("KB_MCP_PORT") == "EVERMATTER_PORT"
+    assert env_compat.emitted_name("EVERMATTER_PORT") == "EVERMATTER_PORT"
+    assert env_compat.emitted_name("PATH") == "PATH"
+    for name in ("EXOMEM_PORT", "EVERMATTER_PORT", "KB_MCP_PORT"):
+        assert env_compat.names_for(name) == ("EXOMEM_PORT", "EVERMATTER_PORT", "KB_MCP_PORT")
+    assert env_compat.names_for("PATH") == ("PATH",)
+
+
+def test_the_supervisor_refusal_names_the_two_ways_to_settle_it_and_no_value() -> None:
+    """The failure: it said to delete a line, but the supervisor's own environment holds one of the two names."""
+    sources = [{"EXOMEM_STATE_ROOT": "/supervisor-root"}, {"EVERMATTER_STATE_ROOT": "/file-root"}]
+
+    with pytest.raises(env_compat.SettingsConflict) as refused:
+        env_compat.refuse_placement_conflicts_across(sources, source="the supervisor environment and its files")
+
+    message = str(refused.value)
+    assert "EVERMATTER_STATE_ROOT and EXOMEM_STATE_ROOT" in message
+    assert "Restart the unit" in message and "change the file so that its value matches" in message
+    assert "supervisor-root" not in message and "file-root" not in message
+
+
+def test_a_measurement_script_clears_every_spelling_of_an_inherited_setting(monkeypatch) -> None:
+    """The failure: the scrub listed two prefixes, so an inherited EVERMATTER_ setting reached a live writer."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "_records_measurement_env.py"
+    spec = importlib.util.spec_from_file_location("records_measurement_env", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    # The scrub deletes from os.environ, so it runs over a copy: the real environment keeps the
+    # settings that the test harness set for every other test in this worker.
+    inherited = {name: "live" for name in ("EXOMEM_INHERITED", "EVERMATTER_INHERITED", "KB_MCP_INHERITED")}
+    monkeypatch.setattr(os, "environ", {**inherited, "UNRELATED_SETTING": "kept"})
+
+    module.clear_inherited()
+
+    assert os.environ == {"UNRELATED_SETTING": "kept"}

@@ -187,7 +187,7 @@ def _seed_profiles(root: Path) -> None:
     _write(root, f"{KB}/_Schema/source-taxonomy.yaml", TAXONOMY)
     _write(root, f"{KB}/_Schema/SKILL.md", "# Memory schema\n")
     schema = Path(stance.__file__).parent / "_scaffold/_Schema/references"
-    for name in ("frontmatter.md", "page-types.md"):
+    for name in ("page-types.md",):
         _write(root, f"{KB}/_Schema/references/{name}", (schema / name).read_text(encoding="utf-8"))
     _profile(root, "global", None, _rule("global"))
     for domain in ("media", "games", "music", "cooking"):

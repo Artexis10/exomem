@@ -29,7 +29,7 @@ In store mode, each vault SHALL have one SQLite database, the per-vault collecti
 - **AND** the next write through the served door succeeds
 
 ### Requirement: One transaction per governed write
-A governed write in store mode SHALL commit every file it changes, one audit row per file, one projection intent per file and one derivation intent per file in one `BEGIN IMMEDIATE` transaction, and SHALL acknowledge only after that transaction is durable. That transaction SHALL NOT write lexical, graph, identity, inbound-link, prior-path or page-fact rows; they follow from the derivation intents. The vault mutation boundary of a governed write SHALL hold only the checks that bind the write and that transaction. The number of statements the transaction runs SHALL NOT grow with a page's units or links, with the pages that link to it or with the size of the vault. A request that the store thread serves SHALL acknowledge once that transaction is durable, before the store thread derives its intents. A governed trash or recovery, an upload and a request that the store thread does not serve SHALL derive their own intents after they release the boundary and before they acknowledge; when that derivation fails or passes its deadline, the write SHALL acknowledge with its derived state `pending` or `failed`. The full-detail reply of a store-mode governed write SHALL carry the writer's result under `diagnostics.leaf_result`, the state of its lexical, identity and graph rows under `diagnostics.derived_components` and the derived state as `derived_sync` under `diagnostics.operational`, the shape of file mode's derived acknowledgement; its compact reply SHALL NOT change.
+A governed write in store mode SHALL commit every file it changes, one audit row per file, one projection intent per file and one derivation intent per file in one `BEGIN IMMEDIATE` transaction, and SHALL acknowledge only after that transaction is durable. That transaction SHALL also commit any governed relationship and history changes and their canonical unit IDs. A relationship-only write SHALL audit the change and queue projection for both affected pages. Lexical, graph, derived page identity, inbound-link, prior-path, and page-fact rows SHALL follow the derivation intents. The vault mutation boundary of a governed write SHALL hold only the checks that bind the write and that transaction. The number of statements the transaction runs SHALL NOT grow with a page's units or links, with the pages that link to it or with the size of the vault. A request that the store thread serves SHALL acknowledge once that transaction is durable, before the store thread derives its intents. A governed trash or recovery, an upload and a request that the store thread does not serve SHALL derive their own intents after they release the boundary and before they acknowledge; when that derivation fails or passes its deadline, the write SHALL acknowledge with its derived state `pending` or `failed`. The full-detail reply of a store-mode governed write SHALL carry the writer's result under `diagnostics.leaf_result`, the state of its lexical, identity and graph rows under `diagnostics.derived_components` and the derived state as `derived_sync` under `diagnostics.operational`, the shape of file mode's derived acknowledgement; its compact reply SHALL NOT change.
 
 #### Scenario: The boundary hold does not grow with derivation
 - **WHEN** a governed write runs once with an instant derivation and once with a derivation slowed by seconds
@@ -307,7 +307,7 @@ In store mode, an agent SHALL be able to list every held item and to resolve eac
 - **AND** a resolve refuses with `VAULT_STORE_HELD_TOO_LARGE`
 
 ### Requirement: Semantic units are first-class store rows
-In store mode, once stage 2 ships, each semantic unit of a page SHALL be one store row with its identity, its page, its ordinal and exact byte span in the page bytes, its category, kind and text, its provenance, its verdict and its lifecycle. The identity SHALL follow the existing semantic unit identity rule: the authored anchor when the page carries one, otherwise the fingerprint-bound reference. The store SHALL derive the identity from the page bytes. The store itself SHALL write an anchor only into a unit that carries no anchor and becomes either end of its first stored relationship, in the governed write that adds that relationship. For the same bytes, the unit rows SHALL reproduce file mode's lexical semantic-unit rows and graph unit nodes. Typed edges SHALL be able to start or end at a unit as well as at a page. A governed write that changes a unit SHALL change the page bytes and the unit row in the same transaction.
+In store mode, derived unit rows and the page summary SHALL support selection and reference binding. The summary SHALL keep candidate spans as code-point offsets into the parsed body. The identity SHALL follow the existing semantic unit identity rule: the authored anchor when the page carries one, otherwise the fingerprint-bound reference. The store SHALL derive the identity facts from the page bytes, and a reader SHALL bind the reference from those facts under the page's selected registries. The store itself SHALL write an anchor only into a unit that carries no anchor and becomes either end of its first stored relationship, in the governed write that adds that relationship. For the same bytes, the unit rows SHALL reproduce file mode's lexical semantic-unit rows and graph unit nodes. Typed edges SHALL be able to start or end at a unit as well as at a page. A governed write that changes a unit SHALL commit its page bytes with the derivation intent. The derived unit row SHALL follow that intent.
 
 #### Scenario: A link reaches the exact unit
 - **WHEN** a page links to another page's unit by the anchor that unit carries
@@ -315,8 +315,10 @@ In store mode, once stage 2 ships, each semantic unit of a page SHALL be one sto
 
 #### Scenario: Refuting one claim changes one unit
 - **WHEN** a governed write marks one claim on a page as refuted
-- **THEN** the page bytes and that unit's verdict commit in one transaction
-- **AND** the other units on the page keep their identities and verdicts
+- **THEN** the page bytes and derivation intent commit together
+- **AND** a later read sees the new verdict or reports derivation lag
+- **AND** the other units keep their verdicts and anchored identities
+- **AND** anonymous units with the same signature can receive new occurrence-bound references
 
 #### Scenario: A unit without an anchor keeps today's identity
 - **WHEN** a governed write adds a unit that carries no authored anchor and no stored relationship
@@ -375,7 +377,9 @@ From stage 2, a page's projection MAY add one managed relations block, the one e
 #### Scenario: Stored relationships survive a rollback and a re-migration
 - **WHEN** a store-mode vault with stored relationships reverts to file mode and is migrated back
 - **THEN** the reverted pages carry no relations block and the relationship history is exported
-- **AND** after the re-migration every current stored relationship is present again
+- **AND** the export keeps complete current rows and endpoint IDs when no source relations file can carry them
+- **AND** after re-migration every current stored relationship is present again
+- **AND** a relationship with a missing endpoint remains orphaned for review
 
 ### Requirement: Held relations items resolve without leaking or storing the block
 Keep-mine on a held page whose relations block is not valid SHALL remove the block by its markers, and SHALL refuse and name keep-store when the markers are not intact. A held relations file SHALL be listed to, and resolved by, the owner with unrestricted access only. Migration verification SHALL remove one relations block before it compares a projection with its source.
@@ -403,17 +407,24 @@ In store mode, once stage 2 ships, every stored file SHALL carry a canonicity re
 - **THEN** it sees the file's origin, hash, size, format and derivation
 
 ### Requirement: Migration into the store is verified and reversible
-Exomem SHALL migrate a file-mode vault into store mode offline. The migration SHALL load every page's exact bytes and the current derived rows, and SHALL verify before activation that the derived rows equal a fresh derivation from the loaded bytes and that a projection of every page reproduces the original bytes. Reverting to file mode SHALL first project every queued intent, including a full projection when projection was off. It SHALL refuse while held corrections or held deletions remain, unless they are exported for review. Exporting a held item SHALL move the person's held bytes into the export and project the store's version of that file, so the rebuild does not apply the held edit. It SHALL export the audit trail, the canonicity records and the stored relationships' history, which file mode has no tables for. After those steps, stopping the store and rebuilding the file-mode sidecars from the projected Markdown SHALL restore file mode with the same pages.
+Until file mode retires (design D15), a migration SHALL be reversible by rollback; after that, a backup restore is the undo. Exomem SHALL migrate a file-mode vault into store mode offline. The migration SHALL load every page's exact bytes, copy the lexical and reference rows, and stage the graph rows from one fresh derivation of the files, in the derivation's row order and with its row ids. It SHALL verify before activation that every staged row equals that derivation, that a projection of every page reproduces the original bytes, and that no loaded file changed since it was loaded. It SHALL report how many graph rows were present in only one of the graph sidecar and the derivation, with the first differing keys, and SHALL NOT refuse for that difference. Reverting to file mode SHALL first project every queued intent, including a full projection when projection was off. It SHALL refuse while held corrections or held deletions remain, unless they are exported for review. Exporting a held item SHALL move the person's held bytes into the export and project the store's version of that file, so the rebuild does not apply the held edit. It SHALL export the audit trail, the canonicity records and the stored relationships' history, which file mode has no tables for. After those steps, stopping the store and rebuilding the file-mode sidecars from the projected Markdown SHALL restore file mode with the same pages.
 
 #### Scenario: Migration preserves every page byte
 - **WHEN** a vault is migrated and then fully projected to an empty directory
 - **THEN** every projected file is byte-identical to the file it was migrated from, apart from one managed relations block
 
+#### Scenario: A stale graph sidecar does not refuse the migration
+- **WHEN** an operator migrates a file-mode vault whose graph sidecar keeps a page's edges to a page that has left the catalogue
+- **THEN** the migration installs, and the store's graph rows equal a fresh derivation from the files
+- **AND** the result reports how many graph rows were present in only one of the sidecar and the derivation, with the first differing keys
+- **AND** a dry run says that it did not check the sidecar against the files, and the apply will
+
 #### Scenario: Reverting rebuilds file mode from the projection
 - **WHEN** an operator reverts a store-mode vault with no queued intents and no held items to file mode
 - **THEN** the audit trail, the canonicity records and the relationship history are exported as files
 - **AND** file mode rebuilds its lexical catalogue and graph from the projected Markdown
-- **AND** search and graph answers match the store's answers for the same pages
+- **AND** search and graph answers match the store's page-derived answers
+- **AND** file-mode graph answers omit canonically stored relationships until re-migration
 
 #### Scenario: Reverting refuses while held edits are unexported
 - **WHEN** an operator reverts a store-mode vault that holds an unreviewed outside edit
@@ -433,12 +444,12 @@ Exomem SHALL migrate a file-mode vault into store mode offline. The migration SH
 - **AND** a move that is refused stops the revert before the vault leaves store mode, and names the file
 
 ### Requirement: Migration catches up queued file-mode index work
-Before it stages, the migration SHALL drain the graph repair that a stopped file-mode service left queued, so the sidecar it copies matches the files. It SHALL refuse before staging, and name the reconcile command, when the graph index is not current after a bounded catch-up; receipts left while the graph is current do not refuse. A dry run SHALL report the queue's depth and the oldest receipt's age, and SHALL NOT refuse for a queue that the apply will drain.
+Before it stages, the migration SHALL drain, for a bounded time, the graph repair that a stopped file-mode service left queued. It SHALL NOT refuse when the drain stops early, and its result SHALL name the receipts left and why the drain stopped. A dry run SHALL report the queue's depth and oldest age, and SHALL drain nothing.
 
 #### Scenario: Migrate catches up queued file-mode index work before it stages
 - **WHEN** an operator migrates a file-mode vault whose stopped service left graph repair queued
-- **THEN** the migration drains that queue into the graph index before it copies any sidecar, and the derived rows then equal the files
-- **AND** a graph index that is still not current after the catch-up refuses before staging and names the reconcile command
+- **THEN** the migration drains that queue into the graph index before it stages
+- **AND** a drain that stops early or fails does not refuse the migration, and the result names the receipts left and why the drain stopped
 - **AND** a dry run reports the queue's depth and age and drains nothing
 
 ### Requirement: Knowledge writes share the store's availability
@@ -481,7 +492,7 @@ In store mode, a commit that changes a source of the schema overlay (a page unde
 - **AND** after the job finishes, status reports `current`, the tables equal a fresh derivation, and a rollback drops them
 
 ### Requirement: Store-mode graph and link reads answer at the request's snapshot
-In store mode, every reader of graph rows SHALL read the store's rows through the request's one snapshot, and SHALL NOT open the file-built graph sidecar, prove its readiness or schedule a rebuild. The snapshot revision and the registry state SHALL be the whole readiness model. Each derivation SHALL write the inbound-link rows of the pages its commit gave bytes to or removed by the scan rule of file mode's inbound-link index, so `list_inbound_links`, the inbound check of a move or delete, and the commit's guard on the linking pages answer by one rule. A page that only the store holds SHALL count as a linking page and as a link target, whether or not its file exists. While the registry job runs or its state is unknown, a graph or link reader SHALL serve its snapshot's rows with the registry notice, except that a link reader SHALL refuse with `VAULT_STORE_DERIVED_BEHIND` while the store's owner-object version is behind this build's. For the same page bytes, a store-mode graph or link reader SHALL give the answer that file mode gives, for the owner and for a restricted caller; an inbound list SHALL hold the same links, which store mode lists in path order and file mode in the order of its walk. A typed link to a page path that the store holds no page at SHALL derive as unresolved, even while a removed page's file waits for the projector.
+In store mode, every reader of graph rows SHALL read the store's rows through the request's one snapshot, and SHALL NOT open the file-built graph sidecar, prove its readiness or schedule a rebuild. The snapshot revision and the registry state SHALL be the whole readiness model. Each derivation SHALL write the inbound-link rows of the pages its commit gave bytes to or removed by the scan rule of file mode's inbound-link index, so `list_inbound_links`, the inbound check of a move or delete, and the commit's guard on the linking pages answer by one rule. A page that only the store holds SHALL count as a linking page and as a link target, whether or not its file exists. While the registry job runs or its state is unknown, a graph or link reader SHALL serve its snapshot's rows with the registry notice, except that a link reader SHALL refuse with `VAULT_STORE_DERIVED_BEHIND` while the store's owner-object version is behind this build's. For the same page bytes, a store-mode graph or link reader SHALL match file mode's page-derived answers for the owner and for a restricted caller. Stored relationships extend those answers in store mode after Stage 2 activates. For inbound links, an inbound list SHALL hold the same links, which store mode lists in path order and file mode in the order of its walk. A typed link to a page path that the store holds no page at SHALL derive as unresolved, even while a removed page's file waits for the projector.
 
 #### Scenario: A graph read never touches the sidecar or a projected file
 - **WHEN** a store-mode vault's graph sidecar is replaced by unreadable bytes and every projected page is damaged
@@ -571,3 +582,45 @@ In store mode, the collision check for a new page name SHALL read the store and 
 - **WHEN** two governed writes create pages whose titles differ only in case, and projection has not yet written the first page
 - **THEN** the second page gets a numbered suffix
 - **AND** the first page keeps its name
+
+### Requirement: Store mode becomes the default behind named gates
+Once the owner's vault has switched, the restricted-caller read budgets pass, store paths fold case, the outcome evaluation shows no loss and every command that refuses on a store-mode vault is served or retired, a release SHALL make store mode the default. From that release, `exomem init` SHALL create a new vault in store mode on each platform where `store-mode migrate` admits store mode.
+
+#### Scenario: Windows keeps file mode until its acceptance passes
+- **WHEN** `exomem init` runs on native Windows before Windows acceptance passes
+- **THEN** it creates a file-mode vault
+
+### Requirement: A managed upgrade migrates a file-mode vault
+From the release that makes store mode the default, a managed upgrade SHALL migrate a file-mode vault, where `store-mode migrate` admits store mode, after a complete product-backup snapshot. Without a reachable backup target it SHALL NOT migrate. A refusal at any step, preflight included, or a failed verification SHALL leave file mode and report why. An owner SHALL be able to decline. Rollback SHALL remain until file mode retires.
+
+#### Scenario: A failed verification at upgrade keeps file mode
+- **WHEN** a managed upgrade migrates a vault and the staged store differs from a fresh derivation
+- **THEN** the vault stays in file mode
+- **AND** the upgrade reports the differing tables
+
+#### Scenario: A vault with case twins keeps file mode at upgrade
+- **WHEN** a managed upgrade finds `Notes/Research food` beside `Notes/Research Food`
+- **THEN** the migration preflight refuses with `CASE_COLLISION`, naming the pair and the path-variants merge
+- **AND** the vault stays in file mode
+
+### Requirement: An outside-edit import gets name advice, not a hold
+When an outside-edit import runs, Exomem SHALL run the vocabulary and folder steps on it as advice. After the file's bytes have been stable for 2 s, a folder name those steps would steer, or a term that needs a vocabulary decision, SHALL raise one review item per path and suggested spelling, naming the registered spelling. The import SHALL keep the person's bytes. Exomem SHALL NOT hold an outside edit only for a name.
+
+#### Scenario: An Obsidian move into a case-variant folder imports with a review item
+- **WHEN** a person moves a page in Obsidian into `Notes/Research food` while the vault holds `Notes/Research Food`
+- **THEN** the move imports at the person's path
+- **AND** a review item names `Notes/Research Food`
+
+### Requirement: A build after file mode retires migrates a file-mode vault at first start
+A build released after file mode retires SHALL migrate a file-mode vault at its first start, after a backup, through the verified migration. When the migration refuses at any step, including its preflight, the build SHALL refuse to serve, and the refusal SHALL name the migration's refusal and the last release that serves file mode. The migration and the lexical builder SHALL remain in that build.
+
+#### Scenario: A skipped-release vault migrates at first start
+- **WHEN** a vault last served by a file-mode release starts on a build released after file mode retires
+- **THEN** the build backs the vault up and migrates it
+- **AND** it serves the vault in store mode
+
+#### Scenario: A refused migration names the way back
+- **WHEN** that first-start migration refuses at its preflight
+- **THEN** the build serves nothing
+- **AND** its refusal names the migration's reason and the last release that serves file mode
+

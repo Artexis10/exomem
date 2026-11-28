@@ -117,30 +117,25 @@ def test_complete_public_inventory_ships_no_private_context() -> None:
 
 
 def test_shipped_contract_embeddings_are_canonical_and_public_safe() -> None:
-    """The scaffold's shipped contract embeddings must be exactly the canonical
-    projection — public-safe, generic, and free of any private vault context."""
+    """The scaffold ships the canonical projection once, in the authoring reference; every standalone
+    authoring workflow links that reference instead of carrying a copy. All of it stays public-safe."""
 
     concise = semantic_authoring.render_concise()
     core = workflow_skills.WORKFLOW_SKILLS_DIR.parent / "SKILL.md"
-    carriers = [core]
-    carriers.extend(
+    reference = core.parent / workflow_skills.AUTHORING_REFERENCE
+    workflows = [
         workflow_skills.source_dir(str(skill["name"])) / "SKILL.md"
         for skill in workflow_skills.list_skills()
         if skill.get("standalone_authoring") is True
-    )
+    ]
+    assert len(workflows) == 9
+    carriers = [core, reference, *workflows]
 
-    # Core scaffold SKILL + 9 standalone authoring workflows = 10 embeddings.
-    assert len(carriers) == 10
-
-    for path in carriers:
-        assert path.is_file(), f"missing shipped contract carrier {path}"
+    assert (core.read_text(encoding="utf-8") + reference.read_text(encoding="utf-8")).count(concise) == 1
+    for path in workflows:
         text = path.read_text(encoding="utf-8")
-        if path == core:
-            # The core skill's embedding moved into a reference (`shrink-bootstrap`).
-            text += (path.parent / "references" / "semantic-authoring.md").read_text(
-                encoding="utf-8"
-            )
-        assert text.count(concise) == 1, f"{path} lost the canonical contract"
+        assert concise not in text, f"{path} copies the canonical contract"
+        assert workflow_skills.AUTHORING_REFERENCE in text, f"{path} does not link the canonical contract"
 
     # The embedded examples keep governed-relative wikilinks portable.
     assert "[[Knowledge Base/Notes/Health/Morning training]]" in concise

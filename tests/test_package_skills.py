@@ -37,6 +37,13 @@ def _assert_contract(text: str) -> None:
     assert contract.content_digest in normalized
 
 
+def _assert_workflow_contract(skill: str, reference: str) -> None:
+    """A workflow skill links the one shipped authoring reference, and that reference holds the contract."""
+    assert workflow_skills.AUTHORING_REFERENCE in skill
+    assert semantic_authoring.render_concise() not in _normalized(skill)
+    _assert_contract(reference)
+
+
 def test_release_version_reads_pyproject() -> None:
     """The pin source is the tree's own version, so committed artifacts are stable."""
     expected = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]["version"]
@@ -133,17 +140,23 @@ def test_capture_archive_closes_writing_reference_dependencies(tmp_path: Path) -
 
     with zipfile.ZipFile(tmp_path / "evermatter-capture.zip") as archive:
         writing = archive.read("references/writing.md").decode("utf-8")
-        for name in ("frontmatter.md", "supersession.md", "write-scope.md", "page-types.md"):
+        for name in ("supersession.md", "write-scope.md", "page-types.md"):
             assert f"`{name}`" in writing
             assert f"references/{name}" in archive.namelist()
 
 
 def test_every_packaged_skill_respects_live_capability_exclusions(tmp_path: Path) -> None:
+    """The core skill states the rule; a workflow defers to the core skill, or to the served profile
+    when a client cannot load it, so a workflow alone never stands in for the live capability list."""
     report = package_module.package_skills(tmp_path)
     for item in report["archives"]:
         with zipfile.ZipFile(item["path"]) as archive:
             skill = archive.read("SKILL.md").decode("utf-8")
-        assert "Do not invoke tools absent from `available_product_tools`" in skill
+        if item["name"] == workflow_skills.CORE_SKILL_NAME:
+            assert "Do not invoke tools absent from `available_product_tools`" in skill
+        else:
+            assert f"builds on the `{workflow_skills.CORE_SKILL_NAME}` skill" in skill
+            assert 'read_instructions(profile="compact")' in skill
 
 
 def test_generic_build_ships_the_scaffold_keys(tmp_path: Path) -> None:
@@ -208,7 +221,10 @@ def test_every_authoring_archive_is_standalone(tmp_path: Path) -> None:
         if item["name"] not in authoring:
             continue
         with zipfile.ZipFile(item["path"]) as archive:
-            _assert_contract(archive.read("SKILL.md").decode("utf-8"))
+            _assert_workflow_contract(
+                archive.read("SKILL.md").decode("utf-8"),
+                archive.read(workflow_skills.AUTHORING_REFERENCE).decode("utf-8"),
+            )
 
 
 def test_packaging_rejects_authoring_workflow_that_only_references_core(
@@ -222,7 +238,7 @@ def test_packaging_rejects_authoring_workflow_that_only_references_core(
     fake = tmp_path / authoring
     fake.mkdir()
     (fake / "SKILL.md").write_text(
-        f"---\nname: {authoring}\n---\n\nSee the exomem core skill.\n",
+        f"---\nname: {authoring}\n---\n\nSee the core skill.\n",
         encoding="utf-8",
     )
     original = workflow_skills.source_dir
@@ -256,7 +272,10 @@ def test_builds_and_unpacks_every_public_contract_distribution(
         assert "project-keys.yaml" in archive.namelist()
     for name in skills:
         with zipfile.ZipFile(archive_dir / f"{name}.zip") as archive:
-            _assert_contract(archive.read("SKILL.md").decode("utf-8"))
+            _assert_workflow_contract(
+                archive.read("SKILL.md").decode("utf-8"),
+                archive.read(workflow_skills.AUTHORING_REFERENCE).decode("utf-8"),
+            )
 
     # Generated plugin output.
     plugin = tmp_path / "plugin"
@@ -267,7 +286,10 @@ def test_builds_and_unpacks_every_public_contract_distribution(
     )
     assert (plugin / "skills" / "evermatter" / "references" / "page-types.md").is_file()
     for name in skills:
-        _assert_contract((plugin / "skills" / name / "SKILL.md").read_text("utf-8"))
+        _assert_workflow_contract(
+            (plugin / "skills" / name / "SKILL.md").read_text("utf-8"),
+            (plugin / "skills" / name / workflow_skills.AUTHORING_REFERENCE).read_text("utf-8"),
+        )
     plugin_files = [path for path in plugin.rglob("*") if path.is_file()]
     assert_public_artifacts_clean(
         plugin_files,
@@ -318,9 +340,13 @@ def test_builds_and_unpacks_every_public_contract_distribution(
         )
         assert "exomem/_scaffold/_Schema/references/page-types.md" in built.namelist()
         assert "exomem/semantic_authoring.py" in built.namelist()
+        assert "exomem/_plugins/claude-server.zip" in built.namelist()
         for name in skills:
             path = f"exomem/_scaffold/_Schema/workflow-skills/{name}/SKILL.md"
-            _assert_contract(built.read(path).decode("utf-8"))
+            _assert_workflow_contract(
+                built.read(path).decode("utf-8"),
+                built.read("exomem/_scaffold/_Schema/references/semantic-authoring.md").decode("utf-8"),
+            )
 
     sdist = next(dist.glob("*.tar.gz"))
     assert_public_artifacts_clean((sdist,), labels={sdist: f"sdist/{sdist.name}"})
@@ -347,7 +373,20 @@ def test_builds_and_unpacks_every_public_contract_distribution(
             path = f"{prefix}/src/exomem/_scaffold/_Schema/workflow-skills/{name}/SKILL.md"
             member = built.extractfile(path)
             assert member is not None
-            _assert_contract(member.read().decode("utf-8"))
+            # The one reference was checked above; each workflow only links it.
+            assert workflow_skills.AUTHORING_REFERENCE in member.read().decode("utf-8")
 
     assert f"v{contract.version}" in concise
     assert contract.content_digest in concise
+
+
+def test_every_workflow_carries_the_same_preamble() -> None:
+    """Each workflow repeats the lines that send the agent to the core skill and the authoring contract, so a
+    workflow read alone still finds them. This keeps the nine copies in step: an edit to one must reach all."""
+    root = Path(__file__).resolve().parents[1] / "src" / "exomem" / "_scaffold" / "_Schema" / "workflow-skills"
+    preambles = {}
+    for skill in sorted(root.glob("*/SKILL.md")):
+        body = skill.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+        preambles[skill.parent.name] = body.split(f"# {skill.parent.name}\n", 1)[1].split("\n## ", 1)[0].strip()
+    assert len(preambles) == 9
+    assert len(set(preambles.values())) == 1, preambles

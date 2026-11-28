@@ -143,7 +143,7 @@ def load_index() -> dict[str, Any]:
     if not WORKFLOW_SKILLS_INDEX.is_file():
         raise FileNotFoundError(
             f"workflow skill index missing at {WORKFLOW_SKILLS_INDEX} "
-            "(is the exomem install intact?)"
+            "(is the Evermatter install intact?)"
         )
     data = yaml.safe_load(WORKFLOW_SKILLS_INDEX.read_text(encoding="utf-8")) or {}
     skills = data.get("skills")
@@ -175,31 +175,36 @@ def is_standalone_authoring(name: str) -> bool:
     )
 
 
+#: Where a workflow skill reads the canonical authoring contract: the reference shipped beside it.
+AUTHORING_REFERENCE = "references/semantic-authoring.md"
+
+
 def validate_contract_projection(
     name: str,
     skill_dir: Path,
     *,
     core: bool = False,
 ) -> None:
-    """Reject a standalone authoring boundary whose canonical contract drifted."""
+    """Reject a skill whose authoring contract is missing, drifted or copied.
+
+    The core skill ships the canonical contract once, in its reference file. A standalone
+    authoring workflow links that reference instead of carrying a second copy in its body.
+    """
+    concise = semantic_authoring.render_concise()
     if core:
         validate_skill_contract(skill_dir)
-    if not core and not is_standalone_authoring(name):
+        reference = Path(skill_dir) / AUTHORING_REFERENCE
+        text = reference.read_text(encoding="utf-8") if reference.is_file() else ""
+        if text.count(concise) != 1:
+            raise ValueError(f"{name} must ship the canonical semantic authoring contract once in {AUTHORING_REFERENCE}")
         return
-    skill_md = Path(skill_dir) / "SKILL.md"
-    text = skill_md.read_text(encoding="utf-8")
-    if core:
-        # The core skill keeps the canonical contract in the reference it ships beside
-        # SKILL.md (`shrink-bootstrap`), so the always-loaded skill body stays small.
-        reference = Path(skill_dir) / "references" / "semantic-authoring.md"
-        if reference.is_file():
-            text += reference.read_text(encoding="utf-8")
-    concise = semantic_authoring.render_concise()
-    if text.count(concise) != 1:
-        raise ValueError(
-            f"{name} must embed the complete canonical semantic authoring contract "
-            "exactly once; a reference to the core skill is not sufficient"
-        )
+    if not is_standalone_authoring(name):
+        return
+    text = (Path(skill_dir) / "SKILL.md").read_text(encoding="utf-8")
+    if concise in text:
+        raise ValueError(f"{name} copies the semantic authoring contract; link {AUTHORING_REFERENCE} instead")
+    if f"({AUTHORING_REFERENCE})" not in text:
+        raise ValueError(f"{name} must link the semantic authoring contract at {AUTHORING_REFERENCE}")
 
 
 def bootstrap_entries() -> list[dict[str, Any]]:

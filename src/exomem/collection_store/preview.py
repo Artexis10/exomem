@@ -7,6 +7,7 @@ Nothing else, and no environment flag, changes file-mode routing.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext, suppress
 from contextvars import ContextVar
@@ -106,7 +107,12 @@ class _PreviewPhase:
             raise CollectionStoreError("COLLECTION_STORE_BOUNDARY_REQUIRED", "Source metadata requires the actual writer boundary")
         handle = self.depart()
         try:
-            with manager._lock:
+            # Reads beside the store thread borrow the store for one short snapshot read and take no
+            # boundary, so wait for them to return, up to the mutation timeout, before refusing.
+            deadline = time.monotonic() + manager._mutation_timeout_seconds
+            with manager._store_condition:
+                while manager._store_borrowers and (remaining := deadline - time.monotonic()) > 0:
+                    manager._store_condition.wait(min(0.05, remaining))
                 if manager._store_borrowers:
                     raise CollectionStoreError("COLLECTION_STORE_BUSY", "another checkout still borrows the store")
             handle.require_write_authority()
@@ -403,6 +409,15 @@ def note_checked_hash(path, digest):
         checked[path] = digest
 
 
+class _DeadlinePassed(Exception):
+    """The request's store read reached its completion deadline before it decided every page."""
+
+    def __init__(self, answers):
+        super().__init__()
+        #: The pages decided before the deadline, answered as their own calls would be.
+        self.answers = answers
+
+
 class _Decide:
     """The work of one store request: each page asked, answered as its own call would be."""
 
@@ -410,6 +425,8 @@ class _Decide:
         self.read, self.vault_root, self.calls = read, vault_root, calls
         #: The pages this request decides, for the observability span (`StoreServer.call`).
         self.pages = len(calls)
+        #: When a request's read must stop deciding pages: its budget's deadline; None outside a request.
+        self.deadline = None
 
     def __call__(self):
         from ..cli_ops import OpError
@@ -419,6 +436,8 @@ class _Decide:
         try:
             for path, (args, kwargs) in self.calls.items():
                 request_budget.checkpoint()
+                if self.deadline is not None and time.monotonic() >= self.deadline:
+                    raise _DeadlinePassed(answers)
                 try:
                     kind, payload = "value", self.read(self.vault_root, *args, **kwargs)
                 except (CollectionStoreError, OpError) as error:
@@ -433,11 +452,30 @@ class _Decide:
 
 
 def _request(server, decisions, work):
-    """One request to the store thread. A request refused whole is held against the store for the command."""
+    """One read-only request to the store. A request refused whole is held against the store for the command.
+
+    The decisions read the store's last commit beside the store thread (``StoreServer.read_beside``),
+    so a write or view pass that holds the thread does not make them wait out the mutation timeout.
+    The snapshot writer refuses every write, and the work reads no import progress. Where this
+    process holds no admitted writer, the request queues on the store thread as before.
+    """
     from ..cli_ops import OpError
 
+    if (budget := request_budget.current()) is not None:
+        # A read beside the store thread runs on the request's own thread, so it stops deciding pages at the
+        # deadline of the stage it serves, and the pages it has not decided are withheld together. A bound
+        # read checkpoint already stops it at each page (`request_budget.checkpoint`).
+        work.deadline = budget.deadline
     try:
-        return server.call(work, read_only=True, wake_maintenance=False)
+        try:
+            return server.read_beside(work, initial=None, progress=False)
+        except _DeadlinePassed as stop:
+            # The pages decided before the deadline keep their answers. Every other page is withheld as one missed
+            # read, and the command asks this store no more.
+            missed = server.missed_read()
+            if decisions is not None:
+                decisions.refusals.setdefault(server, missed)
+            return {**dict.fromkeys(work.calls, ("refused", missed, None)), **stop.answers}
     except (CollectionStoreError, OpError) as error:
         if decisions is not None:
             decisions.refusals.setdefault(server, error)
@@ -447,6 +485,9 @@ def _request(server, decisions, work):
 def _replay(answer):
     """What that page's own call would have returned or raised."""
     kind, payload, _checked = answer
+    if kind == "refused":
+        # A refusal can stand for many pages: clear its traceback so it does not grow per page.
+        raise payload.with_traceback(None)
     if kind != "value":
         raise payload
     return payload
@@ -466,11 +507,13 @@ def _decide_through_store(server, read, batch, vault_root, path, args, kwargs):
     from .runtime import projection_route
 
     decisions = published_admission.request_decisions()
-    if decisions is not None and server in decisions.refusals:
-        # One refusal object raised for every page: clear its traceback so it does not grow per page.
-        raise decisions.refusals[server].with_traceback(None)
+    refused = None if decisions is None else decisions.refusals.get(server)
 
     def alone():
+        # Read now: a batch this call just made may have been refused at its deadline.
+        if decisions is not None and (current := decisions.refusals.get(server)) is not None:
+            # One refusal object raised for every page: clear its traceback so it does not grow per page.
+            raise current.with_traceback(None)
         return _replay(_request(server, decisions, _Decide(read, vault_root, {path: (args, kwargs)}))[path])
 
     if (decisions is None or batch is None or len(args) != 1 or path not in decisions.paths
@@ -484,6 +527,9 @@ def _decide_through_store(server, read, batch, vault_root, path, args, kwargs):
     effects = {keyword: shared.pop(keyword) for keyword in batch.effects if keyword in shared}
     # The ambient principal is an input of the answer wherever a call leaves its own out.
     answers = decisions.answers((read, vault_root, effective_principal(), shared))
+    if path not in answers and refused is not None:
+        # A page decided before the store was refused keeps its answer; any other asks this store no more.
+        raise refused.with_traceback(None)
     if path not in answers:
         calls = {path: ((path,), {**shared, **effects})}
         for other in decisions.pending():
@@ -517,6 +563,7 @@ def canonical_read(function=None, *, projection=False, unavailable=None,
             if not projection:
                 return function(vault_root, *args, **kwargs)
             from ..cli_ops import OpError
+            from ..structured_collections import CollectionError
             from .runtime import projection_route
 
             # These consumers take a canonical path or page as their first argument; bulk callers decide each path below.
@@ -525,7 +572,9 @@ def canonical_read(function=None, *, projection=False, unavailable=None,
             try:
                 if isinstance(path, str) and (server := projection_route(vault_root, path)) is not None:
                     return _decide_through_store(server, read, batch, vault_root, path, args, kwargs)
-            except (CollectionStoreError, OpError):
+            # CollectionError is the store's content-free refusal of one page (its freshness signals raise it), so it
+            # withholds that page like a store outage does, instead of failing the whole response.
+            except (CollectionStoreError, OpError, CollectionError):
                 if unavailable is None:
                     raise
                 # Discovery withholds this C candidate instead of making unrelated A/B unavailable.
@@ -666,12 +715,13 @@ def _prover(vault_root: Path, writer, binding):
     return prove
 
 
-def bind_row(vault_root: Path, collection: str, item_id: str) -> dict[str, str] | None:
+def bind_row(vault_root: Path, collection: str, item_id: str, *, stale_ok: bool = False) -> dict[str, str] | None:
     """The `item_key` and guards a Records row id stands for, bound by one key-and-version read.
 
     It enters as a query of the collection would, so an absent or withheld collection or row
     refuses alike. None where the generic scan of the leaf's own query must answer: no served
-    store, a collection the store does not own, or one the binder cannot read by key.
+    store, a collection the store does not own, or one the binder cannot read by key. `stale_ok`
+    binds an id whose version has moved on, for a reader that guards no write.
     """
     binding = _BOUND.get()
     if binding is None or binding[0] != Path(vault_root).resolve():
@@ -691,7 +741,7 @@ def bind_row(vault_root: Path, collection: str, item_id: str) -> dict[str, str] 
     writer._facade_profile = "records"
     with writer.read_collection(collection, facade_profile="records") as manifest:
         found = readable_matches(writer, manifest, collection_refs.id_head(item_id))
-    return None if found is None else collection_refs.bound_row(item_id, *found, profile="records")
+    return None if found is None else collection_refs.bound_row(item_id, *found, profile="records", stale_ok=stale_ok)
 
 
 def dispatch(
@@ -706,13 +756,16 @@ def dispatch(
         if server is not None and server.root == Path(vault_root).resolve():
             return source_dependencies.dispatch_request(server, profile, action, values)
         return False, None
+    # nosemgrep: ep-word-membership -- These are the facade actions bound to the two row writer methods.
+    if action in {"append", "add", "update", "triage"}:
+        save = _prepare_row_save(vault_root, binding, profile, action, values)
+        if save is None:
+            return False, None
+        _writer, method, collection, args = save
+        return True, _mutate(vault_root, method, collection, **args)
     writer = binding[1]
     prove = _prover(vault_root, writer, binding)
-    if binding[2]:
-        from .capability import require_records_summary_route
-
-        require_records_summary_route(vault_root, writer, action, values, prove=prove)
-    args = {name: value for name, value in values.items() if value is not None}
+    args = _dispatch_arguments(vault_root, binding, action, values, prove)
 
     if action == "describe" and profile == "records":
         from ..query_engine import route
@@ -803,30 +856,39 @@ def dispatch(
         # A query that names one row answers that row and its body; Records names the key item_key, Planning plan_id.
         key = args.pop("item_key", args.pop("plan_id", None))
         with writer.read_collection(collection, facade_profile=profile) as manifest:
-            if key is not None:
-                column = collection_profiles.profile_for(manifest.semantic_profile).item_id_property
-                args["filters"] = [{"column": column, "op": "eq", "value": key}]
-                args["limit"] = 1
-            if profile == "planning":
-                # One named row is found whatever its lifecycle.
-                projected = planning.query(vault_root, manifest, **args, **({"lifecycle": "all"} if key is not None else {}))
+            if manifest.derived:
+                # The store holds none of a derived collection's rows, so the legacy arguments read them as a typed query.
+                from . import derived_query
+
+                typed = derived_query.typed_query(manifest, key, args)
             else:
-                include_history = args.pop("include_agent_history", False)
-                from .history import agent_history
+                if key is not None:
+                    column = collection_profiles.profile_for(manifest.semantic_profile).item_id_property
+                    args["filters"] = [{"column": column, "op": "eq", "value": key}]
+                    args["limit"] = 1
+                if profile == "planning":
+                    # One named row is found whatever its lifecycle.
+                    projected = planning.query(vault_root, manifest, **args, **({"lifecycle": "all"} if key is not None else {}))
+                else:
+                    include_history = args.pop("include_agent_history", False)
+                    from .history import agent_history
 
-                result = record_governance.query_collection(vault_root, manifest, **args)
-                projected = record_governance.project_query_result(
-                    result, manifest, output_format=args.get("output_format", "json"),
-                    agent_history=agent_history(writer, manifest) if include_history else None,
-                )
-                # The ids go on before the projection is sealed: a sealed payload that changes is refused.
-                from .. import collection_refs
+                    result = record_governance.query_collection(vault_root, manifest, **args)
+                    projected = record_governance.project_query_result(
+                        result, manifest, output_format=args.get("output_format", "json"),
+                        agent_history=agent_history(writer, manifest) if include_history else None,
+                    )
+                    # The ids go on before the projection is sealed: a sealed payload that changes is refused.
+                    from .. import collection_refs
 
-                projected = collection_refs.mark_rows(projected, profile="records")
-                projected = writer._operation.query_metadata_evidence(projected, writer, manifest, result)
-            if key is not None and projected.get("rows"):
-                projected = {**projected, **writer.row_body(manifest.collection_id, key)}
-            return True, projected
+                    projected = collection_refs.mark_rows(projected, profile="records")
+                    projected = writer._operation.query_metadata_evidence(projected, writer, manifest, result)
+                if key is not None and projected.get("rows"):
+                    projected = {**projected, **writer.row_body(manifest.collection_id, key)}
+                return True, projected
+        from ..query_engine import route
+
+        return True, route.run(writer, collection, typed, facade_profile=profile)
     if action == "create":
         return True, _mutate(vault_root, writer.create_collection, **args)
     if action == "import" and profile == "records":
@@ -838,17 +900,8 @@ def dispatch(
     collection = args.pop("collection")
     if profile == "planning" and "plan_id" in args:
         args["item_key"] = args.pop("plan_id")
-    if action in {"append", "add"}:
-        return True, _mutate(vault_root, writer.append_record, collection, **args)
     if action == "bulk_upsert" and profile == "records":
         return True, _mutate(vault_root, writer.bulk_upsert_records, collection, **args)
-    if action == "triage":
-        args["changes"] = args.pop("transition")
-        args["operation"] = "triage"
-    if action in {"update", "triage"}:
-        args.setdefault("changes", {})
-        args["refresh_presentation"] = args.get("refresh_presentation") is True
-        return True, _mutate(vault_root, writer.update_record, collection, **args)
     if action == "revise":
         if binding[2] and isinstance(args.get("manifest_text"), str):
             from .admission import require_summary_manifest
@@ -878,3 +931,57 @@ def dispatch(
     raise collections.CollectionError(
         "COLLECTION_STORE_PREVIEW_UNSUPPORTED", "this operation belongs to a later store slice"
     )
+
+
+def _dispatch_arguments(vault_root, binding, action, values, prove, *, released_manifest=None):
+    if binding[2]:
+        from .capability import require_records_summary_route
+
+        require_records_summary_route(vault_root, binding[1], action, values, prove=prove,
+                                      released_manifest=released_manifest)
+    return {name: value for name, value in values.items() if value is not None}
+
+
+def _prepare_row_save(vault_root, binding, profile, action, values, *, released_manifest=None):
+    """Check the route and select its writer call without invoking it."""
+    writer = binding[1]
+    prove = _prover(vault_root, writer, binding)
+    args = _dispatch_arguments(vault_root, binding, action, values, prove, released_manifest=released_manifest)
+    selector = args.get("collection", args.get("manifest_path"))
+    if prove().marker is not None and (selector is None or selected_writer(vault_root, selector, prove=prove) is None):
+        return None
+    writer._require_operation_context()
+    writer._facade_profile = profile
+    collection = args.pop("collection")
+    if profile == "planning" and "plan_id" in args:
+        args["item_key"] = args.pop("plan_id")
+    if action == "append" or action == "add":
+        return writer, writer.append_record, collection, args
+    if action == "triage":
+        args["changes"] = args.pop("transition")
+        args["operation"] = "triage"
+    args.setdefault("changes", {})
+    args["refresh_presentation"] = args.get("refresh_presentation") is True
+    return writer, writer.update_record, collection, args
+
+
+def row_save_refusal(vault_root, profile, action, values, *, released_manifest) -> collections.CollectionError | None:
+    """Read the first refusal of a row save after resolving its manifest in the same snapshot."""
+    from inspect import signature
+
+    from . import record_inputs
+
+    binding = _BOUND.get()
+    if binding is None or not _bound_to(binding, vault_root):
+        return None
+    save = _prepare_row_save(vault_root, binding, profile, action, values, released_manifest=released_manifest)
+    if save is None:
+        return None
+    writer, method, collection, args = save
+    try:
+        collection, arguments = record_inputs.bind_arguments(signature(method), collection, **args)
+        with writer.read_snapshot(mutation=True):
+            candidate, replay = record_inputs.from_snapshot(writer, method.__name__, collection, arguments)
+        return None if replay is not None else candidate.error
+    except collections.CollectionError as error:
+        return error

@@ -612,11 +612,6 @@ def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
             "## Durable personal baselines",
             "## Workflow",
         ),
-        "operations": _markdown_block(
-            scaffold / "references" / "operations.md",
-            "## Durable personal baseline routing",
-            "## Planning",
-        ),
         "quickstart copyable instructions": _fenced_block_after(
             ROOT / "QUICKSTART.md",
             "### Make the KB proactive in the Claude app (custom instructions)",
@@ -632,7 +627,7 @@ def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
         block = " ".join(block.lower().split())
         for marker in _BASELINE_MARKERS:
             assert marker in block, (name, marker)
-        if name in {"scaffold", "capture workflow", "operations"}:
+        if name in {"scaffold", "capture workflow"}:
             for marker in _SCAFFOLD_BASELINE_MARKERS:
                 assert marker in block, (name, marker)
         _assert_baseline_authority_mapping(name, block)
@@ -679,7 +674,7 @@ def test_generated_active_copies_match_each_named_source_block() -> None:
             schema / "workflow-skills" / "evermatter-capture" / "SKILL.md",
             plugin / "skills" / "evermatter-capture" / "SKILL.md",
         ),
-        (schema / "references" / "operations.md", plugin / "skills" / "evermatter" / "references" / "operations.md"),
+        (schema / "references" / "engagement.md", plugin / "skills" / "evermatter" / "references" / "engagement.md"),
         (ROOT / "src" / "exomem" / "_hooks" / "exomem_capture_nudge.py", plugin / "hooks" / "exomem_capture_nudge.py"),
     )
     for source, generated in pairs:

@@ -19,7 +19,7 @@ import stat
 import threading
 import time
 import weakref
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, closing, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -44,6 +44,7 @@ from . import (
     note_types,
     recall_policy,
     relation_registry,
+    request_budget,
     reserved_paths,
     runtime_resources,
     semantic_blocks,
@@ -52,6 +53,7 @@ from . import (
     semantic_units,
     sidecar_store,
     traversal_profiles,
+    unit_rows,
     view_lag,
     vocabulary_recovery,
 )
@@ -101,8 +103,9 @@ def _sqlite_connect_owned(
 ) -> sqlite3.Connection:
     return sqlite3.connect(database, *args, **kwargs)
 
-# Older rows can retain stale edges after their topology history disappears; rebuild them once.
-SCHEMA_VERSION = 15
+# Generation16 adds authored resolver targets and ordinary-body dependency presence;
+# rebuild old rows before publishing them.
+SCHEMA_VERSION = 17
 _DEPENDENCY_FORMAT = 2
 UNIT_SEED_MAX_BATCHES = 4
 #: Page cache for a private whole-vault rebuild connection, in KiB (see `_connect_retained`).
@@ -578,6 +581,8 @@ class UnitEdge:
     target_unit: str | None
     relation: str
     parent: str | None = None
+    family: str | None = None
+    behaviours: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -1539,8 +1544,8 @@ def _sidecar_file_identity(live: Path) -> tuple[Any, ...]:
 
     Sampled before a reader opens its snapshot, so a publication landing after
     the sample keys a newer identity than the verdict was proved against. An
-    empty WAL is the same as an absent one: the first reader creates it, and
-    that is not a change to anything the proof read.
+    empty or header-only WAL is the same as an absent one: it carries no
+    revised database pages.
     """
     identity: list[Any] = []
     for path in (live, live.with_name(live.name + "-wal")):
@@ -1549,7 +1554,9 @@ def _sidecar_file_identity(live: Path) -> tuple[Any, ...]:
         except OSError:
             identity.append(None)
             continue
-        identity.append((st.st_ino, st.st_size, st.st_mtime_ns) if st.st_size else None)
+        # SQLite fixes the frame-free WAL header at 32 bytes: sqlite.org/fileformat.html#walformat.
+        empty = st.st_size == 0 or (path != live and st.st_size == 32)
+        identity.append(None if empty else (st.st_ino, st.st_size, st.st_mtime_ns))
     return tuple(identity)
 
 
@@ -1673,7 +1680,7 @@ def _run_background_proof(vault_root: Path, registry_key: str) -> None:
                 _BACKGROUND_PROOFS.pop(registry_key, None)
 
 
-def _await_publication_hold(key: str) -> None:
+def _await_publication_hold(key: str, *, check: Callable[[], None] | None = None) -> None:
     """Block a new reader for the bounded replacement window, then proceed.
 
     Failing open after the wait is deliberate: the hold exists to make the
@@ -1691,7 +1698,9 @@ def _await_publication_hold(key: str) -> None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return
-            _SIDECAR_READERS_CHANGED.wait(remaining)
+            if check is not None:
+                check()
+            _SIDECAR_READERS_CHANGED.wait(min(remaining, 0.05) if check is not None else remaining)
 
 
 def _register_sidecar_reader(key: str, conn: sqlite3.Connection) -> None:
@@ -2452,7 +2461,7 @@ def _dependency_lookup_keys(raw_target: str) -> set[str]:
     target = target.removesuffix(".md").strip().strip("/")
     if not target:
         return set()
-    keys = {target.casefold()}
+    keys = {target.casefold(), vault_module.title_key(target)}
     if managed_split(target) is not None:
         keys.add(managed_relative(target).casefold())
     else:
@@ -2464,24 +2473,54 @@ def _dependency_lookup_keys(raw_target: str) -> set[str]:
 
 def _dependency_records(
     body: str, candidates: semantic_units.SemanticUnitCandidates
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, bool]]:
     """Deduplicated authored body targets and their conservative lookup keys."""
-    records: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    targets = [match.group(0)[2:-2].strip() for match in vault_module.find_body_wikilinks(body)]
-    targets.extend(
-        relation.target for item in candidates.rich for relation in item.heading.relations
+    notes = markdown_relations.interpret_markdown_relations(
+        candidates.note_relations,
+        relation_types=frozenset(item.kind for item in candidates.note_relations.candidates),
+        retain_unknown=True,
     )
-    targets.extend(relation.target for relation in candidates.note_relations.candidates)
-    for raw_target in targets:
+    canonical_lines = {relation.line for relation in notes.relations if relation.canonical}
+    targets: dict[str, bool] = {}
+    line, previous = 1, 0
+    for match in vault_module.find_body_wikilinks(body):
+        line += body.count("\n", previous, match.start())
+        previous = match.start()
+        raw = match.group(0)[2:-2].strip()
+        targets[raw] = targets.get(raw, False) or line not in canonical_lines
+    for raw in (
+        *(relation.target for item in candidates.rich for relation in item.heading.relations),
+        *(relation.target for relation in candidates.note_relations.candidates),
+    ):
+        targets.setdefault(raw, False)
+    records: list[tuple[str, str, bool]] = []
+    for raw_target, body_link in targets.items():
         if not raw_target or raw_target.endswith("/"):
             continue
         for lookup_key in sorted(_dependency_lookup_keys(raw_target)):
-            record = (lookup_key, raw_target)
-            if record not in seen:
-                seen.add(record)
-                records.append(record)
+            records.append((lookup_key, raw_target, body_link))
     return records
+
+
+def fragment_dependency_paths(
+    root: Path, resolver: vault_module.WikilinkResolver,
+    dependencies: Iterable[tuple[str, str, bool]],
+) -> set[str]:
+    """The resolved page paths that a store drain can load in one summary lookup."""
+    targets = {_split_target_fragment(raw) for _, raw, _ in dependencies if "#" in raw}
+    paths = set()
+    for target, fragment in targets:
+        if not target or not fragment:
+            continue
+        try:
+            canonical, warning = vault_module.normalize_wikilink(
+                target, root, resolver=resolver, strict=False,
+            )
+        except ValueError:
+            continue
+        if canonical and not warning:
+            paths.add(_page_rel(canonical))
+    return paths
 
 
 def _dependency_proof_value() -> str:
@@ -2546,7 +2585,16 @@ def _dependency_changed_keys(
         for resolver in resolvers:
             title = resolver.title_key_for_path(rel)
             if title:
-                keys.add(title.casefold())
+                keys.update((title, title.casefold()))
+    return keys
+
+
+def dependency_keys_for_page(path: str, title: str | None) -> set[str]:
+    """The indexed dependency names that can resolve to this page; no resolver walk or I/O."""
+    keys = _dependency_lookup_keys(path)
+    keys.add(path.removesuffix(".md").rsplit("/", 1)[-1].casefold())
+    if title:
+        keys.add(vault_module.title_key(title))
     return keys
 
 
@@ -2560,25 +2608,28 @@ def _resident_topology_fingerprint(
     vault_root: Path,
     resolver: vault_module.WikilinkResolver,
     publication: object,
+    check: Callable[[], None] | None = None,
 ) -> str:
     """Cache the topology digest of the exact resident maps copied by the borrower."""
     key = Path(vault_root)
     cached = _RESIDENT_TOPOLOGY_DIGESTS.get(key)
     if cached is not None and cached[0] is publication:
         return cached[1]
-    digest = _resolver_topology_fingerprint(resolver)
+    digest = _resolver_topology_fingerprint(resolver, check=check)
     _RESIDENT_TOPOLOGY_DIGESTS[key] = (publication, digest)
     return digest
 
 
 def _resolver_topology_fingerprint(
     resolver: vault_module.WikilinkResolver,
+    *, check: Callable[[], None] | None = None,
 ) -> str:
     """Digest every path/title input that can change wikilink resolution."""
-    topology = [
-        (rel, resolver.title_key_for_path(rel))
-        for rel in sorted(resolver.full_paths)
-    ]
+    topology = []
+    for rel in sorted(resolver.full_paths):
+        if check is not None:
+            check()
+        topology.append((rel, resolver.title_key_for_path(rel)))
     payload = json.dumps(topology, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -2608,15 +2659,93 @@ class PageGraphRows:
     """Every graph row one page derives, as plain data; `write_page_graph_rows` writes them.
 
     ``nodes`` is the file node, then the page's unit nodes. ``dependencies`` are
-    `(lookup_key, raw_target)` pairs. ``source_hash`` is the hash of the bytes the rows derive from.
+    `(lookup_key, raw_target, body_link)` triples. ``source_hash`` names the source bytes.
     """
 
     rel: str
     nodes: tuple[GraphNode, ...]
     parent_ref: str | None
     edges: tuple[GraphEdge, ...]
-    dependencies: tuple[tuple[str, str], ...]
+    dependencies: tuple[tuple[str, str, bool], ...]
     source_hash: str
+    unit_links: tuple[UnitLink, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class UnitLink:
+    occurrence: int
+    line: int
+    embed: bool
+    raw_target: str
+    src_key: str
+    target_path: str | None
+    fragment: str
+    dst_key: str | None
+    resolution: str
+
+
+@dataclass(frozen=True, slots=True)
+class UnitLinkPage:
+    """One internal keyset page. An absent total means the graph's answer is incomplete."""
+
+    links: tuple[tuple[str, UnitLink], ...] = ()
+    total: int | None = None
+    next_after: tuple[str, int] | None = None
+
+    @property
+    def state(self) -> Literal["ready", "lag"]:
+        return "lag" if self.total is None else "ready"
+
+
+def _unit_link_rows(
+    root: Path,
+    state: semantic_index.SemanticParentIndexState,
+    rel: str,
+    resolver: vault_module.WikilinkResolver,
+    landing: Callable[[str, str], tuple[str, str, dict[str, str]]],
+) -> tuple[UnitLink, ...]:
+    from heapq import heappop, heappush
+
+    body = state.body
+    if "#" not in body or "[[" not in body:
+        return ()
+    candidates = iter(semantic_units.structural_occurrences(state.candidates))
+    candidate = next(candidates, None)
+    spans: list[tuple[int, int, str]] = []
+    rows = []
+    line, previous = 1, 0
+    for occurrence, match in enumerate(vault_module.iter_body_wikilinks(body)):
+        start = match.start()
+        line += body.count("\n", previous, start)
+        previous = start
+        raw = match.group(0)[2:-2].strip()
+        _, fragment = _split_target_fragment(raw)
+        if not semantic_units.is_unit_anchor_shaped(fragment):
+            continue
+        landed = _link_target(
+            root, raw, resolver, None, source_path=rel, landing=landing,
+        )
+        if landed is None:
+            continue
+        _, destination, page_key, details = landed
+        outcome = details["fragment_resolution"]
+        # A heading on the neutral target can be a unit anchor on a visible namesake.
+        embed = start > 0 and body[start - 1] == "!"
+        position = start - int(embed)
+        while candidate is not None and candidate.span.start_offset <= position:
+            span = candidate.span
+            key = _candidate_key(rel, candidate.key, candidate.form)
+            heappush(spans, (-span.start_offset, span.end_offset, key))
+            candidate = next(candidates, None)
+        while spans and spans[0][1] <= position:
+            heappop(spans)
+        resolved_page = page_key.removeprefix("file:")
+        rows.append(UnitLink(
+            occurrence, line, embed, raw, spans[0][2] if spans else _file_key(rel),
+            resolved_page if details["target_resolution"] != "unresolved" else None,
+            fragment, destination if outcome == "unit" else None, outcome,
+        ))
+    return tuple(rows)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2669,6 +2798,9 @@ def page_graph_rows(
     target_exists: Callable[[str], bool],
     landing: Callable[[str, str], tuple[str, str, dict[str, str]]],
     prepared_structure: Mapping[str, Any] | None = None,
+    prepared_unit_rows: Sequence[unit_rows.UnitRow] | None = None,
+    prepared_dependencies: tuple[tuple[str, str, bool], ...] | None = None,
+    unit_links: bool = True,
 ) -> PageGraphRows | None:
     """The graph rows of one page, derived from ``raw`` and the inputs below.
 
@@ -2688,14 +2820,13 @@ def page_graph_rows(
     """
     if not _is_graph_page(rel) or not recall_policy.admits_markdown_content(vault_root, rel, raw):
         return None
+    if prepared_unit_rows is None:
+        prepared_unit_rows = unit_rows.build(rel, state)
     file_node = _file_node(
         vault_root, page, raw.decode("utf-8"), state=state, type_basis=type_basis,
         prepared_structure=prepared_structure,
     )
-    unit_nodes = [
-        _candidate_node(page, unit, state)
-        for unit in semantic_units.candidate_units(state.candidates)
-    ]
+    unit_nodes = [_candidate_node(page, row) for row in prepared_unit_rows]
     edges = _structural_edges_for_page(
         vault_root,
         page,
@@ -2710,8 +2841,13 @@ def page_graph_rows(
         nodes=(file_node, *unit_nodes),
         parent_ref=state.parent_ref,
         edges=tuple(edges),
-        dependencies=tuple(_dependency_records(state.body, state.candidates)),
+        dependencies=(tuple(_dependency_records(state.body, state.candidates))
+                      if prepared_dependencies is None else prepared_dependencies),
         source_hash=file_node.source_hash,
+        unit_links=(
+            _unit_link_rows(vault_root, state, rel, resolver, landing)
+            if unit_links else ()
+        ),
     )
 
 
@@ -2720,61 +2856,83 @@ def write_page_graph_rows(
     rows: PageGraphRows,
     registry_stamps: Iterable[tuple[str, str]],
     *,
+    derived_columns: bool = True,
+    unit_links: bool = True,
     before_write: Callable[[str, tuple[PageGraphRecords, ...]], None] | None = None,
 ) -> None:
     """Replace the page's graph rows with ``rows`` and store ``registry_stamps`` beside them.
 
     ``registry_stamps`` is `graph_registry_stamps` of the pass. ``before_write`` receives the page
-    and the records that replace its rows, before any row changes. The caller owns the transaction.
+    and the records that replace its rows, before any row changes. ``derived_columns`` is False for
+    a store whose tables lack the columns that the owner pass adds
+    (``graph_dependencies.body_link``, ``graph_edges.raw_target``): its rows omit them. The caller
+    owns the transaction.
     """
     rel = rows.rel
     parent = PageGraphRecords(
         "graph_parent_refs", ("path", "parent_ref"),
         ((rel, rows.parent_ref),) if rows.parent_ref is not None else (), replace=True,
     )
-    dependencies = PageGraphRecords(
-        "graph_dependencies", ("source_path", "lookup_key", "raw_target"),
-        tuple((rel, lookup_key, raw_target) for lookup_key, raw_target in rows.dependencies),
+    if derived_columns:
+        dependencies = PageGraphRecords(
+            "graph_dependencies", ("source_path", "lookup_key", "raw_target", "body_link"),
+            tuple((rel, key, target, body_link) for key, target, body_link in rows.dependencies),
+        )
+    else:
+        # An owner1 store remains writable before the bounded owner2 pass creates
+        # its derived columns.
+        dependencies = PageGraphRecords(
+            "graph_dependencies", ("source_path", "lookup_key", "raw_target"),
+            tuple((rel, key, target) for key, target, _body_link in rows.dependencies),
+        )
+    edge_columns = _EDGE_COLUMNS if derived_columns else _OWNER1_EDGE_COLUMNS
+    edges = PageGraphRecords(
+        "graph_edges", edge_columns,
+        tuple(_edge_values(edge)[: len(edge_columns)] for edge in rows.edges), replace=True,
     )
     coverage = PageGraphRecords(
         "graph_dependency_coverage",
         ("source_path", "source_hash", "dependency_format", "expected_count"),
         ((rel, rows.source_hash, _DEPENDENCY_FORMAT, len(rows.dependencies)),),
     )
+    link_rows = PageGraphRecords(
+        "graph_unit_links",
+        ("source_path", "occurrence", "line", "embed", "raw_target", "src_key",
+         "target_path", "fragment", "dst_key", "resolution"),
+        tuple(
+            (rel, link.occurrence, link.line, link.embed, link.raw_target, link.src_key,
+             link.target_path, link.fragment, link.dst_key, link.resolution)
+            for link in rows.unit_links
+        ),
+    )
     if before_write is not None:
         nodes = PageGraphRecords(
             "graph_nodes", _NODE_COLUMNS, tuple(_node_values(node) for node in rows.nodes),
             replace=True,
         )
-        edges = PageGraphRecords(
-            "graph_edges", _EDGE_COLUMNS, tuple(_edge_values(edge) for edge in rows.edges),
-            replace=True,
-        )
-        before_write(rel, (nodes, parent, edges, dependencies, coverage))
+        records = (nodes, parent, edges, dependencies, coverage)
+        before_write(rel, (*records, link_rows) if unit_links else records)
 
-    conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel,))
-    conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel,))
-    conn.execute("DELETE FROM graph_parent_refs WHERE path = ?", (rel,))
-    conn.execute("DELETE FROM graph_dependencies WHERE source_path = ?", (rel,))
-    conn.execute("DELETE FROM graph_dependency_coverage WHERE source_path = ?", (rel,))
+    EpistemicGraphIndex._drop_own_rows(conn, rel, unit_links=unit_links)
     for key, value in registry_stamps:
         conn.execute("INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)", (key, value))
     if before_write is None:
         for node in rows.nodes:
             _insert_node(conn, node)
         parent.write(conn)
-        for edge in rows.edges:
-            _insert_edge(conn, edge)
+        edges.write(conn)
     else:
         nodes.write(conn)
         parent.write(conn)
         edges.write(conn)
     dependencies.write(conn)
     coverage.write(conn)
+    if unit_links:
+        link_rows.write(conn)
     _bump_generation(conn)
 
 
-def drop_page_graph_rows(conn: sqlite3.Connection, rel: str) -> None:
+def drop_page_graph_rows(conn: sqlite3.Connection, rel: str, *, unit_links: bool = True) -> None:
     """Remove the rows that the page's own bytes derived, and no others.
 
     The caller owns the transaction.
@@ -2782,7 +2940,7 @@ def drop_page_graph_rows(conn: sqlite3.Connection, rel: str) -> None:
     Edges that other pages authored toward ``rel`` stay: they derive from those pages' bytes, and
     `dependent_paths` names the pages to re-derive when ``rel`` goes.
     """
-    EpistemicGraphIndex._drop_own_rows(conn, rel)
+    EpistemicGraphIndex._drop_own_rows(conn, rel, unit_links=unit_links)
     _bump_generation(conn)
 
 
@@ -3081,7 +3239,7 @@ class EpistemicGraphIndex:
                 source_anchor TEXT, metadata TEXT NOT NULL,
                 resolver_project TEXT, resolver_page_type TEXT,
                 resolver_source_kind TEXT, resolver_target_kind TEXT,
-                resolver_origin TEXT, review_evidence TEXT NOT NULL
+                resolver_origin TEXT, review_evidence TEXT NOT NULL, raw_target TEXT
             )
         """)
         conn.execute("""
@@ -3103,9 +3261,29 @@ class EpistemicGraphIndex:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS graph_dependencies (
                 source_path TEXT NOT NULL, lookup_key TEXT NOT NULL, raw_target TEXT NOT NULL,
+                body_link INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(source_path, lookup_key, raw_target)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS graph_unit_links (
+                source_path TEXT NOT NULL, occurrence INTEGER NOT NULL, line INTEGER NOT NULL,
+                embed INTEGER NOT NULL, raw_target TEXT NOT NULL, src_key TEXT NOT NULL,
+                target_path TEXT, fragment TEXT NOT NULL, dst_key TEXT, resolution TEXT NOT NULL,
+                PRIMARY KEY(source_path, occurrence)
+            )
+        """)
+        dependency_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(graph_dependencies)")
+        }
+        if "body_link" not in dependency_columns:
+            conn.execute(
+                "ALTER TABLE graph_dependencies ADD COLUMN body_link INTEGER NOT NULL DEFAULT 0"
+            )
+        # A real column, not an expression index on `metadata`, so the store's room sizer
+        # (`vault_store.write`) can bound its index records.
+        if "raw_target" not in {row[1] for row in conn.execute("PRAGMA table_info(graph_edges)")}:
+            conn.execute("ALTER TABLE graph_edges ADD COLUMN raw_target TEXT")
         conn.execute(
             "INSERT OR IGNORE INTO graph_meta(key, value) VALUES ('instance', ?)",
             (secrets.token_hex(16),),
@@ -3147,6 +3325,10 @@ class EpistemicGraphIndex:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_source_path ON graph_edges(source_path)"
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_raw_target "
+            "ON graph_edges(source_path, raw_target)"
+        )
         # Relation-type indexes back the relation-filtered-recall lookups; the two
         # columns are queried by separate UNIONed branches (an OR across them would
         # defeat both indexes).
@@ -3175,6 +3357,21 @@ class EpistemicGraphIndex:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_dependencies_lookup "
             "ON graph_dependencies(lookup_key, source_path)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_fragment_dependencies "
+            "ON graph_dependencies(lookup_key, source_path) WHERE instr(raw_target, '#') > 0"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_unit_links_target "
+            "ON graph_unit_links(target_path, fragment)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_unit_links_dst ON graph_unit_links(dst_key)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_unit_links_authored "
+            "ON graph_unit_links(source_path, raw_target)"
         )
         current = set()
         for name, statement in _dependency_proof_triggers():
@@ -3939,6 +4136,7 @@ class EpistemicGraphIndex:
         outcome_out: list[str] | None = None,
         refusal_out: list[str] | None = None,
         reader: Callable[[str], bool] | None = None,
+        check: Callable[[], None] | None = None,
         startup_negative: list[_SnapshotSourceSeal] | None = None,
         fatal_read_out: list[int] | None = None,
     ) -> sqlite3.Connection | None:
@@ -4024,6 +4222,8 @@ class EpistemicGraphIndex:
         its existing path.
         """
         # Optional compiler enrichment must never wait for publication or start cold proof.
+        if check is not None:
+            check()
         if live_only and not require_current_projection:
             raise ValueError("live_only requires the current graph projection")
         if live_only:
@@ -4087,11 +4287,11 @@ class EpistemicGraphIndex:
                 if registry_key in _SIDECAR_PUBLICATION_HOLDS:
                     return None
         else:
-            _await_publication_hold(registry_key)
+            _await_publication_hold(registry_key, check=check)
         try:
             # Bounded readers decline contention instead of SQLite's default wait.
             connection_options: dict[str, Any] = (
-                {"timeout": 0.0} if not allow_cold_projection else {}
+                {"timeout": 0.0} if not allow_cold_projection or check is not None else {}
             )
             conn = self._connect_existing(
                 readonly=True,
@@ -4235,6 +4435,16 @@ class EpistemicGraphIndex:
                 if sealed:
                     startup_negative.extend(seal)
             if current and (not exact_live_checkpoint or startup_negative is not None):
+                # The first SELECT pins the snapshot; a preceding write cannot
+                # borrow an older proof.
+                if (
+                    not exact_live_checkpoint
+                    and _sidecar_file_identity(self.path) != sidecar_identity
+                ):
+                    if outcome_out is not None:
+                        outcome_out.append("unproven")
+                    conn.close()
+                    return None
                 # Remembered per everything the verdict depends on (#1454):
                 # outside the exact live checkpoint an inherited sidecar never
                 # reaches the fast path, so an unremembered proof is re-paid by
@@ -4298,14 +4508,22 @@ class EpistemicGraphIndex:
                         # whose proof is slow (#1454). The owner may be a bulk
                         # pass (startup validation), whose proof walks yield.
                         with foreground_priority.awaiting_bulk():
-                            in_flight.wait()
+                            if check is None:
+                                in_flight.wait()
+                            else:
+                                try:
+                                    while not in_flight.wait(0.05):
+                                        check()
+                                except BaseException:
+                                    conn.close()
+                                    raise
                         continue
                     try:
                         decline: list[str] = []
                         current = self._snapshot_sources_match_disk(
                             conn,
                             resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
-                            reason_out=decline,
+                            reason_out=decline, check=check,
                             fold=startup_negative is not None,
                             negative_out=startup_negative,
                             fatal_read_out=fatal_read_out,
@@ -4314,7 +4532,7 @@ class EpistemicGraphIndex:
                         if decline != ["proof_raised"] and not self_owned:
                             with _SNAPSHOT_PROOFS_LOCK:
                                 _SNAPSHOT_PROOFS[registry_key] = (proof_identity, current)
-                    except foreground_priority.BulkCancelled:
+                    except BaseException:
                         conn.close()
                         raise
                     finally:
@@ -4836,6 +5054,7 @@ class EpistemicGraphIndex:
         held_pages: Mapping[str, _ProofPage] | None = None,
         deadline: float | None = None,
         cancelled: Callable[[], bool] | None = None,
+        check: Callable[[], None] | None = None,
         fatal_read_out: list[int] | None = None,
     ) -> bool:
         """Prove a cold/foreign sidecar against human-owned Markdown bytes.
@@ -4914,6 +5133,8 @@ class EpistemicGraphIndex:
         """
 
         def declined(reason: str) -> bool:
+            if interrupted is not None:
+                raise interrupted
             # `reason_out` is the same shape as `residue_out` above and for the
             # same reason: a caller that reports this decline to an operator
             # needs to say what the proof found, and "declined" is not that. A
@@ -4930,11 +5151,19 @@ class EpistemicGraphIndex:
         # unwinds as `BulkCancelled`, so no caller acts on a half-run proof.
         stop = foreground_priority.cancellation_event()
         interrupt: Callable[[], None] | None = None
-        if deadline is not None or cancelled is not None or stop is not None:
+        interrupted: BaseException | None = None
+        if deadline is not None or cancelled is not None or check is not None or stop is not None:
 
             def interrupt() -> None:
+                nonlocal interrupted
                 if stop is not None and stop.is_set():
                     raise foreground_priority.BulkCancelled()
+                if check is not None:
+                    try:
+                        check()
+                    except BaseException as error:
+                        interrupted = error
+                        raise
                 if deadline is not None and time.monotonic() >= deadline:
                     raise _ProofDeadlinePassed
                 if cancelled is not None and cancelled():
@@ -5145,6 +5374,10 @@ class EpistemicGraphIndex:
         except _ProofCancelled:
             return declined("proof_cancelled")
         except Exception as error:  # noqa: BLE001 - an incomplete cold proof fails closed
+            if interrupted is not None:
+                if interrupted is error:
+                    raise
+                raise interrupted from error
             # The class at INFO, so a declined proof is diagnosable from the
             # service log; the traceback stays at DEBUG.
             log.info("cold snapshot proof raised %s", type(error).__name__)
@@ -6884,7 +7117,7 @@ class EpistemicGraphIndex:
         return created
 
     @staticmethod
-    def _drop_own_rows(conn: sqlite3.Connection, rel: str) -> None:
+    def _drop_own_rows(conn: sqlite3.Connection, rel: str, *, unit_links: bool = True) -> None:
         """Remove what the pass derived from `rel`'s own bytes, and nothing more.
 
         Not `_delete_path`: edges other pages authored toward `rel` stay, because
@@ -6896,6 +7129,8 @@ class EpistemicGraphIndex:
         conn.execute("DELETE FROM graph_parent_refs WHERE path = ?", (rel,))
         conn.execute("DELETE FROM graph_dependencies WHERE source_path = ?", (rel,))
         conn.execute("DELETE FROM graph_dependency_coverage WHERE source_path = ?", (rel,))
+        if unit_links:
+            conn.execute("DELETE FROM graph_unit_links WHERE source_path = ?", (rel,))
 
     def _rebuild_all_pass(
         self,
@@ -6907,6 +7142,7 @@ class EpistemicGraphIndex:
                 # A full rebuild starts a new proof; it must not retain invalid old rows.
                 graph_publication.withdraw(conn)
                 conn.execute("DELETE FROM graph_edges")
+                conn.execute("DELETE FROM graph_unit_links")
                 conn.execute("DELETE FROM graph_nodes")
                 conn.execute("DELETE FROM graph_parent_refs")
                 conn.execute("DELETE FROM graph_dependencies")
@@ -9817,6 +10053,7 @@ class EpistemicGraphIndex:
                     changed = 0
                     for path in paths:
                         file_key = f"file:{path}"
+                        conn.execute("DELETE FROM graph_unit_links WHERE source_path = ?", (path,))
                         changed += conn.execute(
                             "DELETE FROM graph_edges WHERE source_path = ? "
                             "OR src_key = ? OR dst_page_key = ?",
@@ -10075,6 +10312,7 @@ class EpistemicGraphIndex:
                 "DELETE FROM graph_edges WHERE source_path = ? OR src_key = ? OR dst_page_key = ?",
                 (rel_path, _file_key(rel_path), _file_key(rel_path)),
             )
+            conn.execute("DELETE FROM graph_unit_links WHERE source_path = ?", (rel_path,))
             cur = conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel_path,))
             conn.execute("DELETE FROM graph_parent_refs WHERE path = ?", (rel_path,))
             conn.execute("DELETE FROM graph_dependencies WHERE source_path = ?", (rel_path,))
@@ -10083,6 +10321,58 @@ class EpistemicGraphIndex:
             )
             _bump_generation(conn)
         return cur.rowcount if cur.rowcount is not None else 0
+
+    def unit_links(
+        self, path: str, *, incoming: bool = False, limit: int = 50,
+        after: tuple[str, int] | None = None, keep: Callable[[str], bool] | None = None,
+        resolver: vault_module.WikilinkResolver | None = None,
+    ) -> UnitLinkPage:
+        """Read unit links in one store snapshot. Public graph readers do not call this door."""
+        from .vault_store import derivation, mode, rederive
+        from .vault_store import read as store_read
+
+        if not 1 <= limit <= 50:
+            raise ValueError("unit link page limit must be between 1 and 50")
+        with ExitStack() as scope:
+            scope.enter_context(store_read.request_snapshot(self.vault_root))
+            if not mode.store_mode_for_reads(self.vault_root):
+                return UnitLinkPage()
+            conn = store_read.lend(self.vault_root)
+            if conn is None:
+                return UnitLinkPage()
+            scope.enter_context(closing(conn))
+            with request_budget.bound_to(derivation.READ_WAIT_SECONDS) as budget:
+                def expired():
+                    return time.monotonic() >= budget.deadline
+
+                def check():
+                    if expired():
+                        raise GraphSnapshotUnavailable("unit links read timed out")
+
+                conn.set_progress_handler(lambda: int(expired()), 1000)
+                try:
+                    if rederive.owner_schema_behind(
+                        conn, required_version=rederive.UNIT_LINKS_OWNER_VERSION,
+                    ):
+                        return UnitLinkPage()
+                    store_read.require_current_parser(conn)
+                    view = GraphView(
+                        self.vault_root, conn, keep=keep, resolver=resolver, check=check,
+                    )
+                    return view.unit_links(
+                        _page_rel(path), incoming=incoming, limit=limit, after=after,
+                    )
+                except GraphSnapshotUnavailable:
+                    return UnitLinkPage()
+                except OpError as error:
+                    if error.code == store_read.DERIVED_BEHIND:
+                        return UnitLinkPage()
+                    raise
+                except sqlite3.OperationalError as error:
+                    error_code = getattr(error, "sqlite_errorcode", None)
+                    if error_code == sqlite3.SQLITE_INTERRUPT and expired():
+                        return UnitLinkPage()
+                    raise
 
     def neighbors_for(
         self,
@@ -10643,6 +10933,7 @@ class EpistemicGraphIndex:
     def _reader_resolver(
         self,
         request: Callable[[], vault_module.WikilinkResolver] | None,
+        *, check: Callable[[], None] | None = None,
     ) -> tuple[vault_module.WikilinkResolver, str | None, str | None] | None:
         """The link resolver a restricted reader's re-derivation reads the open snapshot with, or
         None when none resolves as its rows were derived, and the ``graph_meta`` pair it was
@@ -10658,6 +10949,8 @@ class EpistemicGraphIndex:
         the read at once: a built resolver describes the same live vault, so hashing it would pay
         a second fingerprint for the same answer.
         """
+        if check is not None:
+            check()
         try:
             probe = self._connect_existing(readonly=True)
         except (RuntimeError, sqlite3.Error, OSError):
@@ -10680,7 +10973,10 @@ class EpistemicGraphIndex:
             resident, checkpoint, publication = borrowed
             if stored is not None and checkpoint == stored:
                 return resident, topology, meta.get(_RECALL_CHECKPOINT_KEY)
-            if _resident_topology_fingerprint(self.vault_root, resident, publication) == topology:
+            if (
+                _resident_topology_fingerprint(self.vault_root, resident, publication, check=check)
+                == topology
+            ):
                 return resident, topology, meta.get(_RECALL_CHECKPOINT_KEY)
             # A built resolver would describe the same live vault and hash to the same
             # fingerprint: one topology hash decides this read.
@@ -10695,7 +10991,7 @@ class EpistemicGraphIndex:
             return None
         return (
             (built, topology, meta.get(_RECALL_CHECKPOINT_KEY))
-            if _resolver_topology_fingerprint(built) == topology
+            if _resolver_topology_fingerprint(built, check=check) == topology
             else None
         )
 
@@ -10707,6 +11003,7 @@ class EpistemicGraphIndex:
         keep: Callable[[str], bool] | None = None,
         resolver: Callable[[], vault_module.WikilinkResolver] | None = None,
         reader: Callable[[str], bool] | None = None,
+        check: Callable[[], None] | None = None,
     ) -> UnitEdgeResult:
         """Every typed edge of `keys`, with each end at the grain the graph holds it, in one read.
 
@@ -10742,9 +11039,9 @@ class EpistemicGraphIndex:
         from .vault_store import read as store_read
 
         if not store_mode.store_mode_for_reads(self.vault_root):
-            return self._unit_edges(keys, pages, keep, resolver, reader, stored=False)
+            return self._unit_edges(keys, pages, keep, resolver, reader, stored=False, check=check)
         with store_read.request_snapshot(self.vault_root):
-            return self._unit_edges(keys, pages, keep, resolver, reader, stored=True)
+            return self._unit_edges(keys, pages, keep, resolver, reader, stored=True, check=check)
 
     def _unit_edges(
         self,
@@ -10755,7 +11052,12 @@ class EpistemicGraphIndex:
         reader: Callable[[str], bool] | None,
         *,
         stored: bool,
+        check: Callable[[], None] | None = None,
     ) -> UnitEdgeResult:
+        from .collection_store.connection import checked_sql
+
+        if check is not None:
+            check()
         requested_keys = [str(k) for k in keys if k]
         if not requested_keys or (pages is not None and not pages):
             return UnitEdgeResult(status="available")
@@ -10786,62 +11088,92 @@ class EpistemicGraphIndex:
                     status="temporarily_unavailable", reason="resolver_unavailable"
                 )
         else:
-            decided = self._reader_resolver(resolver)
+            decided = self._reader_resolver(resolver, check=check)
             if decided is None:
                 return UnitEdgeResult(
                     status="temporarily_unavailable", reason="resolver_unavailable"
                 )
             link_resolver, topology, checkpoint_value = decided
             expected_meta = (topology, checkpoint_value)
-        conn = self._open_read_snapshot(reader=reader)
+        conn = self._open_read_snapshot(reader=reader, check=check)
         if conn is None:
             return UnitEdgeResult(status="warming")
         try:
-            if expected_meta is not None:
-                # The resolver was chosen against a probe read of the sidecar; this
-                # transaction must be the same one it decided for.
-                meta = dict(
-                    conn.execute(
-                        "SELECT key, value FROM graph_meta WHERE key IN (?, ?)",
-                        (_RESOLVER_TOPOLOGY_KEY, _RECALL_CHECKPOINT_KEY),
-                    ).fetchall()
-                )
-                if (
-                    meta.get(_RESOLVER_TOPOLOGY_KEY),
-                    meta.get(_RECALL_CHECKPOINT_KEY),
-                ) != expected_meta:
-                    return UnitEdgeResult(
-                        status="temporarily_unavailable", reason="resolver_unavailable"
+            with checked_sql(conn, check):
+                if stored:
+                    from .vault_store import read as store_read
+
+                    registry = store_read.derived_registry(conn)
+                    if registry is not None and registry.parser_behind:
+                        return UnitEdgeResult(status="warming", reason=store_read.DERIVED_BEHIND)
+                if expected_meta is not None:
+                    # The resolver was chosen against a probe read of the sidecar; this
+                    # transaction must be the same one it decided for.
+                    meta = dict(
+                        conn.execute(
+                            "SELECT key, value FROM graph_meta WHERE key IN (?, ?)",
+                            (_RESOLVER_TOPOLOGY_KEY, _RECALL_CHECKPOINT_KEY),
+                        ).fetchall()
                     )
-            view = GraphView(
-                self.vault_root, conn, keep=keep, admitted=allowed_paths, resolver=link_resolver,
-                reads_placeholders=False,
-            )
-            meaning = _relation_meaning(view, anchor=None, registry_scope=None)
-            if meaning is None:
-                return UnitEdgeResult(
-                    status="temporarily_unavailable", reason="registry_unavailable"
+                    if (
+                        meta.get(_RESOLVER_TOPOLOGY_KEY),
+                        meta.get(_RECALL_CHECKPOINT_KEY),
+                    ) != expected_meta:
+                        return UnitEdgeResult(
+                            status="temporarily_unavailable", reason="resolver_unavailable"
+                        )
+                view = GraphView(
+                    self.vault_root,
+                    conn,
+                    keep=keep,
+                    admitted=allowed_paths,
+                    resolver=link_resolver,
+                    reads_placeholders=False,
+                    check=check,
                 )
-            instance, registry = meaning
-            plan = traversal_profiles.relation_query_plan(
-                registry, requested_keys, instance_id=instance
-            )
-            if not plan.exact_keys:
-                return UnitEdgeResult(status="available")
-            candidates = _relation_candidates(conn, view, plan, registry, pages=pages)
-            rederived = view.changed_sources() if keep is not None else set()
-            if rederived:
-                candidates = [row for row in candidates if row[2][0] not in rederived]
-                for page in sorted(rederived):
-                    for index, authored in enumerate(view.authored_edges(page) or ()):
-                        src_path = view.node_path(str(authored["src_key"]))
-                        dst_path = view.node_path(str(authored["dst_key"]))
-                        if src_path is None or dst_path is None:
-                            continue
-                        if pages is not None and src_path not in pages and dst_path not in pages:
-                            continue
-                        candidates.append((src_path, dst_path, (page, index), authored))
-            rows = _matched_rows(view, candidates, plan)
+                meaning = _relation_meaning(view, anchor=None, registry_scope=None)
+                if meaning is None:
+                    return UnitEdgeResult(
+                        status="temporarily_unavailable", reason="registry_unavailable"
+                    )
+                instance, registry = meaning
+                plan = traversal_profiles.relation_query_plan(
+                    registry, requested_keys, instance_id=instance
+                )
+                if not plan.exact_keys:
+                    return UnitEdgeResult(status="available")
+                candidates = _relation_candidates(conn, view, plan, registry, pages=pages)
+                rederived: set[str] = set()
+                if keep is not None:
+                    if pages is None:
+                        rederived = view.changed_sources()
+                    else:
+                        # Indexed inbound authors include newly resolved edges
+                        # without enumerating unrelated pages.
+                        for page in sorted(pages):
+                            view._check()
+                            for source in {page, *view.inbound_sources(page)}:
+                                view._check()
+                                if keep(source) and view.authored_edges(source) is not None:
+                                    rederived.add(source)
+                if rederived:
+                    candidates = [row for row in candidates if row[2][0] not in rederived]
+                    for page in sorted(rederived):
+                        view._check()
+                        for index, authored in enumerate(view.authored_edges(page) or ()):
+                            view._check()
+                            src_path = view.node_path(str(authored["src_key"]))
+                            dst_path = view.node_path(str(authored["dst_key"]))
+                            if src_path is None or dst_path is None:
+                                continue
+                            if (
+                                pages is not None
+                                and src_path not in pages
+                                and dst_path not in pages
+                            ):
+                                continue
+                            candidates.append((src_path, dst_path, (page, index), authored))
+                rows = _matched_rows(view, candidates, plan)
         except sqlite3.Error:
             return UnitEdgeResult(status="warming")
         finally:
@@ -10849,6 +11181,8 @@ class EpistemicGraphIndex:
 
         edges: dict[UnitEdge, None] = {}
         for src_path, dst_path, relation_type, _via, _key, _symmetric, edge in rows:
+            if check is not None:
+                check()
             if relation_type is None or not _path_allowed(src_path) or not _path_allowed(dst_path):
                 continue
             src_key, dst_key = str(edge["src_key"]), str(edge["dst_key"])
@@ -11997,19 +12331,290 @@ def _relation_labels(
     aliases or children; an extension meaning only through the query's own.
     """
     labels = set(plan.exact_keys | plan.replacement_keys)
+    labels.update(f"core.{key}" for key in labels & plan.core_keys)
     for adapter in (registry, *admitted):
         own = adapter is registry
         for label in (*adapter.keys, *adapter.aliases):
             definition = adapter.resolve(label).definition
             if definition is None:
                 continue
-            direct = definition.key in plan.exact_keys | plan.replacement_keys
-            family = definition.parent in plan.parent_keys
-            if (direct and (own or definition.key in plan.core_keys)) or (
-                family and (own or definition.parent in plan.core_keys)
-            ):
-                labels.add(label)
+            terminal = adapter.definition(
+                adapter.terminal_replacement(definition.key) or definition.key
+            )
+            # A deprecated authored label can reach a core meaning through its author's replacement.
+            for meaning in (definition, terminal):
+                if meaning is None:
+                    continue
+                direct = meaning.key in plan.exact_keys | plan.replacement_keys
+                family = meaning.parent in plan.parent_keys
+                if (direct and (own or meaning.key in plan.core_keys)) or (
+                    family and (own or meaning.parent in plan.core_keys)
+                ):
+                    labels.add(label)
+                    break
     return frozenset(labels)
+
+
+def _family_relation_predicate(
+    registry: relation_registry.RelationRegistry, families: Collection[str],
+    interpretations: semantic_index.Interpretations, behaviours: Collection[str] = (),
+) -> tuple[str, list[Any]]:
+    keys = sorted(key for key in registry.keys
+                  if registry.family_of(registry.terminal_replacement(key) or key) in families
+                  or not registry.behaviours_of(key).isdisjoint(behaviours))
+    plan = traversal_profiles.relation_query_plan(registry, keys)
+    labels = _relation_labels(
+        plan,
+        registry,
+        (
+            snapshots["relations"].typed
+            for _instance, snapshots in interpretations.admitted_instances()
+        ),
+    )
+    # A neutral occurrence-to-parent structural edge never supplies dimension membership.
+    relation = (
+        "NOT (e.dst_key = 'file:' || e.source_path "
+        "AND json_extract(e.metadata, '$.occurrence_key') IS NOT NULL "
+        "AND e.raw_target IS NULL) AND "
+        "(e.relation_type IN (SELECT value FROM json_each(?)) "
+        "OR e.parent_relation IN (SELECT value FROM json_each(?)) "
+        "OR (e.registry_status = ? AND e.raw_relation IN (SELECT value FROM json_each(?))))"
+    )
+    return relation, [
+        json.dumps(sorted(plan.exact_keys | plan.replacement_keys)),
+        json.dumps(sorted(plan.parent_keys)),
+        CANDIDATE_STATUS,
+        json.dumps(sorted(labels)),
+    ]
+
+
+def family_proposal(
+    vault_root: Path, conn: sqlite3.Connection, families: Collection[str]
+) -> tuple[str, list[Any]]:
+    """The pages an edge of `families` may touch, as SQL over `u`, read once from indexed rows.
+
+    A page qualifies when it authors or receives such an edge, or when a raw target of one could
+    resolve to it at any wikilink lookup stage. Selected interpretation then decides each unit.
+    """
+    registry = relation_registry.load_registry(vault_root)
+    relation, bound = _family_relation_predicate(
+        registry, families, semantic_index.Interpretations(vault_root)
+    )
+    link = registry.family_of(registry.link_key) in families
+    plain = " UNION SELECT {} FROM graph_dependencies WHERE body_link = 1" if link else ""
+    pages = {str(path) for (path,) in conn.execute(
+        "SELECT n.path FROM graph_edges e JOIN graph_nodes n ON n.node_key = e.src_key "
+        f"WHERE {relation} UNION SELECT substr(e.dst_page_key, 6) FROM graph_edges e "
+        f"WHERE substr(e.dst_page_key, 1, 5) = 'file:' AND {relation}"
+        + plain.format("source_path"),
+        [*bound, *bound],
+    ) if path is not None}
+    stages: dict[str, set[str]] = {}
+    for (raw,) in conn.execute(
+        f"SELECT e.raw_target FROM graph_edges e WHERE e.raw_target IS NOT NULL AND {relation}"
+        + plain.format("raw_target"),
+        bound,
+    ):
+        for axis, key in vault_module.wikilink_lookup_stages(_split_target_fragment(str(raw))[0]):
+            stages.setdefault(axis, set()).add(key)
+    for axis, keys in sorted(stages.items()):
+        # Lookup axes are the normalizer's closed protocol, never authored SQL identifiers.
+        pages.update(str(path) for (path,) in conn.execute(
+            f"SELECT path FROM wikilink_keys WHERE {axis}_key IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(keys), ensure_ascii=False),),
+        ))
+    return "u.parent_path IN (SELECT value FROM json_each(?))", [
+        json.dumps(sorted(pages), ensure_ascii=False)
+    ]
+
+
+def stored_family_edges(
+    vault_root: Path, conn: sqlite3.Connection, pages: Collection[str], lookups: Any, *,
+    keep: Callable[[str], bool] | None = None, behaviours: Collection[str] = (),
+    view: GraphView | None = None,
+) -> Iterator[UnitEdge]:
+    """Selected edges of an explicit candidate batch, from neutral stored inputs alone."""
+    from . import lexstore
+    from .governance import egress
+    from .vault_store import read as store_read
+    from .vault_store import rederive
+    from .vocabulary.registry import RegistryError
+
+    if conn is None:
+        raise find_module.RetrievalIndexWarming(site="relation_graph")
+    store_read.require_current_parser(conn)
+    generation = store_read.derived_registry(conn)
+    # A partial projection can turn a negative predicate into a false complete
+    # answer; only its dependent read waits.
+    if generation is not None and (
+        generation.owner_schema_version is None
+        or generation.owner_schema_version < rederive.UNIT_ROW_KEYS_OWNER_VERSION
+    ):
+        raise find_module.RetrievalIndexWarming(site="relation_graph")
+    if not pages:
+        return
+    view = view or GraphView(
+        vault_root, conn, keep=egress.edge_view(vault_root, keep), reads_placeholders=False
+    )
+    registry = lookups.relations
+    relation, bound = _family_relation_predicate(
+        registry, lookups.by_family, view.interpretations, behaviours
+    )
+    named = conn.execute(
+        "SELECT path, title FROM pages WHERE path IN (SELECT value FROM json_each(?))",
+        (json.dumps(sorted(pages)),),
+    ).fetchall()
+    dependency_keys = sorted(
+        {key for path, title in named for key in dependency_keys_for_page(path, title)}
+    )
+    plain_links = registry.family_of(
+        registry.link_key
+    ) in lookups.by_family or not registry.behaviours_of(registry.link_key).isdisjoint(behaviours)
+    incoming = conn.execute(
+        "SELECT DISTINCT d.source_path FROM graph_dependencies d "
+        "WHERE d.lookup_key IN (SELECT value FROM json_each(?)) "
+        "AND ((d.body_link = 1 AND ?) OR EXISTS(SELECT 1 FROM graph_edges e "
+        "WHERE e.source_path = d.source_path "
+        "AND e.raw_target = d.raw_target "
+        f"AND {relation}))",
+        (json.dumps(dependency_keys), int(plain_links), *bound),
+    ).fetchall()
+    near = conn.execute(
+        "SELECT e.source_path FROM graph_nodes n JOIN graph_edges e ON e.src_key = n.node_key "
+        f"WHERE n.path IN (SELECT value FROM json_each(?)) AND {relation} UNION "
+        "SELECT e.source_path FROM graph_edges e WHERE e.dst_page_key IN "
+        f"(SELECT 'file:' || value FROM json_each(?)) AND {relation}",
+        (json.dumps(sorted(pages)), *bound, json.dumps(sorted(pages)), *bound),
+    ).fetchall()
+    authors = {str(path) for (path,) in (*incoming, *near)} | set(pages)
+    view.admit(authors)
+    view.prefetch(authors)
+    authors = {path for path in authors if view.allowed(path)}
+    rows = [_edge_row_to_dict(row) for row in conn.execute(
+        f"SELECT {EDGE_COLUMNS} FROM graph_edges e "
+        f"WHERE e.source_path IN (SELECT value FROM json_each(?)) AND {relation}",
+        (json.dumps(sorted(authors)), *bound),
+    )]
+    body_targets = conn.execute(
+        "SELECT DISTINCT source_path, raw_target FROM graph_dependencies "
+        "WHERE source_path IN (SELECT value FROM json_each(?)) AND body_link = 1",
+        (json.dumps(sorted(authors)),),
+    ).fetchall() if plain_links else []
+    tokens = {}
+    for author, raw in (
+        *((str(row["source_path"]), str(row["metadata"]["raw_target"])) for row in rows
+          if row["metadata"].get("raw_target")),
+        *((str(author), str(raw)) for author, raw in body_targets),
+    ):
+        view._check()
+        target, fragment = _split_target_fragment(raw)
+        tokens[author, raw] = author if not target and fragment else target
+    # Retired aliases name removed files; this operation requires ordinary
+    # admitted existing endpoint nodes.
+    try:
+        resolutions = lexstore.get_store(vault_root).family_target_resolutions(
+            conn,
+            set(tokens.values()),
+            admit=view.admit,
+            allowed=view.allowed,
+            proofs=view._family_target_proofs,
+            check=view._check,
+        )
+    except TimeoutError as error:
+        raise find_module.RetrievalIndexWarming(site="catalog_proof_incomplete") from error
+    target_pages = set(authors) | {value.candidate.path for value in resolutions.values()
+                                  if value.status == "resolved"}
+    endpoint_keys = {str(row[end]) for row in rows for end in ("src_key", "dst_key")}
+    node_rows = conn.execute(
+        f"{NODE_SELECT} WHERE node_key IN (SELECT value FROM json_each(?)) "
+        "OR path IN (SELECT value FROM json_each(?))",
+        (json.dumps(sorted(endpoint_keys)), json.dumps(sorted(target_pages))),
+    ).fetchall()
+    paths = {str(row[2]) for row in node_rows}
+    view.admit(paths)
+    view.prefetch(paths)
+    existing = {str(row[2]) for row in node_rows if row[1] == "file"}
+    for row in node_rows:
+        view._check()
+        node = _node_row_to_dict(row)
+        key = str(node["node_key"])
+        view._node_paths[key] = str(node["path"])
+        view._nodes[key] = view.serve(node)
+    for key in endpoint_keys - view._node_paths.keys():
+        view._node_paths[key] = None
+        view._nodes[key] = None
+    for row in rows:
+        view._check()
+        raw = row["metadata"].get("raw_target")
+        if row["origin"] == "wikilink":
+            # Dependencies include unresolved ordinary links and preserve page-level landing.
+            continue
+        if raw:
+            selected = resolutions[tokens[str(row["source_path"]), str(raw)]]
+            if selected.status != "resolved":
+                continue
+            _target, fragment = _split_target_fragment(str(raw))
+            dst, dst_page, target_kind, metadata = _land_relation_target(
+                vault_root, selected.canonical, fragment, landing=view._snapshot_landing,
+                target_exists=existing.__contains__,
+            )
+            row = {**row, "dst_key": dst, "dst_page_key": dst_page,
+                   "metadata": {**row["metadata"], **metadata, "target_kind": target_kind}}
+        yield from _stored_family_edge(view, row, pages, lookups.by_family, behaviours)
+    for author, raw in body_targets:
+        view._check()
+        selected = resolutions[tokens[str(author), str(raw)]]
+        if selected.status != "resolved" or selected.candidate.path not in existing:
+            continue
+        canonical = selected.canonical
+        row = _edge(
+            _file_key(author), _file_key(canonical), registry.link_key, "wikilink",
+            source_path=author, registry=view.registry_for(author),
+        ).as_dict()
+        yield from _stored_family_edge(view, row, pages, lookups.by_family, behaviours)
+    if view.unavailable:
+        raise RegistryError("REGISTRY_UNAVAILABLE: selected dimension endpoints are incomplete")
+
+
+def _stored_family_edge(
+    view: GraphView, row: dict[str, Any], pages: Collection[str], families: Mapping[str, Any],
+    behaviours: Collection[str],
+) -> Iterator[UnitEdge]:
+    view._check()
+    edge = view.edge(row)
+    if edge is None or edge.get("relation_type") is None:
+        return
+    registry = view.registry_for(str(edge["source_path"]))
+    relation = str(edge["relation_type"])
+    terminal = registry.terminal_replacement(relation) or relation
+    family = registry.family_of(terminal)
+    if family not in families and registry.behaviours_of(terminal).isdisjoint(behaviours):
+        return
+    src, dst = str(edge["src_key"]), str(edge["dst_key"])
+    source, target = view.node_path(src), view.node_path(dst)
+    if source is None or target is None or not (source in pages or target in pages):
+        return
+    if (
+        not view.allowed(source)
+        or not view.allowed(target)
+        or view._nodes.get(src) is None
+        or view._nodes.get(dst) is None
+    ):
+        return
+    source_unit = None if src == _file_key(source) else src
+    target_unit = None if dst == _file_key(target) else dst
+    if src == dst or source == target and (source_unit is None) != (target_unit is None):
+        return
+    yield UnitEdge(
+        source,
+        source_unit,
+        target,
+        target_unit,
+        relation,
+        edge.get("parent_relation"),
+        family,
+        registry.behaviours_of(terminal),
+    )
 
 
 #: One relation-query candidate: (source page, target page, position, edge).
@@ -12169,6 +12774,7 @@ def _matched_rows(
         view.prefetch(paths)
     core = relation_registry.core_registry()
     for src_path, dst_path, position, stored in candidates:
+        view._check()
         # Non-candidate rows carry fixed core meaning, independent of page vocabulary instances.
         fixed = slim and stored.get("registry_status") != CANDIDATE_STATUS
         edge = stored if fixed else view.edge(stored)
@@ -12919,6 +13525,22 @@ def _bump_generation(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT INTO graph_meta(key, value) VALUES ('generation', '1') "
         "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1"
+    )
+
+
+def unit_links_generation_current(conn: sqlite3.Connection) -> bool:
+    """An older writer can change graph rows without updating the unit link projection."""
+    return conn.execute(
+        "SELECT 1 FROM graph_meta AS proof LEFT JOIN graph_meta AS generation "
+        "ON generation.key = 'generation' WHERE proof.key = 'unit_links_generation' "
+        "AND proof.value = COALESCE(generation.value, '0')",
+    ).fetchone() is not None
+
+
+def stamp_unit_links_generation(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO graph_meta(key, value) VALUES ('unit_links_generation', "
+        "COALESCE((SELECT value FROM graph_meta WHERE key = 'generation'), '0'))",
     )
 
 
@@ -14317,7 +14939,7 @@ def _unit_candidate_key(rel_path: str, unit: semantic_units.SemanticUnit) -> str
     return _candidate_key(rel_path, key, unit.form)
 
 
-def _unit_anchor(unit: semantic_units.SemanticUnit) -> str | None:
+def _unit_anchor(unit: semantic_units.SemanticUnit | unit_rows.UnitRow) -> str | None:
     if unit.form == "rich":
         return (
             unit.anchor
@@ -14327,7 +14949,9 @@ def _unit_anchor(unit: semantic_units.SemanticUnit) -> str | None:
     return unit.anchor
 
 
-def _parent_stamps(state: semantic_index.SemanticParentIndexState) -> dict[str, Any]:
+def _parent_stamps(
+    state: semantic_index.SemanticParentIndexState | unit_rows.UnitRow,
+) -> dict[str, Any]:
     return {
         "parent_generation": state.parent_generation,
         "parent_source_hash": state.parent_source_hash,
@@ -14335,7 +14959,7 @@ def _parent_stamps(state: semantic_index.SemanticParentIndexState) -> dict[str, 
     }
 
 
-def _candidate_metadata(unit: semantic_units.SemanticUnit) -> dict[str, Any]:
+def _candidate_metadata(unit: semantic_units.SemanticUnit | unit_rows.UnitRow) -> dict[str, Any]:
     """Selection-free unit facts a served unit node reports."""
     return {
         "form": unit.form,
@@ -14347,32 +14971,28 @@ def _candidate_metadata(unit: semantic_units.SemanticUnit) -> dict[str, Any]:
     }
 
 
-def _candidate_node(
-    page, unit: semantic_units.SemanticUnit, state: semantic_index.SemanticParentIndexState,
-) -> GraphNode:
-    key = semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash)
+def _candidate_node(page, row: unit_rows.UnitRow) -> GraphNode:
+    """The graph node of one unit row. The row holds each fact; this holds the graph's own rules."""
     return GraphNode(
-        node_key=_candidate_key(page.rel_path, key, unit.form),
+        node_key=_candidate_key(row.path, row.occurrence_key, row.form),
         kind=CANDIDATE_KIND,
-        path=page.rel_path,
-        anchor=_unit_anchor(unit),
-        title=unit.title,
-        text=_node_text(
-            page, unit.content if unit.form == "compact" else unit.body or unit.title or ""
-        ),
-        source_hash=state.parent_source_hash,
-        line_start=unit.line,
-        line_end=unit.end_line,
+        path=row.path,
+        anchor=_unit_anchor(row),
+        title=row.title,
+        text=_unit_text(page, row.form, row.content, row.title),
+        source_hash=row.parent_source_hash,
+        line_start=row.line,
+        line_end=row.end_line,
         metadata={
             "origin": "structural_occurrence",
-            "occurrence_key": key,
-            **_candidate_metadata(unit),
-            **_parent_stamps(state),
+            "occurrence_key": row.occurrence_key,
+            **_candidate_metadata(row),
+            **_parent_stamps(row),
         },
         # Raw labels in the selected adapters' normalization domain; selected
         # interpretation decides every match these columns propose.
-        unit_category=semantic_language_registry.normalize_label(unit.category_raw),
-        unit_kind=unit.kind_key,
+        unit_category=row.category,
+        unit_kind=row.kind_key,
     )
 
 
@@ -14412,8 +15032,8 @@ def _unit_node(
         path=page.rel_path,
         anchor=_unit_anchor(unit),
         title=unit.title,
-        text=_node_text(
-            page, unit.content if unit.form == "compact" else unit.body or unit.title or ""
+        text=_unit_text(
+            page, unit.form, unit.content if unit.form == "compact" else unit.body, unit.title,
         ),
         source_hash=state.parent_source_hash,
         line_start=unit.line,
@@ -14494,17 +15114,30 @@ def _structural_edges_for_page(
             if destination is None:
                 continue
             dst_key, dst_page_key, target_kind, metadata = destination
-            edges.append(candidate_edge(
-                node_key, dst_key, relation.kind, "semantic_relation",
-                source_path=rel, source_anchor=anchor,
-                # Normalized so a reader can look candidates up by label.
-                raw_relation=relation_registry.normalize_relation(relation.raw.split(":", 1)[0]),
-                dst_page_key=dst_page_key, target_kind=target_kind,
-                metadata={
-                    **base, "line": relation.line, "raw": relation.raw,
-                    "target_kind": target_kind, **metadata,
-                },
-            ))
+            edges.append(
+                candidate_edge(
+                    node_key,
+                    dst_key,
+                    relation.kind,
+                    "semantic_relation",
+                    source_path=rel,
+                    source_anchor=anchor,
+                    # Normalized so a reader can look candidates up by label.
+                    raw_relation=relation_registry.normalize_relation(
+                        relation.raw.split(":", 1)[0]
+                    ),
+                    dst_page_key=dst_page_key,
+                    target_kind=target_kind,
+                    metadata={
+                        **base,
+                        "line": relation.line,
+                        "raw": relation.raw,
+                        "raw_target": relation.target,
+                        "target_kind": target_kind,
+                        **metadata,
+                    },
+                )
+            )
     # The note grammar admits every grammar-valid row with a target; membership
     # of a legacy row without a colon is the selected interpretation's choice.
     notes = markdown_relations.interpret_markdown_relations(
@@ -14526,18 +15159,31 @@ def _structural_edges_for_page(
             canonical_lines.add(relation.line)
         dst_key, dst_page_key, target_kind, metadata = destination
         dependent = relation.kind not in core_labels
-        edges.append((candidate_edge if dependent else page_edge)(
-            file_key, dst_key, relation.kind,
-            "markdown_relation" if relation.canonical else "semantic_relation",
-            source_path=rel, source_anchor=f"line-{relation.line}", raw_relation=relation.kind,
-            dst_page_key=dst_page_key, source_kind="file", target_kind=target_kind,
-            metadata={
-                "line": relation.raw, "canonical": relation.canonical,
-                **({"has_colon": colon.get(relation.line, False), "target_kind": target_kind}
-                   if dependent else {}),
-                **metadata,
-            },
-        ))
+        edges.append(
+            (candidate_edge if dependent else page_edge)(
+                file_key,
+                dst_key,
+                relation.kind,
+                "markdown_relation" if relation.canonical else "semantic_relation",
+                source_path=rel,
+                source_anchor=f"line-{relation.line}",
+                raw_relation=relation.kind,
+                dst_page_key=dst_page_key,
+                source_kind="file",
+                target_kind=target_kind,
+                metadata={
+                    "line": relation.raw,
+                    "canonical": relation.canonical,
+                    "raw_target": relation.target,
+                    **(
+                        {"has_colon": colon.get(relation.line, False), "target_kind": target_kind}
+                        if dependent
+                        else {}
+                    ),
+                    **metadata,
+                },
+            )
+        )
     edges.extend(_page_level_edges(
         vault_root, page, page_edge, body=page.body, canonical_lines=canonical_lines,
         resolver=resolver, visible=visible, check=check,
@@ -14562,6 +15208,27 @@ def _relation_target(
     resolve through the ordinary audience-aware vault resolver. `landing` and
     `target_exists` answer for the target page; without them the vault's files do.
     """
+    result = _link_target(
+        vault_root, raw_target, resolver, visible,
+        source_path=source_path, check=check, landing=landing,
+    )
+    if result is None:
+        return None
+    canonical, dst, page, details = result
+    return dst, page, _target_kind(vault_root, canonical, target_exists), details
+
+
+def _link_target(
+    vault_root: Path,
+    raw_target: str,
+    resolver: vault_module.WikilinkResolver,
+    visible: Callable[[str], bool] | None,
+    *,
+    source_path: str,
+    check: Callable[[], None] | None = None,
+    landing: Callable[[str, str], tuple[str, str, dict[str, str]]] | None = None,
+) -> tuple[str, str, str, dict[str, Any]] | None:
+    """Resolve an authored address and land its fragment without classifying the target file."""
     if check is not None:
         check()
     target, fragment = _split_target_fragment(raw_target)
@@ -14594,13 +15261,35 @@ def _relation_target(
         else:
             fragment_metadata = _unlanded_fragment(fragment)
     else:
-        dst_key, dst_page_key, fragment_metadata = (
-            _relation_destination(vault_root, canonical, fragment)
-            if landing is None else landing(canonical, fragment)
+        return canonical, *_land_link_target(
+            vault_root, canonical, fragment, landing=landing, resolved=not warning,
         )
-    return dst_key, dst_page_key, _target_kind(vault_root, canonical, target_exists), {
-        "target_resolution": "unresolved" if warning else "resolved",
-        **fragment_metadata,
+    return canonical, dst_key, dst_page_key, {
+        "target_resolution": "unresolved", **fragment_metadata,
+    }
+
+
+def _land_relation_target(
+    vault_root: Path, canonical: str, fragment: str, *,
+    landing: Callable[[str, str], tuple[str, str, dict[str, str]]] | None = None,
+    target_exists: Callable[[str], bool] | None = None, resolved: bool = True,
+) -> tuple[str, str, str, dict[str, Any]]:
+    """Land an already-normalized address for both the producer and stored typed target proofs."""
+    dst, page, details = _land_link_target(
+        vault_root, canonical, fragment, landing=landing, resolved=resolved,
+    )
+    return dst, page, _target_kind(vault_root, canonical, target_exists), details
+
+
+def _land_link_target(
+    vault_root: Path, canonical: str, fragment: str, *,
+    landing: Callable[[str, str], tuple[str, str, dict[str, str]]] | None,
+    resolved: bool,
+) -> tuple[str, str, dict[str, str]]:
+    dst, page, metadata = (_relation_destination(vault_root, canonical, fragment)
+                           if landing is None else landing(canonical, fragment))
+    return dst, page, {
+        "target_resolution": "resolved" if resolved else "unresolved", **metadata,
     }
 
 
@@ -14652,6 +15341,7 @@ def _page_level_edges(
                 "links_to",
                 "wikilink",
                 source_path=rel,
+                metadata={"raw_target": observation["target"]},
                 review_evidence={
                     "evidence": {
                         "source_path": rel,
@@ -14752,6 +15442,12 @@ def _node_text(page, text: str) -> str:
     """Unit text as stored: withheld before it is written, because node text is
     what a graph query's `LIKE` matches, so a payload must not decide a match."""
     return _served(page.rel_path, text)
+
+
+def _unit_text(page, form: str, content: str | None, title: str | None) -> str:
+    """A rich unit without a body reads as its title."""
+    text = content if form == "compact" else content or title
+    return _node_text(page, text or "")
 
 
 def _body_wikilink_paths(
@@ -14871,6 +15567,27 @@ def landing_from_bytes(
     return lambda canonical, fragment: _relation_destination(
         vault_root, canonical, fragment, page_bytes=page_bytes
     )
+
+
+def graph_dependencies(
+    state: semantic_index.SemanticParentIndexState,
+) -> tuple[tuple[str, str, bool], ...]:
+    return tuple(_dependency_records(state.body, state.candidates))
+
+
+def neutral_summary_landing(
+    path: str, fragment: str, selected: semantic_units.SelectedStructure,
+) -> tuple[str, str, dict[str, str]] | None:
+    """Land a proven neutral summary. Misses still need the byte-based heading check."""
+    match = selected.resolve_fragment(fragment)
+    page_key = _file_key(path)
+    if match.index is not None:
+        unit = selected.units[match.index]
+        destination = _candidate_key(path, unit.occurrence_key, unit.form)
+        return destination, page_key, {"target_fragment": fragment, "fragment_resolution": "unit"}
+    if match.status == "ambiguous":
+        return page_key, page_key, {"target_fragment": fragment, "fragment_resolution": "ambiguous"}
+    return None
 
 
 def _relation_destination(
@@ -15091,7 +15808,10 @@ _EDGE_COLUMNS = (
     "parent_relation", "registry_status", "registry_version", "registry_hash", "origin",
     "source_path", "source_anchor", "metadata", "resolver_project", "resolver_page_type",
     "resolver_source_kind", "resolver_target_kind", "resolver_origin", "review_evidence",
+    "raw_target",
 )
+# A store before the owner pass that adds `raw_target` (the last column) writes the others.
+_OWNER1_EDGE_COLUMNS = _EDGE_COLUMNS[:-1]
 _INSERT_NODE = _graph_insert("graph_nodes", _NODE_COLUMNS)
 _INSERT_EDGE = _graph_insert("graph_edges", _EDGE_COLUMNS)
 
@@ -15156,6 +15876,7 @@ def _edge_values(edge: GraphEdge) -> tuple[Any, ...]:
         edge.resolver_target_kind,
         edge.resolver_origin,
         json.dumps(edge.review_evidence or {}, ensure_ascii=False, sort_keys=True),
+        (edge.metadata or {}).get("raw_target"),
     )
 
 
@@ -15873,8 +16594,15 @@ class GraphView:
         self._authored: dict[str, list[dict[str, Any]] | None] = {}
         self._evidence: dict[str, dict[str, dict[str, Any]]] = {}
         self._node_paths: dict[str, str | None] = {}
+        self._family_target_proofs: dict[tuple[str, str], vault_module.WikilinkMatches] = {}
+
+    def _require_current_parser(self) -> None:
+        from .vault_store import read as store_read
+
+        store_read.require_current_parser(self.conn)
 
     def _summaries(self, paths: list[str]) -> dict[str, Mapping[str, Any]]:
+        self._require_current_parser()
         if self.source_limit is not None:
             return self._bounded_summaries(paths)
         return {
@@ -15998,6 +16726,7 @@ class GraphView:
 
     def parent(self, rel_path: str) -> semantic_index.SelectedParent | None:
         """The admitted page's selected interpretation, or None when unavailable."""
+        self._require_current_parser()
         self.preflight([rel_path])
         if rel_path in self.interrupted:
             return None
@@ -16031,6 +16760,25 @@ class GraphView:
         self.parents.hold(
             rel_path, None if metadata is None else _json(metadata).get(STRUCTURAL_METADATA) or {}
         )
+
+    def admit(self, paths: Iterable[str]) -> None:
+        """Prepare stored candidates' admission in bounded metadata/body batches
+        before point selection.
+        """
+        from . import request_budget
+        from .governance import egress
+        from .vault_store import read as store_read
+
+        unknown = sorted({path for path in paths if path not in self.parents._admitted})
+        if not unknown:
+            return
+        with store_read.snapshot(self.vault_root) as snapshot:
+            for start in range(0, len(unknown), store_read.KEYS_PER_QUERY):
+                request_budget.checkpoint()
+                chunk = unknown[start:start + store_read.KEYS_PER_QUERY]
+                with snapshot.prefetch(chunk):
+                    egress.announce(chunk)
+                    self.parents._admitted.update(self.parents._allowed_many(chunk))
 
     def prefetch(self, paths: Iterable[str]) -> None:
         """Read many admitted pages' stored summaries in one query before serving."""
@@ -16095,6 +16843,7 @@ class GraphView:
 
     def unit_parent_candidates(self, unit_ref: str) -> tuple[list[str], bool]:
         """Admit indexed parents before interpretation, diagnostics, or the cap."""
+        self._require_current_parser()
         parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
         if not separator or not parent_ref:
             return [], False
@@ -16163,6 +16912,7 @@ class GraphView:
         `exomem_edge_behaves(EDGE_COLUMNS, behaviour)` returns 1 or 0 for whether the served
         relation has that behaviour, and NULL on the same candidates.
         """
+        self._require_current_parser()
         # SQLite asks for a row's relation and status back to back; keeping only
         # the last row serves both without holding one object per edge.
         last: list[Any] = [None, None]
@@ -16192,6 +16942,9 @@ class GraphView:
         self.conn.create_function("exomem_edge_behaves", width + 1, behaves)
 
     def node(self, key: str) -> dict[str, Any] | None:
+        # These prefixes are the graph's closed node-key protocol for semantic occurrences.
+        if key.startswith(("unit:", "block:")):
+            self._require_current_parser()
         if key not in self._nodes:
             path = self.node_path(key) if self.source_limit is not None else None
             if path is not None:
@@ -16288,11 +17041,10 @@ class GraphView:
 
     def _land(self, row: dict[str, Any]) -> dict[str, Any]:
         """Land a fragment on the unit the target page's own interpretation names."""
+        self._require_current_parser()
         metadata = dict(row.get("metadata") or {})
         dst = str(row.get("dst_key") or "")
-        target_path = dst.removeprefix("file:") if dst.startswith("file:") else _path_for_node_key(
-            self.conn, dst
-        )
+        target_path = dst.removeprefix("file:") if dst.startswith("file:") else self.node_path(dst)
         page_key = _file_key(target_path) if target_path else dst
         target = self.parent(target_path) if target_path else None
         outcome = str(metadata.get("fragment_resolution") or "")
@@ -16318,6 +17070,111 @@ class GraphView:
         if self._resolver is None:
             self._resolver = find_module.recall_resolver_snapshot(self.vault_root)
         return self._resolver
+
+    def unit_links(
+        self, path: str, *, incoming: bool, limit: int, after: tuple[str, int] | None,
+    ) -> UnitLinkPage:
+        """Resolve candidates under this view before counting or choosing a continuation."""
+        self.parents.admit([path])
+        if not self.allowed(path):
+            return UnitLinkPage(total=0)
+        shared = self._shared_resolver()
+        pending = self.conn.execute("SELECT path FROM store_derivation_queue ORDER BY path")
+        while pending_paths := [row[0] for row in pending.fetchmany(_SQL_PARAMETER_BATCH)]:
+            if self.keep is None or path in pending_paths:
+                return UnitLinkPage()
+            # A visible pending page can add a link absent from the current dependency index.
+            self.parents.admit(pending_paths)
+            if any(self.allowed(source) for source in pending_paths):
+                return UnitLinkPage()
+        if incoming:
+            names = {path, *(prior for (prior,) in self.conn.execute(
+                "SELECT prior_path FROM prior_paths WHERE path = ?", (path,),
+            ))}
+            keys = sorted(_dependency_changed_keys(names, shared))
+            # Use the name and destination indexes even when statistics are skewed by hubs.
+            candidates = self.conn.execute(
+                "WITH candidates AS ("
+                " SELECT source_path, occurrence FROM graph_unit_links"
+                " INDEXED BY idx_graph_unit_links_target WHERE target_path = ?"
+                " UNION"
+                " SELECT l.source_path, l.occurrence FROM graph_dependencies AS d"
+                " INDEXED BY idx_graph_fragment_dependencies"
+                " CROSS JOIN graph_unit_links AS l INDEXED BY idx_graph_unit_links_authored"
+                " ON l.source_path = d.source_path AND l.raw_target = d.raw_target"
+                " WHERE d.lookup_key IN (SELECT value FROM json_each(?))"
+                " AND instr(d.raw_target, '#') > 0"
+                ") SELECT l.* FROM candidates AS c"
+                " CROSS JOIN graph_unit_links AS l USING(source_path, occurrence)"
+                " ORDER BY l.source_path, l.occurrence",
+                (path, json.dumps(keys)),
+            )
+        else:
+            candidates = self.conn.execute(
+                "SELECT * FROM graph_unit_links WHERE source_path = ? ORDER BY occurrence", (path,),
+            )
+        total = 0
+        window: list[tuple[str, UnitLink]] = []
+        destinations: dict[str, str | None] = {}
+        landed: dict[tuple[str, str], str | None] = {}
+        while batch := candidates.fetchmany(_SQL_PARAMETER_BATCH):
+            self._check()
+            sources = {row[0] for row in batch}
+            self.parents.admit(sources)
+            visible_rows = [
+                (source, UnitLink(*record)) for source, *record in batch if self.allowed(source)
+            ]
+            addresses = [
+                (source, link, _page_target(link.raw_target) or source)
+                for source, link in visible_rows
+            ]
+            names = {address for _, _, address in addresses}.difference(destinations)
+            self.parents.admit({
+                candidate for address in names
+                for candidate in _link_candidates(shared, address)
+            })
+            for address in names:
+                destinations[address] = None
+                try:
+                    canonical, warning = vault_module.normalize_wikilink(
+                        address, self.vault_root, resolver=shared,
+                        strict=False, visible=self.allowed,
+                    )
+                except ValueError:
+                    continue
+                if canonical and not warning:
+                    destinations[address] = _page_rel(canonical)
+            self.parents.prefetch(
+                target for address in names if (target := destinations[address]) is not None
+            )
+            for source, link, address in addresses:
+                target = destinations[address]
+                if target is None or (incoming and target != path) or not self.allowed(target):
+                    continue
+                key = target, link.fragment
+                if key not in landed:
+                    parent = self.parent(target)
+                    if parent is None or not parent.structure.complete:
+                        return UnitLinkPage()
+                    match = parent.structure.resolve_fragment(link.fragment)
+                    destination = None
+                    if match.index is not None:
+                        unit = parent.structure.units[match.index]
+                        destination = _candidate_key(target, unit.occurrence_key, unit.form)
+                    landed[key] = destination
+                destination = landed[key]
+                if destination is None:
+                    continue
+                total += 1
+                if (after is None or (source, link.occurrence) > after) and len(window) <= limit:
+                    window.append((source, replace(
+                        link, target_path=target, dst_key=destination,
+                        resolution="unit", embed=bool(link.embed),
+                    )))
+        more = len(window) > limit
+        links = tuple(window[:limit])
+        next_after = (links[-1][0], links[-1][1].occurrence) if more else None
+        return UnitLinkPage(links, total, next_after)
 
     def target_changes(self, raw_target: str) -> bool:
         """True when a page this link could resolve to is one the reader may not see.
@@ -16485,7 +17342,7 @@ class GraphView:
                     self.vault_root, page, state,
                     source_hash=source_hash or vault_module.content_hash(raw),
                     resolver=self._shared_resolver(), visible=self.keep,
-                    check=self._check if bounded else None,
+                    check=self._check,
                     landing=self._snapshot_landing if bounded else None,
                     target_exists=target_exists,
                 )
@@ -16606,13 +17463,12 @@ class GraphView:
         if self.keep is None:
             return set()
         keys = _dependency_changed_keys({rel_path}, self._shared_resolver())
-        return {
-            source
-            for source, raw_target in EpistemicGraphIndex._dependency_sources_for_keys(
-                self.conn, keys
-            )
-            if source != rel_path and self.target_changes(raw_target) and self.keep(source)
-        }
+        found = set()
+        for source, raw_target in EpistemicGraphIndex._dependency_sources_for_keys(self.conn, keys):
+            self._check()
+            if source != rel_path and self.target_changes(raw_target) and self.keep(source):
+                found.add(source)
+        return found
 
     def _visible_rows(
         self,

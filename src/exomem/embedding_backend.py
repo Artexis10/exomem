@@ -512,7 +512,7 @@ class _OnnxEncoder:
         served = served_artifact(model_name)
         if served is None:
             onnx_path = _model_file(model_name, self.profile.onnx_file)
-            providers = _providers(device)
+            providers = accel.onnx_providers(device)
         else:
             onnx_path, digest = ensure_artifact(model_name, served)
             self.profile = dataclasses.replace(self.profile, artifact_digest=digest)
@@ -656,26 +656,6 @@ class _OnnxEncoder:
     def release(self) -> None:
         self._session = None
         self._tokenizer = None
-
-
-def _providers(device: str) -> list[str]:
-    """Map a torch-shaped device onto ONNX Runtime execution providers.
-
-    Providers are not torch devices: the list is an ordered preference and the
-    runtime silently uses the first one it can construct. CPU is always appended
-    so an unavailable accelerator degrades rather than raising — the same
-    politeness `accel.gpu_usable` applies on the torch side.
-    """
-    import onnxruntime as ort
-
-    available = set(ort.get_available_providers())
-    preferred: list[str] = []
-    if device.startswith("cuda") and "CUDAExecutionProvider" in available:
-        preferred.append("CUDAExecutionProvider")
-    elif device == "mps" and "CoreMLExecutionProvider" in available:
-        preferred.append("CoreMLExecutionProvider")
-    preferred.append("CPUExecutionProvider")
-    return preferred
 
 
 def _resolve(model_name: str, filename: str, revision: str | None = None) -> str:
@@ -1088,7 +1068,7 @@ def _quantize(served: ServedArtifact, source: str, out: str) -> None:
         detail = (result.stderr or "").strip().splitlines()[-1:] or [f"exit {result.returncode}"]
         raise ModelFilesUnavailable(
             f"building the int8 model failed ({detail[0]}); it needs onnxruntime and onnx, "
-            "which exomem[embeddings] installs"
+            "which evermatter[embeddings] installs"
         )
 
 

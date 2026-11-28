@@ -15,6 +15,7 @@ from exomem import (
     commands,
     create_file,
     find,
+    freshness,
     indexes,
     link,
     note,
@@ -1030,6 +1031,57 @@ def test_note_frozen_destination_occupation_fails_without_reselection(vault: Pat
         )
 
     assert exc.value.code == "DRAFT_DESTINATION_OCCUPIED"
+    assert occupied.read_text(encoding="utf-8") == "unrelated occupant\n"
+
+
+def test_remember_refuses_an_occupied_destination_without_building_the_corpus(
+    vault: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A starved serving host rebuilt the whole corpus only to refuse a page whose path was taken.
+
+    A destination that holds other bytes cannot be the draft's own page, and the server's current
+    identity census says which refusal applies, so the commit refuses without a corpus.
+    """
+    arguments = {
+        "content": _compact_content("Occupied remember destination"),
+        "note_type": "insight",
+        "title": "Occupied remember destination",
+    }
+    validation = commands.op_remember(vault, validate_only=True, **arguments)
+    freshness.rebaseline(vault)
+    semantic_contract.build_corpus_context(vault)
+    occupied = vault / validation["destination"]
+    commit_in_lock = relation_review.commit_prepared_creation_draft
+
+    def no_corpus(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("an occupied destination must be refused without a corpus build")
+
+    def commit_after_another_writer(*args: object, **kwargs: object) -> object:
+        # Another writer commits after this call's checks: it takes the destination path and
+        # makes the checked draft stale, so the attempt in the creation lock decides afresh.
+        occupied.parent.mkdir(parents=True, exist_ok=True)
+        occupied.write_text("unrelated occupant\n", encoding="utf-8")
+        monkeypatch.setattr(semantic_contract, "validity_stamp_current", lambda *_a, **_k: False)
+        monkeypatch.setattr(semantic_contract, "build_corpus_context", no_corpus)
+        monkeypatch.setattr(semantic_contract, "build_corpus_context_with_census", no_corpus)
+        return commit_in_lock(*args, **kwargs)
+
+    monkeypatch.setattr(
+        relation_review, "commit_prepared_creation_draft", commit_after_another_writer
+    )
+    with pytest.raises(ValueError) as refused:
+        commands.op_remember(
+            vault,
+            draft_id=validation["draft_id"],
+            draft_hash=validation["draft_hash"],
+            draft_token=validation["draft_token"],
+            relation_disposition="reviewed_none",
+            relation_review_hash=validation["draft_hash"],
+            relation_review_reason="No honest relation exists in the fixture corpus.",
+            **arguments,
+        )
+
+    assert str(refused.value).startswith("DRAFT_DESTINATION_OCCUPIED: ")
     assert occupied.read_text(encoding="utf-8") == "unrelated occupant\n"
 
 

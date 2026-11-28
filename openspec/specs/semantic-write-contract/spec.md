@@ -615,7 +615,7 @@ explicit audit/cleanup. This protocol SHALL NOT claim cross-file all-or-none
 power-loss atomicity. A qualifying typed relation or genuinely empty-corpus
 bootstrap SHALL not require a reviewed-none decision from the caller.
 
-Review fields SHALL be checked against whether the page needs a relation review, with one check shared by validation and commit. When the page needs no review (a qualifying relation, connectivity signal or empty-corpus bootstrap), a commit that carries `relation_disposition`, `relation_review_hash` or `relation_review_reason` SHALL drop them, commit without a review artifact, and return one warning that names the review fields it dropped. When the page needs a review and the commit names a validated draft, a commit that omits any of the three fields SHALL be refused with `INVALID_RELATION_REVIEW`, whose `missing` list names each absent field and whose message says to copy `relation_review_hash` from the `validate_only` result or to send the other two fields without the draft fields to commit in one call. A commit that names no draft field SHALL NOT be refused for an absent hash. Validation SHALL NOT compare the hash. When the caller names a draft and supplied any review field, validation SHALL report the fields a commit would find missing or ignored under `relation_review_fields`.
+Review fields SHALL be checked against whether the page needs a relation review, with one check shared by validation and commit. When the page needs no review (a qualifying relation, connectivity signal or empty-corpus bootstrap), a commit that carries `relation_disposition`, `relation_review_hash` or `relation_review_reason` SHALL drop them, commit without a review artifact, and return one warning. A grouped tool's warning SHALL name the review fields it dropped. A typed tool's warning SHALL name the unlinked reason, the one review field it takes. When the page needs a review and the commit names a validated draft, a commit that omits any of the three fields SHALL be refused with `INVALID_RELATION_REVIEW`, whose `missing` list names each absent field and whose message says to copy `relation_review_hash` from the `validate_only` result or to send the other two fields without the draft fields to commit in one call. A commit that names no draft field SHALL NOT be refused for an absent hash. Validation SHALL NOT compare the hash. When the caller names a draft and supplied any review field, validation SHALL report the fields a commit would find missing or ignored under `relation_review_fields`.
 
 #### Scenario: Second disconnected page can be created after review
 - **WHEN** validation for a second page returns no qualifying candidate and the commit repeats the draft with matching reviewed-none fields
@@ -660,6 +660,11 @@ Review fields SHALL be checked against whether the page needs a relation review,
 - **WHEN** `validate_only` names a draft and carries a review field for a page that needs review but omits the hash
 - **THEN** `relation_review_fields.missing` lists `relation_review_hash`
 - **AND** the same call for a page that needs no review lists the supplied fields under `relation_review_fields.ignored`
+
+#### Scenario: A typed tool's warning names the unlinked reason
+- **WHEN** a typed tool commits to a page that needs no review with `unlinked_reason`
+- **THEN** the result carries one warning that says no link review applies, so the unlinked reason was not recorded
+- **AND** the warning does not name `relation_disposition` or `relation_review_reason`, which the caller never sent
 
 ### Requirement: Existing-Page Review Decisions And Transition Recovery Are Separate
 For an existing page with a unique valid stable memory UUID, a reviewed-none lifecycle decision SHALL be an immutable portable artifact at `Knowledge Base/_Schema/relation-reviews/lifecycle/<uuid>/<after-fingerprint>.json`. Its canonical bounded schema SHALL contain the schema/kind, normalized UUID, exact resulting review-content fingerprint, bounded non-empty reason, and a decision hash derived only from those stable decision fields. Its identity SHALL NOT depend on operation, prior bytes/path, transition token, log/index plan, or auxiliary digest. Transition-specific crash recovery SHALL use one separately guarded replaceable slot at `Knowledge Base/_Schema/relation-reviews/lifecycle/<uuid>/prepared.json`. Its canonical bounded schema SHALL contain the schema/kind, canonical transition UUID, operation, normalized page UUID, exact before/after paths and source hashes, after fingerprint, decision reference plus exact decision-bytes hash or JSON null when no decision is needed, transition-token hash, ordered auxiliary digest, and optional `carried_from` decision reference. The prepared slot SHALL NOT itself satisfy relation review. An exact unique UUID plus current-fingerprint decision match SHALL satisfy a reviewed-none disposition. An edit that carries a standing decision forward SHALL record in `carried_from` the lifecycle decision reference it carried and SHALL write no new decision. The loader SHALL read `carried_from` from a committed slot, that is, when the page's path, source hash and fingerprint equal the slot's after values, and from a pending slot when the page's path and source hash equal the slot's before values, because the pending slot copied the pointer from the decision it carried. A pending slot's own decision SHALL NOT review the before state. A slot or decision that cannot be read, a reference to anything other than a lifecycle decision of the same UUID, and a denied reference SHALL read as no decision for that page and SHALL NOT stop the evaluation of other pages. A reviewed-none request on an edit, validated or not, SHALL record a decision only when the edit needs one, so a pre-emptive request does not add decision files toward the bound. An edit that names a transition token and sends reviewed-none without `relation_review_hash` SHALL be refused with `INVALID_RELATION_REVIEW`. A `generic` disposition keeps the validated route: it SHALL be refused with `INVALID_RELATION_REVIEW` and `missing=["relation_review_hash"]` when it lacks the validated hash, and with `LIFECYCLE_TRANSITION_REVIEW_MISMATCH` only when the hash it sends does not match.
@@ -933,6 +938,7 @@ system SHALL NOT record a model identity, because the server cannot know it.
 
 - **WHEN** any writer changes a Source or Evidence page that is not an episode page
 - **THEN** no compiled-history entry is created for that page
+
 ### Requirement: A shown link title is accepted in an edit and in an observation
 
 On the public tool shape, `edit_note` (`replace_text` and `edits[]`) SHALL count `old_text` in the body as `read_page` shows it, and SHALL replace the stored bytes of each match. Only when that count is 0 SHALL it count the stored bytes, so a snippet in the stored form still applies, and then it SHALL NOT count an occurrence that covers only part of a link shown by title. A caller that is not on the public tool shape SHALL count the stored bytes only. A match that starts or ends inside a shown link SHALL be refused: with `STRING_NOT_FOUND` and a hint that `old_text` must include whole links when every occurrence is of that kind, and with `AMBIGUOUS_MATCH` and a hint to add surrounding text when others are outside links. `replace_all`, `AMBIGUOUS_MATCH` and the validate-only preview SHALL count the same way, and the preview SHALL show the line of each occurrence that it counts, as `read_page` shows that line, so that a preview holds no stored path of a link shown by title. The page SHALL keep the stored link form after the edit, and a link that `new_text` repeats unchanged from the matched text SHALL keep its stored bytes, without normalization, where that link is live in the page as edited. `add_observation` and `edit_observation` SHALL store a `[[Title]]` in a unit as the same path form that a note body stores, and SHALL return the unresolved-link warnings that a body write returns.
@@ -961,3 +967,339 @@ On the public tool shape, `edit_note` (`replace_text` and `edits[]`) SHALL count
 #### Scenario: An observation with a title link stores the path form
 - **WHEN** a caller adds or edits an observation whose text contains `[[Title]]` for an existing page
 - **THEN** the stored unit holds the path form of that page
+
+### Requirement: One Claim Inside A Note Is Superseded In Place
+
+`observe_memory` SHALL offer a `supersede` operation, exposed as `edit_note` action
+`supersede_observation`. In one governed write it SHALL append the replacement as a rich unit with
+`supersedes` to the target's same-page fragment, plus any links and `as_of`, and record `why` in
+revision history. It SHALL NOT change any other unit's text or metadata, and SHALL NOT require
+`expected_hash`.
+
+#### Scenario: A compact claim on an entity page is superseded
+- **WHEN** `edit_note(action="supersede_observation")` names a compact unit on an entity page, with
+  replacement text, `as_of`, `why` and a link `owns` to another page
+- **THEN** the page gains one rich unit with relations `supersedes` to the target's anchor and
+  `owns`, and with `as_of`
+- **AND** the target unit's text is unchanged
+- **AND** `read_page(part="history")` shows the entry with `why` as its reason and both units among
+  the affected units
+
+#### Scenario: The replacement kind follows the target
+- **WHEN** the caller passes no `kind` and the target is rich
+- **THEN** the replacement uses the target's kind
+
+#### Scenario: A compact correction uses the shipped default
+- **WHEN** the caller passes no `kind` for a compact target
+- **THEN** the replacement uses the sole shipped kind with the `replacement` trait, even when an
+  admitted custom kind has the trait
+- **AND** an explicit request for the admitted custom kind still uses it
+
+#### Scenario: An unanchored target gains only an anchor
+- **WHEN** the target has no authored anchor
+- **THEN** the write adds an anchor to the target and changes none of its other bytes
+
+#### Scenario: A stale fingerprint refuses
+- **WHEN** the target is named by a fingerprint that no longer matches
+- **THEN** the operation refuses with `STALE_UNIT_REFERENCE` and the page is unchanged
+
+#### Scenario: Recall treats the target as superseded
+- **WHEN** a supersede write commits
+- **THEN** recall marks the target unit `superseded` and the replacement `active`
+
+### Requirement: Supersede Targets Resolve Exactly
+
+A span target SHALL lie inside exactly one top-level list item. A non-unit item SHALL first become
+a compact unit in place, with its text unchanged and the canonical category of its nearest `##`
+heading. An unresolvable target SHALL refuse without writing, with
+`SUPERSEDE_TARGET_NOT_FOUND`, `SUPERSEDE_TARGET_AMBIGUOUS` or
+`SUPERSEDE_TARGET_ALREADY_SUPERSEDED`, and the remediation SHALL name the next step.
+
+#### Scenario: A facet prose item is superseded by span
+- **WHEN** the target is a span inside a facet list item that is not a unit
+- **THEN** that item becomes a compact unit under its own heading, with its text unchanged and a new
+  anchor
+- **AND** the replacement supersedes that anchor
+- **AND** no other list item changes
+
+#### Scenario: An ambiguous span refuses
+- **WHEN** the span occurs in two list items, or crosses two items
+- **THEN** the operation refuses with `SUPERSEDE_TARGET_AMBIGUOUS`, names the match count and asks
+  for a longer span or a unit id, and the page is unchanged
+
+#### Scenario: A missing target refuses
+- **WHEN** the unit id or span matches nothing on the page
+- **THEN** the operation refuses with `SUPERSEDE_TARGET_NOT_FOUND`, says how to read unit ids, and
+  the page is unchanged
+
+#### Scenario: An already superseded target points to its successor
+- **WHEN** a unit on the page already supersedes the target
+- **THEN** the operation refuses with `SUPERSEDE_TARGET_ALREADY_SUPERSEDED` and names that
+  successor's id as the unit to supersede instead
+
+### Requirement: One Claim Is Assessed Or Linked In Place
+
+`observe_memory` SHALL offer an operation that changes one target unit's verdict, `check_by` and
+relations without changing its text, exposed as `edit_note` actions `assess_observation` (a
+verdict from the registry's verdict set, plus optional evidence links) and `link_observation`
+(typed links). Links SHALL be added to the target's existing relations. The target SHALL resolve
+as for a supersede, and `why` SHALL be the revision-history reason.
+
+#### Scenario: A claim is refuted with evidence
+- **WHEN** `edit_note(action="assess_observation")` names a rich claim with `verdict="refuted"`, an
+  `evidenced_by` link and `why`
+- **THEN** the target carries verdict `refuted` and the added relation, and its text is unchanged
+- **AND** history records `why`
+
+#### Scenario: A claim is linked without losing its relations
+- **WHEN** `edit_note(action="link_observation")` adds a link to a rich unit that already has one
+- **THEN** the unit carries both relations, and its text is unchanged
+
+#### Scenario: A compact target is promoted only with a kind
+- **WHEN** assess or link names a compact unit and passes `kind`
+- **THEN** the unit becomes a rich block of that kind with the same id and text, appended at the
+  end of the body, and every other unit parses exactly as before
+- **AND** without `kind` the operation refuses with `COMPACT_METADATA_REQUIRES_RICH_KIND` and lists
+  the admitted kinds
+
+#### Scenario: An unknown verdict refuses
+- **WHEN** `verdict` is not in the admitted verdict set
+- **THEN** the operation refuses, lists the admitted verdicts, and the page is unchanged
+
+### Requirement: Entity Pages Accept Unit Writes
+
+`observe_memory` SHALL accept every unit operation, including `supersede` and the assess or link operation, on a page whose
+note-type role is `entity`, with the drift guards of a compiled page. A compact `add` SHALL add one line to
+`## Observations` on the server and SHALL NOT require `expected_hash`. Role `compiled` SHALL NOT
+widen. `OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE` SHALL still refuse other roles and any tier that
+is not read-write.
+
+#### Scenario: A compact observation appends to an entity page
+- **WHEN** `add_observation` targets an entity page with a category and text only
+- **THEN** the page gains one compact line at the end of the compact lines in `## Observations`, above canonical child headings
+- **AND** every other line of the page is unchanged
+
+#### Scenario: A rich observation with links appends to an entity page
+- **WHEN** `add_observation` targets an entity page with `kind="correction"`, links and `as_of`
+- **THEN** the write commits and the new unit carries the links and `as_of`
+
+#### Scenario: A read-only entity page still refuses
+- **WHEN** `add_observation` targets an entity page whose access tier is `readonly`
+- **THEN** it refuses with `OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE` and names the tier
+
+### Requirement: Rich-Kind Refusals Name The Governed Kinds
+
+The core kinds pack SHALL include a `correction` kind, a unit that states the current view and
+replaces an earlier unit. `COMPACT_RELATIONS_REQUIRE_RICH_KIND` and
+`COMPACT_METADATA_REQUIRES_RICH_KIND` SHALL list the kind keys that the page's selected registry
+admits, in their remediation. When the caller's `category` is itself an admitted kind key, the
+remediation SHALL say to pass it as `kind`. The list SHALL come from the registry, so a vault kind
+appears and no kind list lives in code.
+
+#### Scenario: Links on a compact unit name the valid kinds
+- **WHEN** `add_observation` sends links with no kind
+- **THEN** it refuses with `COMPACT_RELATIONS_REQUIRE_RICH_KIND`, and the remediation lists the
+  admitted kinds, `correction` among them
+
+#### Scenario: as_of on a compact unit names the valid kinds
+- **WHEN** `add_observation` sends `as_of` with `kind="observation"`, the compact kind
+- **THEN** it refuses with `COMPACT_METADATA_REQUIRES_RICH_KIND`, and the remediation lists the
+  admitted kinds
+
+#### Scenario: A kind passed as a category is named
+- **WHEN** `add_observation` sends `category="correction"`, links and no kind
+- **THEN** the remediation says to pass `kind="correction"`
+
+#### Scenario: A vault kind is listed
+- **WHEN** the vault overlay adds a kind
+- **THEN** the remediation lists that kind too
+
+### Requirement: Units Show Their Supersession
+
+`read_page(part="units")` SHALL return, for each unit, its `as_of` when present, the targets of its
+`supersedes` relations, and `superseded_by`: the ids of the same-page units whose relations
+supersede it. `superseded_by` SHALL be derived from those relations at read time. The `currency`
+dimension of `search_memory` SHALL group same-page unit supersession, with the replaced unit
+marked as replaced by its successor.
+
+#### Scenario: The units part shows both ends of a supersession
+- **WHEN** a page holds unit B with `supersedes: [[#a]]` and unit A with anchor `a`
+- **THEN** `read_page(part="units")` shows A with `superseded_by` holding B's id, and B with
+  `supersedes` holding A's id
+
+#### Scenario: Search finds the superseded claim
+- **WHEN** `search_memory` runs with the filter `unit.dimension` equal to `currency` and a query
+  that names the page's subject
+- **THEN** the result holds the replaced unit, marked replaced by its successor
+
+### Requirement: Only A Claim Item Converts In Place
+
+A list item that holds a markdown relation, only links, a Dataview inline field (`key:: value`) or
+text past its first line SHALL NOT convert to a unit. The span target and the audit facet check
+SHALL share this one rule, and compare by character offset. A span inside such an item SHALL refuse
+with `SUPERSEDE_TARGET_NOT_A_CLAIM`, and the remediation SHALL name the next step.
+
+#### Scenario: A span inside a relation line refuses
+- **WHEN** the span lies inside a markdown relation line such as `- supplies [[Cedar Two]]`, a
+  link-only item or a Dataview inline field
+- **THEN** the operation refuses with `SUPERSEDE_TARGET_NOT_A_CLAIM`, names the line's own edit as
+  the next step, and the page is unchanged
+
+### Requirement: A Profile Page Claim Is Corrected After A Preview
+
+On a page that requires a profile preview, `supersede_observation` and `assess_observation` SHALL
+accept `preview`. The review that the preview returns SHALL commit the same call.
+
+#### Scenario: A profile page claim is corrected after a preview
+- **WHEN** `edit_note(action="supersede_observation")` targets a claim on a profile page without
+  `review`
+- **THEN** it refuses with `PROFILE_PREVIEW_REQUIRED` and the page is unchanged
+- **AND** the same call with `preview` returns a review and writes nothing
+- **AND** the same call with that review commits the replacement unit
+
+### Requirement: Same-Page Supersession Targets Resolve As Recall Does
+
+Every reader of a same-page `supersedes` target SHALL resolve it as recall does. The units part, the
+supersede guard and revision history SHALL therefore read `[[#a]]` and `[[#^a]]` as the same unit.
+
+#### Scenario: A block-reference target names the same unit
+- **WHEN** unit B carries `supersedes: [[#^a]]` and unit A has anchor `a`
+- **THEN** `read_page(part="units")` shows A with `superseded_by` holding B's id
+- **AND** a second supersede of A refuses with `SUPERSEDE_TARGET_ALREADY_SUPERSEDED` and names B
+
+### Requirement: Compact observations lift source citations to the page
+
+A compact `add_observation` SHALL commit as a compact unit when every relation it carries has the registry `sources` behaviour, a core relation that binds the page's `sources` field forward (a vault extension takes its parent's), and a captured-material target. It SHALL add each target to that field without duplicates, and read only registry attributes, never a relation key.
+
+#### Scenario: An observation cites the Source it came from
+
+- **WHEN** an agent adds a compact observation with a `derived_from` link to a saved Source
+- **THEN** the observation commits compact
+- **AND** the page's `sources` frontmatter lists the Source once
+- **AND** the outcome line and the compact reply's `user_summary` name the Source
+
+#### Scenario: A preview states what a commit will cite
+
+- **WHEN** an agent validates the same observation
+- **THEN** the page is unchanged and the outcome line says in the future tense which Source the commit will cite
+
+#### Scenario: A Source the page already cites is not cited twice
+
+- **WHEN** the page's `sources` already lists the same Source as a title link, an aliased path link or a stable memory reference
+- **THEN** the page's `sources` is unchanged
+
+### Requirement: Compact observations refuse other relations whole
+
+A compact `add_observation` that carries any relation outside that rule SHALL refuse as a whole with `COMPACT_RELATIONS_REQUIRE_RICH_KIND`, SHALL name the admitted kinds, and SHALL write nothing. An update of a rich unit that omits `kind` keeps its kind and SHALL refuse the same way, so it never moves the unit's relations to the page.
+
+#### Scenario: A relation that is no source citation still needs a rich kind
+
+- **WHEN** a compact observation carries a relation without the `sources` behaviour, such as a supersession, or one whose core relation does not bind the `sources` field, such as `evidenced_by`
+- **THEN** the call refuses with `COMPACT_RELATIONS_REQUIRE_RICH_KIND`, names the admitted kinds, and writes nothing
+
+#### Scenario: A source link to a note that is no captured material still needs a rich kind
+
+- **WHEN** a compact observation carries a `derived_from` link to an ordinary note
+- **THEN** the call refuses with `COMPACT_RELATIONS_REQUIRE_RICH_KIND` and writes nothing
+
+#### Scenario: A mixed call does not half-apply
+
+- **WHEN** a compact observation carries one liftable and one non-liftable relation
+- **THEN** the call refuses and neither the unit nor the page frontmatter changes
+
+#### Scenario: A rich unit edited without its kind keeps its relations on the unit
+
+- **WHEN** an agent updates a rich unit that carries a `derived_from` relation, sends the relation again and omits `kind`
+- **THEN** the call refuses with `COMPACT_RELATIONS_REQUIRE_RICH_KIND` and the page is unchanged
+
+### Requirement: A Dated Observation With No Kind Keeps Its Dates On A Default Kind
+
+When `add_observation`, or `edit_note(action="edit_observation")` on a compact unit, carries `as_of`
+or `until` and no `kind`, the write SHALL commit a rich unit of the kind that carries the
+`dated_default` trait, and the reply SHALL say so plainly. `verdict` or `check_by`, and an explicit
+compact `kind`, SHALL keep the refusal. No refusal SHALL offer to omit `as_of` or `until`.
+
+#### Scenario: Dates alone land in a dated block and the reply says so
+- **WHEN** `add_observation` sends `as_of` and `until`, a category and a text, and no `kind`
+- **THEN** the page gains one rich `record` unit with the category, the text and both dates within `## Observations`
+- **AND** the server creates that section when the page has none
+- **AND** the reply says "Saved with its dates."
+
+#### Scenario: Dating a compact observation moves it to a dated block
+- **WHEN** `edit_note(action="edit_observation")` sends `as_of` and no `kind` for a compact unit
+- **THEN** the compact line leaves the list and a `record` block with the same anchor appears in `## Observations`
+- **AND** the reply returns the unit id, whose version suffix differs from the id sent
+
+#### Scenario: Only the shipped pack sets the trait
+- **WHEN** a vault kind declares `dated_default`
+- **THEN** a dated observation still lands on `record`
+- **AND** the vault's schema diagnostics carry a warning that the trait was ignored
+
+#### Scenario: Verdict and check_by keep the refusal and keep the date in view
+- **WHEN** `add_observation` sends `verdict` or `check_by` with `as_of` and no `kind`
+- **THEN** it refuses with `COMPACT_METADATA_REQUIRES_RICH_KIND` and the page is unchanged
+- **AND** the remediation offers to pass a kind that takes the fields, or to omit `verdict` and `check_by` so the date lands in a dated block
+- **AND** it does not offer to omit `as_of`
+
+#### Scenario: The busy-write intake leaves a dated call to the page
+- **WHEN** the service is busy and `add_observation` sends `as_of` and no `kind`
+- **THEN** the intake queues the save and the replay writes it in a dated block
+- **AND** the applied save reads "Saved with its date."
+- **AND** a call that sends `verdict` or `check_by` is refused at once and never queued
+
+#### Scenario: Later edits preserve observation boundaries
+- **WHEN** a page has compact lines and a dated block in its observation section followed by a separate section
+- **AND** an owner adds another compact observation and edits, assesses or links the dated block without changing its section boundaries
+- **THEN** the compact lines appear above the dated block and remain independent units
+- **AND** the dated block keeps its heading depth and the next section remains separate
+
+#### Scenario: Nested content needs the shallower placement
+- **WHEN** an add or edit can store the full dated body at the note's end but nesting would cut it short or hide a following section
+- **THEN** the writer uses the end of the note to keep the full body in one dated block
+- **AND** the reply names the placement and an existing anchor survives the move
+
+#### Scenario: An uncertain destination uses the end of the note
+- **WHEN** a date would land inside `## Observations` and a whole dated block fits at the note's end, but the note has multiple observation sections or an uncertain Markdown boundary
+- **THEN** the writer keeps the full dated block at the end of the note and names its placement
+
+#### Scenario: Neither placement can store the whole block
+- **WHEN** neither placement shows the dated block's heading or lets the writer read back its full body
+- **THEN** the operation refuses and the page is unchanged
+
+#### Scenario: A rich kind owns the observation heading
+- **WHEN** the vault resolves `Observations` as a rich kind and the full record fits at the note's end
+- **THEN** the writer places the dated record at the end and names its placement
+- **AND** the custom kind's existing units retain their bodies
+
+#### Scenario: The existing record overlaps a separate section
+- **WHEN** a replacement, move or removal of a nested record would touch a peer or parent heading that CommonMark reads as a separate section inside the record span
+- **THEN** the operation refuses and the page is unchanged
+
+#### Scenario: The existing record heading is hidden
+- **WHEN** CommonMark hides the heading of a nested record that the writer would replace, move or remove
+- **THEN** the operation refuses and the page is unchanged
+
+### Requirement: An Existing Page That Takes No Link Review Ignores The Review Fields
+
+A write to an existing page that takes no relation review, such as an entity page, SHALL accept
+`relation_disposition`, `relation_review_hash`, `relation_review_reason` and `unlinked_reason` as a
+no-op. It SHALL record no decision. A preview SHALL list the fields the caller sent under
+`relation_review_fields`, and a commit SHALL return one warning. A page that needs a review SHALL
+keep its checks.
+
+#### Scenario: An unlinked reason on an entity page is ignored and the reply says so
+- **WHEN** `add_observation` or `edit_note` sends `unlinked_reason` for an entity page
+- **THEN** the write commits and no review decision is recorded
+- **AND** the reply says that no link review applies to the page, so the unlinked reason was not
+  recorded
+
+#### Scenario: A preview names the ignored review fields
+- **WHEN** a preview of an observation on an entity page carries `relation_disposition` and
+  `relation_review_reason`
+- **THEN** the preview lists both under `relation_review_fields.ignored`
+- **AND** a typed tool's preview that sent `unlinked_reason` lists only `unlinked_reason`
+
+#### Scenario: A page that needs review keeps its checks
+- **WHEN** a write to an active compiled page that needs a review carries `reviewed_none` with a
+  hash that does not match the validated transition
+- **THEN** it refuses with `LIFECYCLE_TRANSITION_REVIEW_MISMATCH`
