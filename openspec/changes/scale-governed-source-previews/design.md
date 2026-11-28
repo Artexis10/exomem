@@ -13,7 +13,7 @@ Task 1.1 measures the wall-time split per phase on one thread before 2.2 chooses
 ## Goals / Non-Goals
 
 **Goals:**
-- On Linux, a governed preview over 10,000 referrers in one flat folder completes, with a concurrent Records read staying responsive. Measure it before and after on the same instrument.
+- On Linux, a governed preview completes for 10,000 referrers in the two-folder fixture. Each folder has 10,001 entries. A concurrent Records read stays responsive. Measure the build and paging before and after on the same instrument.
 - On Linux, release container members, extraction parts, and scene frames without rereading the referrer when their held evidence and dependencies are current.
 
 **Non-Goals:**

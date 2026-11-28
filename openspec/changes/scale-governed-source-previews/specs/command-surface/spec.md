@@ -2,11 +2,12 @@
 
 ### Requirement: A governed reclassification preview completes at the load target
 
-A background reclassification preview SHALL run under its own build budget. On Linux, it SHALL complete for 10,000 governed referrers in one folder, resolving their physical names without listing that folder once per referrer. A concurrent Records read SHALL answer within its own request budget while the build runs. An interrupted or cancelled build SHALL return a typed public error and no report facts.
+A background reclassification preview SHALL run under its own build budget. On Linux, it SHALL complete the load fixture below and reuse the settled referrer folder's listing. It SHALL use full lookup if a folder's listing exceeds the cache budget. A concurrent Records read SHALL answer within its request budget. An interrupted or cancelled build SHALL return a typed public error and no report facts.
 
 #### Scenario: A large governed preview completes
 
-- **WHEN** an owner previews a Source with 10,000 governed referrers in one folder on Linux
+- **WHEN** an owner on Linux previews a Source in a vault with two settled, flat folders of 10,001 entries each
+- **AND** one folder contains 10,000 governed referrers and one other Note, and the other contains Sources
 - **THEN** the background build completes and every report page is released within its request budget
 - **AND** a Records read during the build answers within its request budget
 
